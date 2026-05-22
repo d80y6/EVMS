@@ -54,6 +54,27 @@ services:
     volumes:
       - recordings:/recordings
 
+  recorder-service:
+    build:
+      context: .
+      dockerfile: services/recorder/Dockerfile
+    environment:
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+    volumes:
+      - recordings:/recordings
+    depends_on:
+      - db
+
+  ai-worker:
+    build:
+      context: .
+      dockerfile: services/ai-worker/Dockerfile
+    environment:
+      - CAMERA_ID=demo_cam
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      - nats
+
 volumes:
   pgdata:
   recordings:

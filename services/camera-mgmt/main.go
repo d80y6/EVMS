@@ -1,59 +1,110 @@
 package main
 
 import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"sync"
+	"context"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/dam-vms/dam/api/v1"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Camera struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	ID            string    `db:"id"`
+	SiteID        string    `db:"site_id"`
+	Name          string    `db:"name"`
+	Description   string    `db:"description"`
+	ConnectionURL string    `db:"connection_url"`
+	Status        string    `db:"status"`
+	CreatedAt     time.Time `db:"created_at"`
 }
 
-type CameraStore struct {
-	sync.RWMutex
-	cameras map[string]Camera
+type Service struct {
+	damv1.UnimplementedCameraServiceServer
+	db     *sqlx.DB
+	logger *slog.Logger
 }
 
-func (s *CameraStore) Add(c Camera) {
-	s.Lock()
-	defer s.Unlock()
-	s.cameras[c.ID] = c
-}
-
-func (s *CameraStore) List() []Camera {
-	s.RLock()
-	defer s.RUnlock()
-	list := make([]Camera, 0, len(s.cameras))
-	for _, c := range s.cameras {
-		list = append(list, c)
+func NewService(dbURL string, logger *slog.Logger) (*Service, error) {
+	db, err := sqlx.Connect("postgres", dbURL)
+	if err != nil {
+		return nil, err
 	}
-	return list
+	return &Service{db: db, logger: logger}, nil
+}
+
+func (s *Service) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest) (*damv1.ListCamerasResponse, error) {
+	var cameras []Camera
+	err := s.db.SelectContext(ctx, &cameras, "SELECT id, name, status, connection_url FROM cameras")
+	if err != nil {
+		s.logger.Error("Failed to list cameras", "error", err)
+		return nil, err
+	}
+
+	resp := &damv1.ListCamerasResponse{
+		Cameras: make([]*damv1.Camera, len(cameras)),
+	}
+
+	for i, c := range cameras {
+		resp.Cameras[i] = &damv1.Camera{
+			Id:            c.ID,
+			Name:          c.Name,
+			Status:        c.Status,
+			ConnectionUrl: c.ConnectionURL,
+			CreatedAt:     timestamppb.New(c.CreatedAt),
+		}
+	}
+
+	return resp, nil
 }
 
 func main() {
-	store := &CameraStore{
-		cameras: make(map[string]Camera),
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		dbURL = "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"
 	}
 
-	http.HandleFunc("/cameras", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			var c Camera
-			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			store.Add(c)
-			w.WriteHeader(http.StatusCreated)
-			return
+	service, err := NewService(dbURL, logger)
+	if err != nil {
+		logger.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	defer service.db.Close()
+
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		logger.Error("Failed to listen", "error", err)
+		os.Exit(1)
+	}
+
+	grpcServer := grpc.NewServer()
+	damv1.RegisterCameraServiceServer(grpcServer, service)
+	reflection.Register(grpcServer)
+
+	logger.Info("Camera Management Service (gRPC) listening", "address", ":50051")
+
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil {
+			logger.Error("Failed to serve gRPC", "error", err)
+			os.Exit(1)
 		}
+	}()
 
-		json.NewEncoder(w).Encode(store.List())
-	})
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	log.Println("Camera Management Service listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	logger.Info("Shutting down Camera Management Service...")
+	grpcServer.GracefulStop()
 }
