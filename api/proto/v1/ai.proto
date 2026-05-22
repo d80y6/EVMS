@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package dam_v1;
+
+option go_package = "github.com/dam-vms/dam/api/v1;damv1";
+
+import "google/protobuf/timestamp.proto";
+
+service AIService {
+  rpc DetectObjects(DetectObjectsRequest) returns (DetectObjectsResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream AIEvent);
+}
+
+message DetectObjectsRequest {
+  string camera_id = 1;
+  bytes image_data = 2;
+}
+
+message DetectObjectsResponse {
+  repeated AIEvent events = 1;
+}
+
+message AIEvent {
+  string id = 1;
+  string camera_id = 2;
+  google.protobuf.Timestamp event_time = 3;
+  string object_type = 4;
+  float confidence = 5;
+  BoundingBox bounding_box = 6;
+  repeated float embedding = 7;
+}
+
+message BoundingBox {
+  float x1 = 1;
+  float y1 = 2;
+  float x2 = 3;
+  float y2 = 4;
+}
+
+message StreamEventsRequest {
+  repeated string camera_ids = 1;
+  repeated string object_types = 2;
+}

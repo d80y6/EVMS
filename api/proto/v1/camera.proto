@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package dam_v1;
+
+option go_package = "github.com/dam-vms/dam/api/v1;damv1";
+
+import "google/protobuf/timestamp.proto";
+
+service CameraService {
+  rpc ListCameras(ListCamerasRequest) returns (ListCamerasResponse);
+  rpc GetCamera(GetCameraRequest) returns (Camera);
+  rpc CreateCamera(CreateCameraRequest) returns (Camera);
+  rpc UpdateCamera(UpdateCameraRequest) returns (Camera);
+  rpc DeleteCamera(DeleteCameraRequest) returns (DeleteCameraResponse);
+  rpc StreamStatus(StreamStatusRequest) returns (StreamStatusResponse);
+}
+
+message Camera {
+  string id = 1;
+  string site_id = 2;
+  string name = 3;
+  string description = 4;
+  string connection_url = 5;
+  string substream_url = 6;
+  string status = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message ListCamerasRequest {
+  string site_id = 1;
+}
+
+message ListCamerasResponse {
+  repeated Camera cameras = 1;
+}
+
+message GetCameraRequest {
+  string id = 1;
+}
+
+message CreateCameraRequest {
+  string site_id = 1;
+  string name = 2;
+  string connection_url = 3;
+  string substream_url = 4;
+}
+
+message UpdateCameraRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message DeleteCameraRequest {
+  string id = 1;
+}
+
+message DeleteCameraResponse {
+  bool success = 1;
+}
+
+message StreamStatusRequest {
+  string camera_id = 1;
+}
+
+message StreamStatusResponse {
+  string status = 1;
+  double bitrate = 2;
+  double fps = 3;
+}
