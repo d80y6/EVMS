@@ -13,7 +13,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/fsnotify/fsnotify"
 	"github.com/nats-io/nats.go"
 )
@@ -39,24 +41,34 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 	p.cancel = cancel
 
 	recordingsPath := fmt.Sprintf("/recordings/%s", p.CameraID)
-	os.MkdirAll(recordingsPath, 0755)
+	if err := os.MkdirAll(recordingsPath, 0755); err != nil {
+		return fmt.Errorf("failed to create recordings directory: %w", err)
+	}
 
+	// Optimized FFmpeg args for low latency and consistent segmenting
 	args := []string{
 		"-rtsp_transport", "tcp",
+		"-hwaccel", "auto", // Enable hardware acceleration if available
 		"-i", p.URL,
-		"-map", "0:v",
+		// Stream 0: Video copy for recording
+		"-map", "0:v:0",
 		"-c:v:0", "copy",
 		"-f", "segment",
 		"-segment_time", "60",
 		"-segment_format", "mp4",
+		"-segment_atclocktime", "1",
 		"-reset_timestamps", "1",
-		filepath.Join(recordingsPath, "%Y-%m-%d_%H-%M-%S.mp4"),
-		"-map", "0:v",
+		"-strftime", "1",
+		filepath.Join(recordingsPath, "%Y%m%d_%H%M%S.mp4"),
+		// Stream 1: Low-res MJPEG for AI/Preview
+		"-map", "0:v:0",
 		"-s", "640x360",
 		"-f", "mjpeg",
-		"-pix_fmt", "yuvj420p",
+		"-q:v", "5",
+		"-fpsmax", "10",
 		"pipe:3",
-		"-map", "0:v",
+		// Stream 2: H264 for WebRTC
+		"-map", "0:v:0",
 		"-c:v:1", "copy",
 		"-f", "h264",
 		"-bsf:v", "h264_mp4toannexb",
@@ -70,17 +82,25 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 	p.cmd.ExtraFiles = []*os.File{mjpegW, h264W}
 
 	go p.publishMJPEG(mjpegR, fmt.Sprintf("camera.%s.frames", p.CameraID))
-	go p.publishStream(h264R, fmt.Sprintf("camera.%s.h264", p.CameraID))
+	go p.publishH264(h264R, fmt.Sprintf("camera.%s.h264", p.CameraID))
 
-	go p.watchRecordings(ctx, recordingsPath)
+	go p.watchRecordings(childCtx, recordingsPath)
 
-	slog.Info("Starting FFmpeg process", "camera_id", p.CameraID)
-	return p.cmd.Start()
+	common.StreamActive.WithLabelValues(p.CameraID).Set(1)
+
+	slog.Info("Starting FFmpeg process", "camera_id", p.CameraID, "url", p.URL)
+
+	if err := p.cmd.Start(); err != nil {
+		cancel()
+		return err
+	}
+	return nil
 }
 
 func (p *StreamProcessor) watchRecordings(ctx context.Context, path string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		slog.Error("Failed to create fsnotify watcher", "error", err)
 		return
 	}
 	defer watcher.Close()
@@ -90,28 +110,42 @@ func (p *StreamProcessor) watchRecordings(ctx context.Context, path string) {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-watcher.Events:
-			// In production, we'd use IN_CLOSE_WRITE for Linux or a similar robust mechanism.
-			// fsnotify on Linux supports CloseWrite.
-			if (event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write) && filepath.Ext(event.Name) == ".mp4" {
-				// Signal recorder only when file is created/modified.
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			// Use IN_CLOSE_WRITE equivalent (OpWrite or OpCreate then OpWrite)
+			// For simplicity in this demo, we trigger on any mp4 creation/update.
+			// In production, we'd wait for a "finalized" signal or use a .tmp extension.
+			if event.Has(fsnotify.Create) && filepath.Ext(event.Name) == ".mp4" {
 				if p.nc != nil {
 					eventData := map[string]string{
 						"camera_id": p.CameraID,
 						"path":      event.Name,
 					}
 					data, _ := json.Marshal(eventData)
+					// Publish with retry or JetStream for reliability
 					p.nc.Publish(fmt.Sprintf("camera.%s.recordings.new", p.CameraID), data)
 				}
 			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			slog.Error("Watcher error", "error", err)
 		}
 	}
 }
 
 func (p *StreamProcessor) publishMJPEG(r io.Reader, subject string) {
+	defer func() {
+		if rc, ok := r.(io.ReadCloser); ok {
+			rc.Close()
+		}
+	}()
+
 	scanner := bufio.NewScanner(r)
-	// Increase buffer size for high-res JPEG frames
-	scanner.Buffer(make([]byte, 0, 1024*1024), 5*1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	// Split by JPEG SOI/EOI
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -131,22 +165,49 @@ func (p *StreamProcessor) publishMJPEG(r io.Reader, subject string) {
 
 	for scanner.Scan() {
 		if p.nc != nil {
-			p.nc.Publish(subject, scanner.Bytes())
+			if err := p.nc.Publish(subject, scanner.Bytes()); err != nil {
+				slog.Error("Failed to publish MJPEG", "error", err)
+			}
+			common.FramesProcessed.WithLabelValues(p.CameraID, "mjpeg").Inc()
 		}
 	}
 }
 
-func (p *StreamProcessor) publishStream(r io.Reader, subject string) {
-	buf := make([]byte, 1024*1024)
-	for {
-		n, err := r.Read(buf)
-		if err != nil {
-			return
+func (p *StreamProcessor) publishH264(r io.Reader, subject string) {
+	defer func() {
+		if rc, ok := r.(io.ReadCloser); ok {
+			rc.Close()
 		}
+	}()
+
+	// Robust H264 NAL unit fragmentation for NATS
+	// We look for Annex B start codes (0x000001 or 0x00000001)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+
+		// Look for next start code
+		if i := bytes.Index(data, []byte{0x00, 0x00, 0x01}); i >= 0 {
+			// Find subsequent start code to determine NAL unit boundary
+			if j := bytes.Index(data[i+3:], []byte{0x00, 0x00, 0x01}); j >= 0 {
+				return i + j + 3, data[i : i+j+3], nil
+			}
+		}
+
+		if atEOF {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+
+	for scanner.Scan() {
 		if p.nc != nil {
-			// For H264, this is still a bit naive but better than nothing for now.
-			// Ideally we would parse NAL units.
-			p.nc.Publish(subject, buf[:n])
+			p.nc.Publish(subject, scanner.Bytes())
+			common.FramesProcessed.WithLabelValues(p.CameraID, "h264").Inc()
 		}
 	}
 }
@@ -159,20 +220,34 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	common.StartMetricsServer(":2112")
+
 	cameraID := os.Getenv("CAMERA_ID")
 	rtspURL := os.Getenv("RTSP_URL")
 	natsURL := os.Getenv("NATS_URL")
 
+	if cameraID == "" || rtspURL == "" {
+		slog.Error("CAMERA_ID and RTSP_URL must be set")
+		os.Exit(1)
+	}
+
 	var nc *nats.Conn
 	var err error
 	if natsURL != "" {
-		nc, err = nats.Connect(natsURL)
+		for i := 0; i < 5; i++ {
+			nc, err = nats.Connect(natsURL)
+			if err == nil {
+				break
+			}
+			slog.Warn("Retrying NATS connection...", "error", err, "attempt", i+1)
+			time.Sleep(2 * time.Second)
+		}
 		if err != nil {
 			slog.Error("Failed to connect to NATS", "error", err)
-		} else {
-			defer nc.Close()
-			slog.Info("Connected to NATS", "url", natsURL)
+			os.Exit(1)
 		}
+		defer nc.Close()
+		slog.Info("Connected to NATS", "url", natsURL)
 	}
 
 	processor := NewStreamProcessor(cameraID, rtspURL, nc)

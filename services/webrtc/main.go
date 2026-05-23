@@ -30,9 +30,6 @@ func main() {
 
 	// Start metrics and health check
 	common.StartMetricsServer(":2112")
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -50,7 +47,7 @@ func main() {
 		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	}
 
-	http.HandleFunc("/webrtc/offer", func(w http.ResponseWriter, r *http.Request) {
+	offerHandler := func(w http.ResponseWriter, r *http.Request) {
 		cameraID := r.URL.Query().Get("camera_id")
 		if cameraID == "" {
 			http.Error(w, "camera_id required", http.StatusBadRequest)
@@ -69,7 +66,7 @@ func main() {
 			return
 		}
 
-		// Use H264 for WebRTC (matching ingest output 3)
+		// Use H264 for WebRTC (matching ingest output)
 		videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "pion")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -98,14 +95,33 @@ func main() {
 		}
 
 		// Connect NATS H264 stream to WebRTC track
-		nc.Subscribe(fmt.Sprintf("camera.%s.h264", cameraID), func(msg *nats.Msg) {
+		sub, err := nc.Subscribe(fmt.Sprintf("camera.%s.h264", cameraID), func(msg *nats.Msg) {
 			videoTrack.WriteSample(media.Sample{Data: msg.Data})
+			common.FramesProcessed.WithLabelValues(cameraID, "webrtc").Inc()
+		})
+		if err != nil {
+			logger.Error("Failed to subscribe to camera stream", "camera_id", cameraID, "error", err)
+		}
+
+		// Cleanup on peer connection close
+		peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+			if state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateFailed {
+				sub.Unsubscribe()
+				peerConnection.Close()
+			}
 		})
 
 		json.NewEncoder(w).Encode(answer)
+	}
+
+	// Wrap with JWT Authentication for enterprise security
+	http.HandleFunc("/webrtc/offer", common.JWTAuthMiddleware(offerHandler))
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	})
 
-	logger.Info("WebRTC Relay Service listening", "address", ":8082")
+	logger.Info("Secured WebRTC Relay Service listening", "address", ":8082")
 	if err := http.ListenAndServe(":8082", nil); err != nil {
 		logger.Error("WebRTC service failed", "error", err)
 		os.Exit(1)
