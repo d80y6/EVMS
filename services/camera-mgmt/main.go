@@ -26,6 +26,7 @@ type Camera struct {
 	Name          string    `db:"name"`
 	Description   string    `db:"description"`
 	ConnectionURL string    `db:"connection_url"`
+	SubstreamURL  string    `db:"substream_url"`
 	Status        string    `db:"status"`
 	CreatedAt     time.Time `db:"created_at"`
 }
@@ -46,10 +47,17 @@ func NewService(dbURL string, logger *slog.Logger) (*Service, error) {
 
 func (s *Service) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest) (*damv1.ListCamerasResponse, error) {
 	var cameras []Camera
-	err := s.db.SelectContext(ctx, &cameras, "SELECT id, name, status, connection_url FROM cameras")
+	var err error
+
+	if req.SiteId != "" {
+		err = s.db.SelectContext(ctx, &cameras, "SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE site_id = $1", req.SiteId)
+	} else {
+		err = s.db.SelectContext(ctx, &cameras, "SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras")
+	}
+
 	if err != nil {
 		s.logger.Error("Failed to list cameras", "error", err)
-		return nil, status.Errorf(codes.Internal, "Internal error")
+		return nil, status.Errorf(codes.Internal, "failed to list cameras: %v", err)
 	}
 
 	resp := &damv1.ListCamerasResponse{
@@ -57,35 +65,81 @@ func (s *Service) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest
 	}
 
 	for i, c := range cameras {
-		resp.Cameras[i] = &damv1.Camera{
-			Id:            c.ID,
-			Name:          c.Name,
-			Status:        c.Status,
-			ConnectionUrl: c.ConnectionURL,
-			CreatedAt:     timestamppb.New(c.CreatedAt),
-		}
+		resp.Cameras[i] = s.mapCameraToProto(c)
 	}
 
 	return resp, nil
 }
 
+func (s *Service) GetCamera(ctx context.Context, req *damv1.GetCameraRequest) (*damv1.Camera, error) {
+	var c Camera
+	err := s.db.GetContext(ctx, &c, "SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE id = $1", req.Id)
+	if err != nil {
+		s.logger.Error("Failed to get camera", "error", err, "id", req.Id)
+		return nil, status.Errorf(codes.NotFound, "camera not found")
+	}
+	return s.mapCameraToProto(c), nil
+}
+
 func (s *Service) CreateCamera(ctx context.Context, req *damv1.CreateCameraRequest) (*damv1.Camera, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, "INSERT INTO cameras (site_id, name, connection_url) VALUES ($1, $2, $3) RETURNING id",
-		req.SiteId, req.Name, req.ConnectionUrl).Scan(&id)
+	err := s.db.QueryRowContext(ctx, "INSERT INTO cameras (site_id, name, connection_url, substream_url) VALUES ($1, $2, $3, $4) RETURNING id",
+		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl).Scan(&id)
 	if err != nil {
 		s.logger.Error("Failed to create camera", "error", err)
-		return nil, status.Errorf(codes.Internal, "Internal error")
+		return nil, status.Errorf(codes.Internal, "failed to create camera: %v", err)
 	}
 
-	return &damv1.Camera{
-		Id:            id,
-		SiteId:        req.SiteId,
-		Name:          req.Name,
-		ConnectionUrl: req.ConnectionUrl,
-		Status:        "offline",
-		CreatedAt:     timestamppb.Now(),
+	return s.GetCamera(ctx, &damv1.GetCameraRequest{Id: id})
+}
+
+func (s *Service) UpdateCamera(ctx context.Context, req *damv1.UpdateCameraRequest) (*damv1.Camera, error) {
+	_, err := s.db.ExecContext(ctx, "UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, updated_at = NOW() WHERE id = $5",
+		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.Id)
+	if err != nil {
+		s.logger.Error("Failed to update camera", "error", err, "id", req.Id)
+		return nil, status.Errorf(codes.Internal, "failed to update camera: %v", err)
+	}
+
+	return s.GetCamera(ctx, &damv1.GetCameraRequest{Id: req.Id})
+}
+
+func (s *Service) DeleteCamera(ctx context.Context, req *damv1.DeleteCameraRequest) (*damv1.DeleteCameraResponse, error) {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1", req.Id)
+	if err != nil {
+		s.logger.Error("Failed to delete camera", "error", err, "id", req.Id)
+		return nil, status.Errorf(codes.Internal, "failed to delete camera: %v", err)
+	}
+	return &damv1.DeleteCameraResponse{Success: true}, nil
+}
+
+func (s *Service) StreamStatus(ctx context.Context, req *damv1.StreamStatusRequest) (*damv1.StreamStatusResponse, error) {
+	// In a real system, we might query a cache or NATS for real-time metrics.
+	// For now, we fetch the basic status from the DB.
+	var statusStr string
+	err := s.db.GetContext(ctx, &statusStr, "SELECT status FROM cameras WHERE id = $1", req.CameraId)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "camera not found")
+	}
+
+	return &damv1.StreamStatusResponse{
+		Status:  statusStr,
+		Bitrate: 2500.0, // Mocked for enterprise foundation
+		Fps:     30.0,
 	}, nil
+}
+
+func (s *Service) mapCameraToProto(c Camera) *damv1.Camera {
+	return &damv1.Camera{
+		Id:            c.ID,
+		SiteId:        c.SiteID,
+		Name:          c.Name,
+		Description:   c.Description,
+		ConnectionUrl: c.ConnectionURL,
+		SubstreamUrl:  c.SubstreamURL,
+		Status:        c.Status,
+		CreatedAt:     timestamppb.New(c.CreatedAt),
+	}
 }
 
 func main() {

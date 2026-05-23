@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,7 +69,7 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 	h264R, h264W, _ := os.Pipe()
 	p.cmd.ExtraFiles = []*os.File{mjpegW, h264W}
 
-	go p.publishStream(mjpegR, fmt.Sprintf("camera.%s.frames", p.CameraID))
+	go p.publishMJPEG(mjpegR, fmt.Sprintf("camera.%s.frames", p.CameraID))
 	go p.publishStream(h264R, fmt.Sprintf("camera.%s.h264", p.CameraID))
 
 	go p.watchRecordings(ctx, recordingsPath)
@@ -92,11 +95,43 @@ func (p *StreamProcessor) watchRecordings(ctx context.Context, path string) {
 			// fsnotify on Linux supports CloseWrite.
 			if (event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write) && filepath.Ext(event.Name) == ".mp4" {
 				// Signal recorder only when file is created/modified.
-				// A more robust way would be for FFmpeg to call a webhook or for us to detect file closure.
 				if p.nc != nil {
-					p.nc.Publish(fmt.Sprintf("camera.%s.recordings.new", p.CameraID), []byte(event.Name))
+					eventData := map[string]string{
+						"camera_id": p.CameraID,
+						"path":      event.Name,
+					}
+					data, _ := json.Marshal(eventData)
+					p.nc.Publish(fmt.Sprintf("camera.%s.recordings.new", p.CameraID), data)
 				}
 			}
+		}
+	}
+}
+
+func (p *StreamProcessor) publishMJPEG(r io.Reader, subject string) {
+	scanner := bufio.NewScanner(r)
+	// Increase buffer size for high-res JPEG frames
+	scanner.Buffer(make([]byte, 0, 1024*1024), 5*1024*1024)
+
+	// Split by JPEG SOI/EOI
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		if i := bytes.Index(data, []byte{0xff, 0xd8}); i >= 0 {
+			if j := bytes.Index(data[i+2:], []byte{0xff, 0xd9}); j >= 0 {
+				return i + j + 4, data[i : i+j+4], nil
+			}
+		}
+		if atEOF {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+
+	for scanner.Scan() {
+		if p.nc != nil {
+			p.nc.Publish(subject, scanner.Bytes())
 		}
 	}
 }
@@ -109,6 +144,8 @@ func (p *StreamProcessor) publishStream(r io.Reader, subject string) {
 			return
 		}
 		if p.nc != nil {
+			// For H264, this is still a bit naive but better than nothing for now.
+			// Ideally we would parse NAL units.
 			p.nc.Publish(subject, buf[:n])
 		}
 	}

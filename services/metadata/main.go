@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/jmoiron/sqlx"
@@ -47,6 +48,14 @@ func main() {
 			return
 		}
 
+		// Subject format: camera.<id>.events
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) < 2 {
+			logger.Warn("Invalid NATS subject for AI event", "subject", msg.Subject)
+			return
+		}
+		cameraID := parts[1]
+
 		for _, d := range detections {
 			bbox, _ := json.Marshal(d.BBox)
 
@@ -54,11 +63,11 @@ func main() {
 				embeddingJSON, _ := json.Marshal(d.Embedding)
 				_, err = db.Exec(`INSERT INTO ai_events (camera_id, object_type, confidence, bounding_box, embedding, event_time)
                                   VALUES ($1, $2, $3, $4, $5, NOW())`,
-					msg.Subject, d.Label, d.Confidence, string(bbox), string(embeddingJSON))
+					cameraID, d.Label, d.Confidence, string(bbox), string(embeddingJSON))
 			} else {
 				_, err = db.Exec(`INSERT INTO ai_events (camera_id, object_type, confidence, bounding_box, event_time)
                                   VALUES ($1, $2, $3, $4, NOW())`,
-					msg.Subject, d.Label, d.Confidence, string(bbox))
+					cameraID, d.Label, d.Confidence, string(bbox))
 			}
 
 			if err != nil {
