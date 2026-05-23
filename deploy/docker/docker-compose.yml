@@ -23,20 +23,35 @@ services:
       - "4222:4222"
       - "8222:8222"
 
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
   auth-service:
     build:
-      context: .
+      context: ../../
       dockerfile: services/auth/Dockerfile
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
       - REDIS_URL=redis:6379
+      - JWT_SECRET=${JWT_SECRET:-secret}
     depends_on:
       - db
       - redis
 
   camera-mgmt:
     build:
-      context: .
+      context: ../../
       dockerfile: services/camera-mgmt/Dockerfile
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
@@ -46,32 +61,88 @@ services:
 
   ingest-service:
     build:
-      context: .
+      context: ../../
       dockerfile: services/ingest/Dockerfile
     environment:
       - CAMERA_ID=demo_cam
       - RTSP_URL=${DEMO_RTSP_URL:-rtsp://localhost:8554/live}
+      - NATS_URL=nats://nats:4222
     volumes:
       - recordings:/recordings
+    depends_on:
+      - nats
 
   recorder-service:
     build:
-      context: .
+      context: ../../
       dockerfile: services/recorder/Dockerfile
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+      - NATS_URL=nats://nats:4222
     volumes:
       - recordings:/recordings
     depends_on:
       - db
+      - nats
 
   ai-worker:
     build:
-      context: .
+      context: ../../
       dockerfile: services/ai-worker/Dockerfile
     environment:
       - CAMERA_ID=demo_cam
       - NATS_URL=nats://nats:4222
+    depends_on:
+      - nats
+
+  metadata-service:
+    build:
+      context: ../../
+      dockerfile: services/metadata/Dockerfile
+    environment:
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      - db
+      - nats
+
+  event-proc:
+    build:
+      context: ../../
+      dockerfile: services/event-proc/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      - nats
+
+  notification-service:
+    build:
+      context: ../../
+      dockerfile: services/notification/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      - nats
+
+  playback-service:
+    build:
+      context: ../../
+      dockerfile: services/playback/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    volumes:
+      - recordings:/recordings
+    ports:
+      - "8086:8086"
+
+  webrtc-service:
+    build:
+      context: ../../
+      dockerfile: services/webrtc/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    ports:
+      - "8082:8082"
     depends_on:
       - nats
 

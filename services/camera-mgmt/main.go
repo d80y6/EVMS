@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/api/v1"
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -46,7 +49,7 @@ func (s *Service) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest
 	err := s.db.SelectContext(ctx, &cameras, "SELECT id, name, status, connection_url FROM cameras")
 	if err != nil {
 		s.logger.Error("Failed to list cameras", "error", err)
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "Internal error")
 	}
 
 	resp := &damv1.ListCamerasResponse{
@@ -66,9 +69,30 @@ func (s *Service) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest
 	return resp, nil
 }
 
+func (s *Service) CreateCamera(ctx context.Context, req *damv1.CreateCameraRequest) (*damv1.Camera, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, "INSERT INTO cameras (site_id, name, connection_url) VALUES ($1, $2, $3) RETURNING id",
+		req.SiteId, req.Name, req.ConnectionUrl).Scan(&id)
+	if err != nil {
+		s.logger.Error("Failed to create camera", "error", err)
+		return nil, status.Errorf(codes.Internal, "Internal error")
+	}
+
+	return &damv1.Camera{
+		Id:            id,
+		SiteId:        req.SiteId,
+		Name:          req.Name,
+		ConnectionUrl: req.ConnectionUrl,
+		Status:        "offline",
+		CreatedAt:     timestamppb.Now(),
+	}, nil
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.StartMetricsServer(":2112")
 
 	dbURL := os.Getenv("DB_URL")
 	if dbURL == "" {

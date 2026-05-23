@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/nats-io/nats.go"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
@@ -27,6 +28,12 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	// Start metrics and health check
+	common.StartMetricsServer(":2112")
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		natsURL = "nats://nats:4222"
@@ -39,25 +46,20 @@ func main() {
 	}
 	defer nc.Close()
 
-	// WebRTC configuration
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
+		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	}
 
 	http.HandleFunc("/webrtc/offer", func(w http.ResponseWriter, r *http.Request) {
 		cameraID := r.URL.Query().Get("camera_id")
 		if cameraID == "" {
-			http.Error(w, "camera_id is required", http.StatusBadRequest)
+			http.Error(w, "camera_id required", http.StatusBadRequest)
 			return
 		}
 
 		var offer webrtc.SessionDescription
 		if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid offer", http.StatusBadRequest)
 			return
 		}
 
@@ -67,60 +69,43 @@ func main() {
 			return
 		}
 
-		// Create a video track
+		// Use H264 for WebRTC (matching ingest output 3)
 		videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "pion")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		_, err = peerConnection.AddTrack(videoTrack)
-		if err != nil {
+		if _, err = peerConnection.AddTrack(videoTrack); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Set the remote SessionDescription
-		err = peerConnection.SetRemoteDescription(offer)
-		if err != nil {
+		if err = peerConnection.SetRemoteDescription(offer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Create an answer
 		answer, err := peerConnection.CreateAnswer(nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Sets the LocalDescription, and start our UDP listeners
-		err = peerConnection.SetLocalDescription(answer)
-		if err != nil {
+		if err = peerConnection.SetLocalDescription(answer); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Store session
-		sessionsMu.Lock()
-		sessions[cameraID] = &StreamSession{
-			peerConnection: peerConnection,
-			videoTrack:     videoTrack,
-		}
-		sessionsMu.Unlock()
-
-		// Subscribe to NATS frames for this camera
-		// NOTE: This implementation assumes the ingest service provides H264 via NATS
-		// In our current setup, ingest provides MJPEG. For WebRTC, we should ideally
-		// have a dedicated H264 stream or transcode.
-		nc.Subscribe(fmt.Sprintf("camera.%s.frames", cameraID), func(msg *nats.Msg) {
+		// Connect NATS H264 stream to WebRTC track
+		nc.Subscribe(fmt.Sprintf("camera.%s.h264", cameraID), func(msg *nats.Msg) {
 			videoTrack.WriteSample(media.Sample{Data: msg.Data})
 		})
 
 		json.NewEncoder(w).Encode(answer)
 	})
 
-	logger.Info("WebRTC Signaling Service listening", "address", ":8082")
+	logger.Info("WebRTC Relay Service listening", "address", ":8082")
 	if err := http.ListenAndServe(":8082", nil); err != nil {
 		logger.Error("WebRTC service failed", "error", err)
 		os.Exit(1)

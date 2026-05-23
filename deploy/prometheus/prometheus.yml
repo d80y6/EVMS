@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'dam-vms'
+    static_configs:
+      - targets:
+        - 'camera-mgmt:2112'
+        # - 'auth-service:2112'
+        # - 'ingest-service:2112'
+        # - 'recorder-service:2112'

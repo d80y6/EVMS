@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/nats-io/nats.go"
 )
 
@@ -35,83 +35,82 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 	childCtx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 
+	recordingsPath := fmt.Sprintf("/recordings/%s", p.CameraID)
+	os.MkdirAll(recordingsPath, 0755)
+
 	args := []string{
 		"-rtsp_transport", "tcp",
 		"-i", p.URL,
 		"-map", "0:v",
-		"-c:v", "copy",
+		"-c:v:0", "copy",
 		"-f", "segment",
 		"-segment_time", "60",
 		"-segment_format", "mp4",
 		"-reset_timestamps", "1",
-		fmt.Sprintf("/recordings/%s/%%Y-%%m-%%d_%%H-%%M-%%S.mp4", p.CameraID),
+		filepath.Join(recordingsPath, "%Y-%m-%d_%H-%M-%S.mp4"),
 		"-map", "0:v",
 		"-s", "640x360",
 		"-f", "mjpeg",
 		"-pix_fmt", "yuvj420p",
-		"pipe:1",
+		"pipe:3",
+		"-map", "0:v",
+		"-c:v:1", "copy",
+		"-f", "h264",
+		"-bsf:v", "h264_mp4toannexb",
+		"pipe:4",
 	}
 
 	p.cmd = exec.CommandContext(childCtx, "ffmpeg", args...)
-	os.MkdirAll(fmt.Sprintf("/recordings/%s", p.CameraID), 0755)
 
-	stdout, err := p.cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
+	mjpegR, mjpegW, _ := os.Pipe()
+	h264R, h264W, _ := os.Pipe()
+	p.cmd.ExtraFiles = []*os.File{mjpegW, h264W}
 
-	go p.publishFrames(stdout)
+	go p.publishStream(mjpegR, fmt.Sprintf("camera.%s.frames", p.CameraID))
+	go p.publishStream(h264R, fmt.Sprintf("camera.%s.h264", p.CameraID))
+
+	go p.watchRecordings(ctx, recordingsPath)
 
 	slog.Info("Starting FFmpeg process", "camera_id", p.CameraID)
 	return p.cmd.Start()
 }
 
-// publishFrames scans the MJPEG stream for SOI (0xFFD8) and EOI (0xFFD9) markers
-func (p *StreamProcessor) publishFrames(r io.Reader) {
-	scanner := bufio.NewScanner(r)
+func (p *StreamProcessor) watchRecordings(ctx context.Context, path string) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return
+	}
+	defer watcher.Close()
+	watcher.Add(path)
 
-	// MJPEG scanner split function
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-
-		// Find SOI
-		start := bytes.Index(data, []byte{0xFF, 0xD8})
-		if start == -1 {
-			return len(data), nil, nil
-		}
-
-		// Find EOI after SOI
-		end := bytes.Index(data[start+2:], []byte{0xFF, 0xD9})
-		if end == -1 {
-			if atEOF {
-				return len(data), data[start:], nil
-			}
-			return start, nil, nil
-		}
-
-		totalEnd := start + 2 + end + 2
-		return totalEnd, data[start:totalEnd], nil
-	})
-
-	// Use a large buffer for frames
-	const maxFrameSize = 1024 * 1024 // 1MB
-	buf := make([]byte, maxFrameSize)
-	scanner.Buffer(buf, maxFrameSize)
-
-	subject := fmt.Sprintf("camera.%s.frames", p.CameraID)
-	for scanner.Scan() {
-		frame := scanner.Bytes()
-		if p.nc != nil {
-			if err := p.nc.Publish(subject, frame); err != nil {
-				slog.Error("Failed to publish frame", "error", err)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-watcher.Events:
+			// In production, we'd use IN_CLOSE_WRITE for Linux or a similar robust mechanism.
+			// fsnotify on Linux supports CloseWrite.
+			if (event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write) && filepath.Ext(event.Name) == ".mp4" {
+				// Signal recorder only when file is created/modified.
+				// A more robust way would be for FFmpeg to call a webhook or for us to detect file closure.
+				if p.nc != nil {
+					p.nc.Publish(fmt.Sprintf("camera.%s.recordings.new", p.CameraID), []byte(event.Name))
+				}
 			}
 		}
 	}
+}
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("Frame scanner error", "error", err)
+func (p *StreamProcessor) publishStream(r io.Reader, subject string) {
+	buf := make([]byte, 1024*1024)
+	for {
+		n, err := r.Read(buf)
+		if err != nil {
+			return
+		}
+		if p.nc != nil {
+			p.nc.Publish(subject, buf[:n])
+		}
 	}
 }
 
