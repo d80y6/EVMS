@@ -7,6 +7,11 @@ services:
       POSTGRES_DB: ${DB_NAME:-dam_vms}
       POSTGRES_USER: ${DB_USER:-dam_admin}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-dam_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dam_admin} -d ${DB_NAME:-dam_vms}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     ports:
       - "5432:5432"
     volumes:
@@ -14,11 +19,21 @@ services:
 
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     ports:
       - "6379:6379"
 
   nats:
     image: nats:2.9-alpine
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -46,8 +61,10 @@ services:
       - REDIS_URL=redis:6379
       - JWT_SECRET=${JWT_SECRET:-secret}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   camera-mgmt:
     build:
@@ -56,8 +73,10 @@ services:
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
     depends_on:
-      - db
-      - nats
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
 
   ingest-service:
     build:
@@ -70,7 +89,8 @@ services:
     volumes:
       - recordings:/recordings
     depends_on:
-      - nats
+      nats:
+        condition: service_healthy
 
   recorder-service:
     build:
@@ -82,8 +102,10 @@ services:
     volumes:
       - recordings:/recordings
     depends_on:
-      - db
-      - nats
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
 
   ai-worker:
     build:
@@ -92,48 +114,10 @@ services:
     environment:
       - CAMERA_ID=demo_cam
       - NATS_URL=nats://nats:4222
+      - AI_SAMPLING_RATE=5
     depends_on:
-      - nats
-
-  metadata-service:
-    build:
-      context: ../../
-      dockerfile: services/metadata/Dockerfile
-    environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      - db
-      - nats
-
-  event-proc:
-    build:
-      context: ../../
-      dockerfile: services/event-proc/Dockerfile
-    environment:
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      - nats
-
-  notification-service:
-    build:
-      context: ../../
-      dockerfile: services/notification/Dockerfile
-    environment:
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      - nats
-
-  playback-service:
-    build:
-      context: ../../
-      dockerfile: services/playback/Dockerfile
-    environment:
-      - NATS_URL=nats://nats:4222
-    volumes:
-      - recordings:/recordings
-    ports:
-      - "8086:8086"
+      nats:
+        condition: service_healthy
 
   webrtc-service:
     build:
@@ -141,10 +125,23 @@ services:
       dockerfile: services/webrtc/Dockerfile
     environment:
       - NATS_URL=nats://nats:4222
+      - JWT_SECRET=${JWT_SECRET:-secret}
     ports:
       - "8082:8082"
     depends_on:
-      - nats
+      nats:
+        condition: service_healthy
+
+  playback-service:
+    build:
+      context: ../../
+      dockerfile: services/playback/Dockerfile
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-secret}
+    volumes:
+      - recordings:/recordings
+    ports:
+      - "8086:8086"
 
 volumes:
   pgdata:

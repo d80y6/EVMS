@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-service
+  namespace: dam-vms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest-service
+  template:
+    metadata:
+      labels:
+        app: ingest-service
+    spec:
+      containers:
+      - name: ingest
+        image: damvms/ingest:latest
+        env:
+        - name: CAMERA_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['camera-id']
+        - name: NATS_URL
+          value: "nats://nats:4222"
+        volumeMounts:
+        - name: recordings
+          mountPath: /recordings
+      volumes:
+      - name: recordings
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webrtc-service
+  namespace: dam-vms
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: webrtc-service
+  template:
+    metadata:
+      labels:
+        app: webrtc-service
+    spec:
+      containers:
+      - name: webrtc
+        image: damvms/webrtc:latest
+        ports:
+        - containerPort: 8082
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+        env:
+        - name: NATS_URL
+          value: "nats://nats:4222"
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: vms-secrets
+              key: jwt-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-service
+  namespace: dam-vms
+spec:
+  selector:
+    app: webrtc-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8082
+  type: ClusterIP
