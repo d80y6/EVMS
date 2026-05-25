@@ -66,36 +66,6 @@ services:
       timeout: 3s
       retries: 5
 
-  webrtc-relay:
-    build:
-      context: .
-      dockerfile: services/webrtc-relay/Dockerfile
-    environment:
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      nats:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  ai-worker:
-    build:
-      context: .
-      dockerfile: services/ai-worker/Dockerfile
-    environment:
-      - NATS_URL=nats://nats:4222
-    depends_on:
-      nats:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   event-proc:
     build:
       context: .
@@ -107,24 +77,6 @@ services:
       postgres:
         condition: service_healthy
       nats:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  api-gateway:
-    build:
-      context: .
-      dockerfile: services/api-gateway/Dockerfile
-    environment:
-      - DB_URL=postgres://vms_user:password@postgres:5432/vms_db?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
