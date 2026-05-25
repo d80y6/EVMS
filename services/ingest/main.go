@@ -265,7 +265,6 @@ func main() {
 	if err := processor.Start(ctx); err != nil {
 		slog.Error("Failed to start processor", "error", err)
 		os.Exit(1)
-	}
 
 	go func() {
 		if err := processor.Wait(); err != nil {
