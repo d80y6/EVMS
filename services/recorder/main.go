@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
-	"github.com/dam-vms/dam/services/recorder/internal/health"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
@@ -136,12 +134,6 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context, retentionDays int) {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", health.Handler("recorder"))
-		http.ListenAndServe(":8080", mux)
-	}()
 
 	common.StartMetricsServer(":2112")
 

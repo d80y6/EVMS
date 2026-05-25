@@ -4,12 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/dam-vms/dam/services/event-proc/internal/health"
 	"github.com/nats-io/nats.go"
 )
 
@@ -22,12 +20,6 @@ type Detection struct {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", health.Handler("event-proc"))
-		http.ListenAndServe(":8080", mux)
-	}()
 
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {

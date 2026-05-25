@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
-	"github.com/dam-vms/dam/services/ingest/internal/health"
 	"github.com/fsnotify/fsnotify"
 	"github.com/nats-io/nats.go"
 )
@@ -222,12 +220,6 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", health.Handler("ingest"))
-		http.ListenAndServe(":8080", mux)
-	}()
-
 	common.StartMetricsServer(":2112")
 
 	cameraID := os.Getenv("CAMERA_ID")
@@ -265,6 +257,7 @@ func main() {
 	if err := processor.Start(ctx); err != nil {
 		slog.Error("Failed to start processor", "error", err)
 		os.Exit(1)
+	}
 
 	go func() {
 		if err := processor.Wait(); err != nil {

@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/dam-vms/dam/services/auth/internal/health"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -30,12 +29,6 @@ type User struct {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", health.Handler("auth"))
-		http.ListenAndServe(":8080", mux)
-	}()
 
 	jwtKey := []byte(os.Getenv("JWT_SECRET"))
 	if len(jwtKey) == 0 {
