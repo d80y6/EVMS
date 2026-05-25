@@ -291,15 +291,36 @@ Superseded by: NONE
 
 ## Section 4: Warning Flags (Self-Audit)
 
+### Gate Condition Audit
+
+| Milestone | Gate Automatable? | Blocking Risk | What's Missing |
+| :--- | :--- | :---: | :--- |
+| **M-01** | YES | High | CI health-check script to aggregate `docker-compose` health statuses. |
+| **M-02** | PARTIAL | **Critical** | RTSP Simulator (e.g., MediaMTX); NATS sub benchmark tool. |
+| **M-03** | PARTIAL | High | Integration test script to verify DB record matching specific disk file hash. |
+| **M-04** | PARTIAL | Medium | Playwright-based frontend visual regression/latency script. |
+| **M-05** | NO | Medium | Implementation of PostgreSQL RLS policies; automated security test suite. |
+| **M-06** | PARTIAL | Medium | Automated auth test suite for 401/403 validation. |
+| **M-07** | PARTIAL | Low | Scripted file age simulator (moving system clock or `touch`ing files back in time). |
+| **M-08** | PARTIAL | Medium | E2E harness with synthetic video for deterministic object detection. |
+| **M-09** | PARTIAL | Low | JSON dashboard definitions; Grafana API validation script. |
+| **M-10** | NO | High | Production-grade K8s manifests; Chaos mesh or custom 'pod kill' script. |
+| **M-11** | NO | Medium | Full Playwright E2E scenario suite. |
+| **M-12** | NO | Low | k6 load scripts for RTSP/WebRTC/NATS; high-scale load simulator. |
+
+### Audit Questions
+
 1. **Which milestones have gate conditions that cannot currently be automated? List them and explain why.**
-   - MILESTONE-09: Observability baseline. While API checks can verify data existence, the "visual correctness" and "usefulness" of a dashboard often require human verification of the layout and alert thresholds.
+   - MILESTONE-05 (Multi-tenancy): Missing the actual RLS implementation in the DB schema to test against.
+   - MILESTONE-10 (HA): Missing the Kubernetes infrastructure and manifests required to run pod-level failover tests.
+   - MILESTONE-11 (E2E) & MILESTONE-12 (Load): These rely on the completion of all preceding manual/partial gates and require complex orchestration not present in the current environment.
 
 2. **Which ADRs have decisions that are underspecified — where a reasonable engineer could make two different implementation choices and both would satisfy the ADR?**
    - ADR-010 (HA and failover model): Does not specify the *mechanism* for leader election (e.g., NATS KV vs. K8s Leases vs. custom sidecar). Both would satisfy the "Active-Passive" requirement but have different operational profiles.
    - ADR-008 (Kubernetes topology): Does not specify the CNI or storage provisioner requirements, which are critical for the Recorder service's performance.
 
 3. **Which dependencies between milestones create the highest risk of blocking the entire project?**
-   - The dependency of MILESTONE-04 (Stream distribution) and MILESTONE-08 (AI) on MILESTONE-02 (Ingest). If the ingest primitive's NATS publishing performance is insufficient, all downstream consumers (WebRTC, AI) will fail to meet their latency gates.
+   - **MILESTONE-02 (RTSP Ingest):** As the primary data producer for Recording (M-03), Streaming (M-04), and AI (M-08), it is a single point of failure for the entire functional roadmap.
 
 4. **What is the earliest gate condition that proves the multi-tenancy isolation model works correctly?**
    - MILESTONE-05: Multi-tenancy skeleton. This is the first gate that explicitly tests cross-tenant data leakage.
