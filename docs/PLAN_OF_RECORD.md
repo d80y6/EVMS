@@ -326,6 +326,14 @@ Superseded by: NONE
    - MILESTONE-05: Multi-tenancy skeleton. This is the first gate that explicitly tests cross-tenant data leakage.
 
 5. **List any component from the codebase that does NOT map cleanly to any milestone — these are prototype accumulations that need explicit triage decisions.**
-   - `services/notification`: While mentioned in the architecture overview, it lacks a dedicated milestone for its specific logic (SMTP/Webhook triggers). It is currently lumped into M-11.
-   - `services/event-proc`: Similar to notifications, the complex logic of correlating triggers is not explicitly gauged until the E2E milestone.
-   - `pkg/common/retry.go`: Connection retry logic is a cross-cutting concern not specifically isolated in a milestone gate.
+
+### Prototype Triage Registry
+
+| Component | Triage Decision | Targeted Milestone Gate (for PROMOTE) |
+| :--- | :--- | :--- |
+| `services/camera-mgmt` | **PROMOTE** | Satisfies MILESTONE-01 (Infrastructure skeleton) via its health endpoint and MILESTONE-05 (Multi-tenancy skeleton) by acting as the primary tenant-aware resource gateway. |
+| `services/metadata` | **PROMOTE** | Satisfies MILESTONE-08 (AI analytics pipeline) gate by persisting AI detections and embeddings to the database for verification. |
+| `services/playback` | **PROMOTE** | Satisfies MILESTONE-11 (End-to-end integration) gate by providing the HTTP interface for the "archive playback" user journey. |
+| `services/event-proc` | **REWRITE** | Logic is too brittle (hardcoded confidence/labels). Requires a rewrite to support dynamic rules before it can satisfy MILESTONE-11. |
+| `services/notification` | **DEFER** | Logic is currently just logging. Post-MVP feature that belongs in a future "Enterprise Alerting" milestone. |
+| `pkg/common/retry.go` | **PROMOTE** | Satisfies MILESTONE-01 (Infrastructure skeleton) by enabling services to survive and recover during sequential cluster startup. |
