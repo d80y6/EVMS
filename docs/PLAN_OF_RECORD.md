@@ -337,3 +337,36 @@ Superseded by: NONE
 | `services/event-proc` | **REWRITE** | Logic is too brittle (hardcoded confidence/labels). Requires a rewrite to support dynamic rules before it can satisfy MILESTONE-11. |
 | `services/notification` | **DEFER** | Logic is currently just logging. Post-MVP feature that belongs in a future "Enterprise Alerting" milestone. |
 | `pkg/common/retry.go` | **PROMOTE** | Satisfies MILESTONE-01 (Infrastructure skeleton) by enabling services to survive and recover during sequential cluster startup. |
+
+---
+
+## Section 5: Gate Condition Reality Check
+
+| Milestone | Test Harness Defined? | CI-runnable Today? | Numeric Threshold? | Gap |
+| :--- | :--- | :--- | :--- | :--- |
+| M-01 | YES (Health script) | NO | 10/10 UP | Missing aggregation script and health endpoints |
+| M-02 | YES (Benchmark) | NO | >20 FPS | Missing RTSP simulator and NATS bench tool |
+| M-03 | YES (Disk/DB) | NO | 1:1 match | Missing integrated verification script |
+| M-04 | YES (Playwright) | NO | <500ms | Missing UI automation suite |
+| M-05 | YES (Security) | NO | 100% block | Missing RLS implementation and security tests |
+| M-06 | YES (Auth suite) | NO | 100% block | Missing comprehensive auth validation suite |
+| M-07 | YES (Simulator) | NO | 100% cleanup | Missing file age simulation tools |
+| M-08 | YES (Synthetic) | NO | <2s latency | Missing deterministic AI test harness |
+| M-09 | YES (Grafana API) | NO | 100% live | Missing JSON dashboards and API check script |
+| M-10 | YES (Chaos) | NO | <30s RTO | Missing K8s manifests and Chaos Mesh |
+| M-11 | YES (Playwright) | NO | 100% pass | Missing end-to-end user journey scripts |
+| M-12 | YES (k6) | NO | 100 cameras | Missing high-scale load testing environment |
+
+## Section 6: AI Analytics — Honest Assessment
+
+1. **Is there a trained model artifact in the codebase?**
+   - **NO.** The `ai-worker` currently uses a placeholder or assumes local environment availability of YOLOv8 weights which are not present in the repository.
+
+2. **If NO: what is the current implementation doing instead?**
+   - The `services/ai-worker/main.py` script utilizes the `ultralytics` YOLOv8 library. It attempts to load `yolov8n.pt`. If the file is not found, the library typically attempts to download it at runtime, which would fail in air-gapped or restricted CI environments.
+
+3. **What happens to a request when the AI component is unavailable?**
+   - The system is asynchronous (ADR-007). If the AI worker fails, MJPEG frames continue to be published to NATS, but the `ai_events` table remains unpopulated. There is no fallback or "fail-open" for metadata generation.
+
+4. **Verdict: AI-Ready, but Prototype-Bound.**
+   - **Justification:** The pipeline architecture is correctly decoupled via NATS, but the reliance on external weights and lack of a deterministic test corpus makes it unsuitable for mechanical verification today.

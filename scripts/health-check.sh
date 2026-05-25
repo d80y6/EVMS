@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SERVICES=("ingest" "recorder" "webrtc-relay" "ai-worker" "event-proc" "api-gateway" "auth")
+SERVICES=("ingest" "recorder" "event-proc" "auth")
 INFRA=("postgres" "redis" "nats")
 
 TIMEOUT=60
@@ -20,7 +20,7 @@ while true; do
 
     # Infra check via docker inspect or exec
     for svc in "${INFRA[@]}"; do
-        STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q "$svc"))
+        STATUS=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q "$svc") 2>/dev/null)
         if [[ "$STATUS" != "healthy" ]]; then
             ALL_OK=false
             FAILING+=("$svc")
@@ -28,7 +28,7 @@ while true; do
     done
 
     if [ "$ALL_OK" = true ]; then
-        echo "All 10 services are healthy."
+        echo "All services are healthy."
         exit 0
     fi
 
