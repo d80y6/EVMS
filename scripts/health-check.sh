@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SERVICES=("ingest" "recorder" "event-proc" "auth")
+SERVICES=("ingest" "recorder" "webrtc-relay" "ai-worker" "event-proc" "api-gateway" "auth")
 INFRA=("postgres" "redis" "nats")
 
 TIMEOUT=60
@@ -28,7 +28,7 @@ while true; do
     done
 
     if [ "$ALL_OK" = true ]; then
-        echo "All services are healthy."
+        echo "All 10 services are healthy."
         exit 0
     fi
 

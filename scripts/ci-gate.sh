@@ -12,8 +12,9 @@ if ! ./scripts/health-check.sh; then
     exit 1
 fi
 
+SERVICES=("ingest" "recorder" "webrtc-relay" "ai-worker" "event-proc" "api-gateway" "auth")
+
 echo "Running final assertions..."
-SERVICES=("ingest" "recorder" "event-proc" "auth")
 for svc in "${SERVICES[@]}"; do
     echo "Asserting $svc /healthz..."
     HEALTH=$(docker compose exec -T "$svc" wget -qO- http://localhost:8080/healthz)
