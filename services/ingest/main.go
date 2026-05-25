@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/dam-vms/dam/services/ingest/internal/health"
 	"github.com/fsnotify/fsnotify"
 	"github.com/nats-io/nats.go"
 )
@@ -219,6 +221,12 @@ func (p *StreamProcessor) Wait() error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", health.Handler("ingest"))
+		http.ListenAndServe(":8080", mux)
+	}()
 
 	common.StartMetricsServer(":2112")
 
