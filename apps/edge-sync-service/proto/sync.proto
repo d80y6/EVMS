@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package edge.sync;
+
+// Synchronization message types
+message SyncMessage {
+    string id = 1;
+    MessageType type = 2;
+    uint64 timestamp = 3;
+    bytes payload = 4;
+    VectorClock vector_clock = 5;
+    string device_id = 6;
+}
+
+enum MessageType {
+    MESSAGE_TYPE_UNSPECIFIED = 0;
+    MESSAGE_TYPE_DATA = 1;
+    MESSAGE_TYPE_METADATA = 2;
+    MESSAGE_TYPE_DELETION = 3;
+    MESSAGE_TYPE_CONFLICT_RESOLUTION = 4;
+}
+
+// Vector clock for causality tracking
+message VectorClock {
+    map<string, uint64> clocks = 1;
+}
+
+// Data entry for synchronization
+message DataEntry {
+    string key = 1;
+    bytes value = 2;
+    string content_type = 3;
+    uint64 created_at = 4;
+    uint64 updated_at = 5;
+    map<string, string> metadata = 6;
+    bool deleted = 7;
+}
+
+// Batch sync request
+message SyncRequest {
+    string device_id = 1;
+    repeated DataEntry entries = 2;
+    VectorClock client_clock = 3;
+    SyncMode mode = 4;
+}
+
+enum SyncMode {
+    SYNC_MODE_UNSPECIFIED = 0;
+    SYNC_MODE_PUSH = 1;
+    SYNC_MODE_PULL = 2;
+    SYNC_MODE_FULL = 3;
+}
+
+// Sync response
+message SyncResponse {
+    bool success = 1;
+    repeated DataEntry entries = 2;
+    VectorClock server_clock = 3;
+    repeated Conflict conflicts = 4;
+    string error_message = 5;
+}
+
+// Conflict representation
+message Conflict {
+    string key = 1;
+    DataEntry local_entry = 2;
+    DataEntry remote_entry = 3;
+    ConflictResolutionStrategy strategy = 4;
+}
+
+enum ConflictResolutionStrategy {
+    STRATEGY_UNSPECIFIED = 0;
+    STRATEGY_LAST_WRITE_WINS = 1;
+    STRATEGY_MERGE = 2;
+    STRATEGY_MANUAL = 3;
+    STRATEGY_CUSTOM = 4;
+}
+
+// Offline queue item
+message QueueItem {
+    string id = 1;
+    SyncMessage message = 2;
+    uint64 created_at = 3;
+    uint64 retry_count = 4;
+    QueueItemStatus status = 5;
+}
+
+enum QueueItemStatus {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_PENDING = 1;
+    STATUS_IN_PROGRESS = 2;
+    STATUS_COMPLETED = 3;
+    STATUS_FAILED = 4;
+}
+
+// Replication log entry
+message ReplicationLog {
+    string id = 1;
+    string operation = 2;
+    DataEntry entry = 3;
+    uint64 timestamp = 4;
+    string source_device = 5;
+}
+
+// Service definition
+service EdgeSyncService {
+    rpc Sync(SyncRequest) returns (SyncResponse);
+    rpc SyncStream(stream SyncMessage) returns (stream SyncMessage);
+    rpc GetQueueState(GetQueueStateRequest) returns (GetQueueStateResponse);
+    rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+}
+
+message GetQueueStateRequest {
+    string device_id = 1;
+}
+
+message GetQueueStateResponse {
+    uint64 pending_count = 1;
+    uint64 failed_count = 2;
+    repeated QueueItem pending_items = 3;
+}
+
+message ResolveConflictRequest {
+    string conflict_id = 1;
+    ConflictResolutionChoice choice = 2;
+    DataEntry merged_entry = 3;
+}
+
+message ConflictResolutionChoice {
+    oneof choice {
+        string use_local = 1;
+        string use_remote = 2;
+        DataEntry custom_merge = 3;
+    }
+}
+
+message ResolveConflictResponse {
+    bool success = 1;
+    DataEntry resolved_entry = 2;
+}
