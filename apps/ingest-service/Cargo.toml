@@ -1,0 +1,123 @@
+[package]
+name = "ingest-service"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+
+# Networking
+socket2 = "0.5"
+bytes = "1.5"
+byteorder = "1.5"
+
+# RTSP/RTP handling
+rtsp-types = "0.1"
+sdp-types = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Metrics
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+instant = "0.1"
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# HTTP client for signaling
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# WebRTC primitives
+webrtc = "0.9"
+sctp = "0.8"
+srtp = "0.12"
+stun = "0.5"
+turn = "0.7"
+ice = "0.7"
+dtls = "0.8"
+rtp = "0.9"
+rtcp = "0.10"
+
+# Media processing
+mp4 = "0.14"
+
+# AWS SDK for S3
+aws-config = { version = "1.1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.10"
+aws-smithy-async = "1.1"
+
+# Milvus client
+milvus-sdk-rust = "0.1"
+
+# GraphQL
+async-graphql = "7.0"
+async-graphql-axum = "7.0"
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Compression
+flate2 = "1.0"
+lz4_flex = "0.11"
+
+# Cryptography
+ring = "0.17"
+aes-gcm = "0.10"
+
+# Utilities
+parking_lot = "0.12"
+dashmap = "5.5"
+crossbeam-channel = "0.5"
+itertools = "0.12"
+num-traits = "0.2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+tempfile = "3.9"
+
+[[bin]]
+name = "ingest-service"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.bench]
+lto = true
+codegen-units = 1
+
+[[bench]]
+name = "rtp_buffer_bench"
+harness = false
