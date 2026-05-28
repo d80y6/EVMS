@@ -1,0 +1,89 @@
+//! Triton Inference Service - Main Entry Point
+//!
+//! Async GPU inference engine with dynamic batching
+
+use std::sync::Arc;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+mod config;
+mod error;
+mod client;
+mod batcher;
+mod preprocess;
+mod postprocess;
+mod scheduler;
+mod metrics;
+mod api;
+mod models;
+
+#[path = "lib.rs"]
+mod lib;
+
+use lib::{InferenceState, create_state};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    // Load configuration
+    let config = config::Config::load()?;
+    
+    tracing::info!("Starting Triton Inference Service");
+    tracing::info!("Triton URL: {}", config.triton_url);
+    tracing::info!("HTTP Port: {}", config.http_port);
+    tracing::info!("gRPC Port: {}", config.grpc_port);
+    tracing::info!("Max Batch Size: {}", config.max_batch_size);
+    tracing::info!("Batch Timeout: {}ms", config.batch_timeout_ms);
+
+    // Create application state
+    let state = create_state(&config)?;
+    let state = Arc::new(state);
+
+    // Register metrics
+    metrics::register_metrics();
+
+    // Spawn metrics exporter
+    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()?;
+
+    // Create HTTP server
+    let http_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port));
+    let http_app = api::create_router(state.clone());
+
+    tracing::info!("Starting HTTP server on {}", http_addr);
+
+    let http_server = axum::Server::bind(&http_addr)
+        .serve(http_app.into_make_service());
+
+    // TODO: Add gRPC server on config.grpc_port
+
+    // Start background tasks
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            
+            let queue_size = state_clone.batcher.queue_size().await;
+            let active = state_clone.scheduler.active_count();
+            let available = state_clone.scheduler.available_slots();
+            
+            tracing::debug!(
+                "Queue: {}, Active: {}, Available: {}",
+                queue_size, active, available
+            );
+            
+            crate::metrics::set_queue_depth(queue_size);
+        }
+    });
+
+    // Run HTTP server
+    http_server.await?;
+
+    Ok(())
+}
