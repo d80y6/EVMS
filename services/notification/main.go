@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -139,7 +140,10 @@ func (s *NotificationService) sendWebhook(n Notification, webhookURL string) err
 	if err != nil {
 		return fmt.Errorf("webhook request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("webhook returned non-success status: %d", resp.StatusCode)

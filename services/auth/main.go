@@ -206,12 +206,6 @@ func main() {
 	defer stop()
 
 	config := DefaultAuthConfig()
-	if addr := os.Getenv("HTTP_ADDR"); addr != "" {
-		config.HTTPAddr = addr
-	}
-	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
-		config.DBURL = dbURL
-	}
 
 	if err := config.Validate(); err != nil {
 		logger.Error("Invalid configuration", "error", err)

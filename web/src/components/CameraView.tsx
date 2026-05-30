@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 interface CameraViewProps {
   cameraId: string;
-  streamUrl: string;
 }
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
