@@ -5,14 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,13 +25,39 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const (
+	soapGetProfiles = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+  <soap:Body>
+    <trt:GetProfiles/>
+  </soap:Body>
+</soap:Envelope>`
+
+	soapGetStreamUri = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <soap:Body>
+    <trt:GetStreamUri>
+      <trt:StreamSetup>
+        <tt:Stream>RTP-Unicast</tt:Stream>
+        <tt:Transport>
+          <tt:Protocol>RTSP</tt:Protocol>
+        </tt:Transport>
+      </trt:StreamSetup>
+      <trt:ProfileToken>PROFILE_TOKEN</trt:ProfileToken>
+    </trt:GetStreamUri>
+  </soap:Body>
+</soap:Envelope>`
+)
+
 // IngestConfig holds configuration for the ingest service
 type IngestConfig struct {
-	CameraID      string
-	RTSPURL       string
-	NATSURL       string
-	MetricsAddr   string
-	RecordingsDir string
+	CameraID       string
+	RTSPURL        string
+	NATSURL        string
+	MetricsAddr    string
+	RecordingsDir  string
+	ONVIFMode      bool
+	ONVIFDeviceURL string
 }
 
 // DefaultIngestConfig returns a configuration with sensible defaults
@@ -45,10 +74,115 @@ func (c *IngestConfig) Validate() error {
 	if c.CameraID == "" {
 		return errors.New("CAMERA_ID environment variable is required")
 	}
-	if c.RTSPURL == "" {
-		return errors.New("RTSP_URL environment variable is required")
+	if c.ONVIFMode {
+		if c.ONVIFDeviceURL == "" {
+			return errors.New("ONVIF_DEVICE_URL environment variable is required when ONVIF_MODE is true")
+		}
+	} else {
+		if c.RTSPURL == "" {
+			return errors.New("RTSP_URL environment variable is required when ONVIF_MODE is false")
+		}
 	}
 	return nil
+}
+
+func negotiateRTSPURL(ctx context.Context, deviceURL string) (string, error) {
+	profilesResp, err := sendSOAP(ctx, deviceURL, soapGetProfiles)
+	if err != nil {
+		return "", fmt.Errorf("onvif get profiles: %w", err)
+	}
+
+	token, err := extractFirstProfileToken(profilesResp)
+	if err != nil {
+		return "", fmt.Errorf("extract profile token: %w", err)
+	}
+
+	streamReq := strings.ReplaceAll(soapGetStreamUri, "PROFILE_TOKEN", token)
+	streamResp, err := sendSOAP(ctx, deviceURL, streamReq)
+	if err != nil {
+		return "", fmt.Errorf("onvif get stream uri: %w", err)
+	}
+
+	uri, err := extractStreamURI(streamResp)
+	if err != nil {
+		return "", fmt.Errorf("extract stream uri: %w", err)
+	}
+
+	return uri, nil
+}
+
+func sendSOAP(ctx context.Context, url, body string) ([]byte, error) {
+	soapCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(soapCtx, http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("onvif request failed with status %d: %s", resp.StatusCode, string(data))
+	}
+
+	return data, nil
+}
+
+func extractFirstProfileToken(data []byte) (string, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if start, ok := token.(xml.StartElement); ok && start.Name.Local == "Profiles" {
+			for _, attr := range start.Attr {
+				if attr.Name.Local == "token" {
+					return attr.Value, nil
+				}
+			}
+		}
+	}
+	return "", errors.New("no profile token found in ONVIF response")
+}
+
+func extractStreamURI(data []byte) (string, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if start, ok := token.(xml.StartElement); ok && start.Name.Local == "Uri" {
+			charToken, err := decoder.Token()
+			if err != nil {
+				return "", err
+			}
+			if char, ok := charToken.(xml.CharData); ok {
+				if uri := strings.TrimSpace(string(char)); uri != "" {
+					return uri, nil
+				}
+			}
+		}
+	}
+	return "", errors.New("no stream URI found in ONVIF response")
 }
 
 // StreamProcessor handles video stream processing
@@ -366,6 +500,20 @@ func main() {
 	config := DefaultIngestConfig()
 	config.CameraID = os.Getenv("CAMERA_ID")
 	config.RTSPURL = os.Getenv("RTSP_URL")
+	config.ONVIFMode = os.Getenv("ONVIF_MODE") == "true"
+	config.ONVIFDeviceURL = os.Getenv("ONVIF_DEVICE_URL")
+
+	if config.ONVIFMode {
+		logger.Info("ONVIF mode enabled, negotiating RTSP URL",
+			"device_url", config.ONVIFDeviceURL)
+		negotiatedURL, err := negotiateRTSPURL(ctx, config.ONVIFDeviceURL)
+		if err != nil {
+			logger.Error("ONVIF negotiation failed", "error", err)
+			os.Exit(1)
+		}
+		config.RTSPURL = negotiatedURL
+		logger.Info("ONVIF negotiation succeeded", "rtsp_url", config.RTSPURL)
+	}
 
 	if addr := os.Getenv("NATS_URL"); addr != "" {
 		config.NATSURL = addr

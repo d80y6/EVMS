@@ -105,23 +105,23 @@ type DeleteSiteResponse struct {
 }
 
 type SmartSearchRequest struct {
-	CameraId       string
-	ObjectType     string
-	MinConfidence  float64
-	StartTime      string
-	EndTime        string
-	Limit          int32
+	CameraId      string
+	ObjectType    string
+	MinConfidence float64
+	StartTime     string
+	EndTime       string
+	Limit         int32
 }
 
 type SmartSearchResult struct {
-	Id         string
-	CameraId   string
-	EventTime  string
-	ObjectType string
-	Confidence float64
+	Id          string
+	CameraId    string
+	EventTime   string
+	ObjectType  string
+	Confidence  float64
 	BoundingBox string
-	TrackId    string
-	Thumbnail  string
+	TrackId     string
+	Thumbnail   string
 }
 
 type SmartSearchResponse struct {
@@ -147,17 +147,39 @@ type CameraServiceServer interface {
 
 type UnimplementedCameraServiceServer struct{}
 
-func (UnimplementedCameraServiceServer) ListCameras(context.Context, *ListCamerasRequest) (*ListCamerasResponse, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) GetCamera(context.Context, *GetCameraRequest) (*Camera, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) CreateCamera(context.Context, *CreateCameraRequest) (*Camera, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) UpdateCamera(context.Context, *UpdateCameraRequest) (*Camera, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) DeleteCamera(context.Context, *DeleteCameraRequest) (*DeleteCameraResponse, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) StreamStatus(context.Context, *StreamStatusRequest) (*StreamStatusResponse, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) ListSites(context.Context, *ListSitesRequest) (*ListSitesResponse, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) CreateSite(context.Context, *CreateSiteRequest) (*Site, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) UpdateSite(context.Context, *UpdateSiteRequest) (*Site, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) DeleteSite(context.Context, *DeleteSiteRequest) (*DeleteSiteResponse, error) { return nil, nil }
-func (UnimplementedCameraServiceServer) SmartSearch(context.Context, *SmartSearchRequest) (*SmartSearchResponse, error) { return nil, nil }
+func (UnimplementedCameraServiceServer) ListCameras(context.Context, *ListCamerasRequest) (*ListCamerasResponse, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) GetCamera(context.Context, *GetCameraRequest) (*Camera, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) CreateCamera(context.Context, *CreateCameraRequest) (*Camera, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) UpdateCamera(context.Context, *UpdateCameraRequest) (*Camera, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) DeleteCamera(context.Context, *DeleteCameraRequest) (*DeleteCameraResponse, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) StreamStatus(context.Context, *StreamStatusRequest) (*StreamStatusResponse, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) ListSites(context.Context, *ListSitesRequest) (*ListSitesResponse, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) CreateSite(context.Context, *CreateSiteRequest) (*Site, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) UpdateSite(context.Context, *UpdateSiteRequest) (*Site, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) DeleteSite(context.Context, *DeleteSiteRequest) (*DeleteSiteResponse, error) {
+	return nil, nil
+}
+func (UnimplementedCameraServiceServer) SmartSearch(context.Context, *SmartSearchRequest) (*SmartSearchResponse, error) {
+	return nil, nil
+}
 func (UnimplementedCameraServiceServer) mustEmbedUnimplementedCameraServiceServer() {}
 
 func RegisterCameraServiceServer(s grpc.ServiceRegistrar, srv CameraServiceServer) {

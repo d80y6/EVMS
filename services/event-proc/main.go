@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,12 +24,14 @@ import (
 type EventProcConfig struct {
 	NATSURL                   string
 	PersonConfidenceThreshold float64
+	AlertAdminPort            string
 }
 
 func DefaultEventProcConfig() *EventProcConfig {
 	return &EventProcConfig{
 		NATSURL:                   common.GetEnv("NATS_URL", "nats://nats:4222"),
 		PersonConfidenceThreshold: 0.8,
+		AlertAdminPort:            common.GetEnv("ALERT_ADMIN_PORT", ":8093"),
 	}
 }
 
@@ -45,6 +49,110 @@ type Track struct {
 	FirstSeen  time.Time `json:"first_seen"`
 	LastSeen   time.Time `json:"last_seen"`
 	CameraID   string    `json:"camera_id"`
+}
+
+type AlertRule struct {
+	ID            string  `json:"id"`
+	CameraID      string  `json:"camera_id"`
+	Name          string  `json:"name"`
+	ObjectType    string  `json:"object_type"`
+	Zone          string  `json:"zone"`
+	MinConfidence float64 `json:"min_confidence"`
+	Action        string  `json:"action"`
+	Enabled       bool    `json:"enabled"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+type AlertRuleManager struct {
+	mu    sync.RWMutex
+	rules map[string]*AlertRule
+}
+
+func NewAlertRuleManager() *AlertRuleManager {
+	return &AlertRuleManager{
+		rules: make(map[string]*AlertRule),
+	}
+}
+
+func (m *AlertRuleManager) List(cameraID string) []*AlertRule {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*AlertRule
+	for _, r := range m.rules {
+		if cameraID == "" || r.CameraID == cameraID {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func (m *AlertRuleManager) Create(rule *AlertRule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rule.ID = uuid.New().String()
+	rule.CreatedAt = time.Now().Format(time.RFC3339)
+	m.rules[rule.ID] = rule
+	return nil
+}
+
+func (m *AlertRuleManager) Update(rule *AlertRule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.rules[rule.ID]
+	if !ok {
+		return fmt.Errorf("alert rule not found: %s", rule.ID)
+	}
+
+	rule.CreatedAt = existing.CreatedAt
+	m.rules[rule.ID] = rule
+	return nil
+}
+
+func (m *AlertRuleManager) Delete(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	_, ok := m.rules[id]
+	if !ok {
+		return false
+	}
+	delete(m.rules, id)
+	return true
+}
+
+func (m *AlertRuleManager) GetMatching(cameraID, objectType string, confidence float64, center [2]float64) []*AlertRule {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var matches []*AlertRule
+	for _, r := range m.rules {
+		if !r.Enabled {
+			continue
+		}
+		if r.CameraID != cameraID {
+			continue
+		}
+		if r.ObjectType != "any" && r.ObjectType != objectType {
+			continue
+		}
+		if confidence < r.MinConfidence {
+			continue
+		}
+		if r.Zone != "" {
+			var polygon [][2]float64
+			if err := json.Unmarshal([]byte(r.Zone), &polygon); err != nil {
+				continue
+			}
+			if !pointInPolygon(center, polygon) {
+				continue
+			}
+		}
+		matches = append(matches, r)
+	}
+	return matches
 }
 
 type Tracker struct {
@@ -194,12 +302,14 @@ func (t *Tracker) StartCleanupLoop(stopCh <-chan struct{}) {
 }
 
 type EventProcessor struct {
-	config   *EventProcConfig
-	nc       *nats.Conn
-	logger   *slog.Logger
-	eventSub *nats.Subscription
-	tracker  *Tracker
-	stopCh   chan struct{}
+	config      *EventProcConfig
+	nc          *nats.Conn
+	logger      *slog.Logger
+	eventSub    *nats.Subscription
+	tracker     *Tracker
+	alertRules  *AlertRuleManager
+	adminServer *http.Server
+	stopCh      chan struct{}
 }
 
 func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
@@ -213,11 +323,12 @@ func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProc
 	}
 
 	return &EventProcessor{
-		config:  config,
-		nc:      nc,
-		logger:  logger,
-		tracker: NewTracker(0.3, 3*time.Second),
-		stopCh:  make(chan struct{}),
+		config:     config,
+		nc:         nc,
+		logger:     logger,
+		tracker:    NewTracker(0.3, 3*time.Second),
+		alertRules: NewAlertRuleManager(),
+		stopCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -229,6 +340,22 @@ func (s *EventProcessor) Start() error {
 	}
 
 	go s.tracker.StartCleanupLoop(s.stopCh)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/alert-rules", s.adminHandler)
+	mux.HandleFunc("/api/alert-rules/", s.adminHandler)
+
+	s.adminServer = &http.Server{
+		Addr:    s.config.AlertAdminPort,
+		Handler: mux,
+	}
+
+	go func() {
+		s.logger.Info("Starting alert admin server", "address", s.config.AlertAdminPort)
+		if err := s.adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("Alert admin server error", "error", err)
+		}
+	}()
 
 	s.logger.Info("Event Processing Service started",
 		"person_confidence_threshold", s.config.PersonConfidenceThreshold)
@@ -262,7 +389,46 @@ func (s *EventProcessor) handleCameraEvent(msg *nats.Msg) {
 		if s.shouldTriggerNotification(d) {
 			s.triggerNotification(msg.Subject, d)
 		}
+
+		if len(d.BBox) >= 4 {
+			center := [2]float64{
+				(d.BBox[0] + d.BBox[2]) / 2,
+				(d.BBox[1] + d.BBox[3]) / 2,
+			}
+			matches := s.alertRules.GetMatching(cameraID, d.Label, d.Confidence, center)
+			for _, rule := range matches {
+				s.triggerAlert(rule, d, cameraID)
+			}
+		}
 	}
+}
+
+func (s *EventProcessor) triggerAlert(rule *AlertRule, detection Detection, cameraID string) {
+	alert := map[string]interface{}{
+		"rule_id":     rule.ID,
+		"rule_name":   rule.Name,
+		"camera_id":   cameraID,
+		"object_type": detection.Label,
+		"confidence":  detection.Confidence,
+		"bbox":        detection.BBox,
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(alert)
+	if err != nil {
+		s.logger.Error("Failed to marshal alert", "error", err)
+		return
+	}
+
+	if err := s.nc.Publish("alerts.triggered", data); err != nil {
+		s.logger.Error("Failed to publish alert", "error", err)
+	}
+
+	s.logger.Info("Alert triggered",
+		"rule", rule.Name,
+		"camera", cameraID,
+		"object", detection.Label,
+		"confidence", detection.Confidence)
 }
 
 func (s *EventProcessor) shouldTriggerNotification(d Detection) bool {
@@ -301,6 +467,161 @@ func extractCameraID(subject string) string {
 	return "unknown"
 }
 
+func (s *EventProcessor) adminHandler(w http.ResponseWriter, r *http.Request) {
+	id := ""
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/api/alert-rules/") {
+		id = path[len("/api/alert-rules/"):]
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if id == "" {
+			s.listAlertRules(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	case http.MethodPost:
+		if id == "" {
+			s.createAlertRule(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	case http.MethodPut:
+		if id != "" {
+			s.updateAlertRule(w, r, id)
+		} else {
+			http.NotFound(w, r)
+		}
+	case http.MethodDelete:
+		if id != "" {
+			s.deleteAlertRule(w, r, id)
+		} else {
+			http.NotFound(w, r)
+		}
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func (s *EventProcessor) listAlertRules(w http.ResponseWriter, r *http.Request) {
+	cameraID := r.URL.Query().Get("camera_id")
+	rules := s.alertRules.List(cameraID)
+	if rules == nil {
+		rules = []*AlertRule{}
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func (s *EventProcessor) createAlertRule(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	var req struct {
+		CameraID      string  `json:"camera_id"`
+		Name          string  `json:"name"`
+		ObjectType    string  `json:"object_type"`
+		Zone          string  `json:"zone"`
+		MinConfidence float64 `json:"min_confidence"`
+		Action        string  `json:"action"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	rule := &AlertRule{
+		CameraID:      req.CameraID,
+		Name:          req.Name,
+		ObjectType:    req.ObjectType,
+		Zone:          req.Zone,
+		MinConfidence: req.MinConfidence,
+		Action:        req.Action,
+		Enabled:       true,
+	}
+
+	if err := s.alertRules.Create(rule); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, rule)
+}
+
+func (s *EventProcessor) updateAlertRule(w http.ResponseWriter, r *http.Request, id string) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	var req struct {
+		Name          string  `json:"name"`
+		ObjectType    string  `json:"object_type"`
+		Zone          string  `json:"zone"`
+		MinConfidence float64 `json:"min_confidence"`
+		Action        string  `json:"action"`
+		Enabled       bool    `json:"enabled"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	rule := &AlertRule{
+		ID:            id,
+		Name:          req.Name,
+		ObjectType:   req.ObjectType,
+		Zone:          req.Zone,
+		MinConfidence: req.MinConfidence,
+		Action:        req.Action,
+		Enabled:       req.Enabled,
+	}
+
+	if err := s.alertRules.Update(rule); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rule)
+}
+
+func (s *EventProcessor) deleteAlertRule(w http.ResponseWriter, r *http.Request, id string) {
+	if !s.alertRules.Delete(id) {
+		writeError(w, http.StatusNotFound, "alert rule not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func pointInPolygon(pt [2]float64, polygon [][2]float64) bool {
+	n := len(polygon)
+	inside := false
+	j := n - 1
+	for i := 0; i < n; i++ {
+		if ((polygon[i][1] > pt[1]) != (polygon[j][1] > pt[1])) &&
+			(pt[0] < (polygon[j][0]-polygon[i][0])*(pt[1]-polygon[i][1])/(polygon[j][1]-polygon[i][1])+polygon[i][0]) {
+			inside = !inside
+		}
+		j = i
+	}
+	return inside
+}
+
 func (s *EventProcessor) Close() error {
 	close(s.stopCh)
 
@@ -309,6 +630,14 @@ func (s *EventProcessor) Close() error {
 	if s.eventSub != nil {
 		if err := s.eventSub.Unsubscribe(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to unsubscribe: %w", err))
+		}
+	}
+
+	if s.adminServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.adminServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to shutdown admin server: %w", err))
 		}
 	}
 

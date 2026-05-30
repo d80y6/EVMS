@@ -515,3 +515,59 @@ spec:
     port: 2112
     targetPort: 2112
   type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discovery
+  namespace: dam-vms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: discovery
+  template:
+    metadata:
+      labels:
+        app: discovery
+    spec:
+      containers:
+      - name: discovery
+        image: damvms/discovery:latest
+        ports:
+        - containerPort: 8091
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: METRICS_ADDR
+          value: ":2112"
+        - name: DISCOVERY_NATS_URL
+          value: "nats://nats:4222"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: discovery
+  namespace: dam-vms
+spec:
+  selector:
+    app: discovery
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8091
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP

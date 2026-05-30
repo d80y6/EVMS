@@ -10,6 +10,7 @@ import RecordingsPage from './pages/RecordingsPage';
 import EventsPage from './pages/EventsPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminPage from './pages/AdminPage';
+import SearchPage from './pages/SearchPage';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -54,6 +55,16 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               <ProtectedRoute>
                 <Layout>
                   <AdminPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/search"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <SearchPage />
                 </Layout>
               </ProtectedRoute>
             }
