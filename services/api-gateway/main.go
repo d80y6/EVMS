@@ -300,6 +300,153 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"cameras": cameras})
 }
 
+func (g *Gateway) handleListSites(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	resp, err := g.cameraSvc.ListSites(ctx, &damv1.ListSitesRequest{})
+	if err != nil {
+		g.logger.Error("Failed to list sites", "error", err)
+		jsonError(w, "failed to list sites", http.StatusInternalServerError)
+		return
+	}
+
+	type siteJSON struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Location  string `json:"location"`
+		CreatedAt string `json:"created_at"`
+	}
+
+	sites := make([]siteJSON, len(resp.Sites))
+	for i, s := range resp.Sites {
+		createdAt := ""
+		if s.CreatedAt != nil {
+			createdAt = s.CreatedAt.AsTime().Format(time.RFC3339)
+		}
+		sites[i] = siteJSON{
+			ID:        s.Id,
+			Name:      s.Name,
+			Location:  s.Location,
+			CreatedAt: createdAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"sites": sites})
+}
+
+func (g *Gateway) handleCreateSite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name     string `json:"name"`
+		Location string `json:"location"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	site, err := g.cameraSvc.CreateSite(ctx, &damv1.CreateSiteRequest{
+		Name:     req.Name,
+		Location: req.Location,
+	})
+	if err != nil {
+		g.logger.Error("Failed to create site", "error", err)
+		jsonError(w, "failed to create site", http.StatusInternalServerError)
+		return
+	}
+
+	createdAt := ""
+	if site.CreatedAt != nil {
+		createdAt = site.CreatedAt.AsTime().Format(time.RFC3339)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"site": map[string]interface{}{
+			"id":         site.Id,
+			"name":       site.Name,
+			"location":   site.Location,
+			"created_at": createdAt,
+		},
+	})
+}
+
+func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CameraID      string  `json:"camera_id"`
+		ObjectType    string  `json:"object_type"`
+		MinConfidence float64 `json:"min_confidence"`
+		StartTime     string  `json:"start_time"`
+		EndTime       string  `json:"end_time"`
+		Limit         int32   `json:"limit"`
+	}
+
+	if r.Method == http.MethodGet {
+		req.CameraID = r.URL.Query().Get("camera_id")
+		req.ObjectType = r.URL.Query().Get("object_type")
+		req.StartTime = r.URL.Query().Get("start_time")
+		req.EndTime = r.URL.Query().Get("end_time")
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	resp, err := g.cameraSvc.SmartSearch(ctx, &damv1.SmartSearchRequest{
+		CameraId:      req.CameraID,
+		ObjectType:    req.ObjectType,
+		MinConfidence: req.MinConfidence,
+		StartTime:     req.StartTime,
+		EndTime:       req.EndTime,
+		Limit:         req.Limit,
+	})
+	if err != nil {
+		g.logger.Error("Failed to smart search", "error", err)
+		jsonError(w, "failed to smart search", http.StatusInternalServerError)
+		return
+	}
+
+	type resultJSON struct {
+		ID          string  `json:"id"`
+		CameraID    string  `json:"camera_id"`
+		EventTime   string  `json:"event_time"`
+		ObjectType  string  `json:"object_type"`
+		Confidence  float64 `json:"confidence"`
+		BoundingBox string  `json:"bounding_box"`
+		TrackID     string  `json:"track_id"`
+		Thumbnail   string  `json:"thumbnail"`
+	}
+
+	results := make([]resultJSON, len(resp.Results))
+	for i, res := range resp.Results {
+		results[i] = resultJSON{
+			ID:          res.Id,
+			CameraID:    res.CameraId,
+			EventTime:   res.EventTime,
+			ObjectType:  res.ObjectType,
+			Confidence:  res.Confidence,
+			BoundingBox: res.BoundingBox,
+			TrackID:     res.TrackId,
+			Thumbnail:   res.Thumbnail,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"results": results,
+		"total":   resp.Total,
+	})
+}
+
 func (g *Gateway) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	if g.db == nil {
 		jsonError(w, "database not configured", http.StatusInternalServerError)
@@ -416,6 +563,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleThumbnails))(w, r)
 	case strings.HasPrefix(path, "/api/admin/users"):
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleLogin))(w, r)
+	case path == "/api/sites" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleListSites))(w, r)
+	case path == "/api/sites" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleCreateSite))(w, r)
+	case path == "/api/search":
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleSmartSearch))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}

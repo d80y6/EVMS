@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { VirtuosoGrid } from 'react-virtuoso';
 import { api, Camera } from '../api/client';
 import CameraCard from './CameraCard';
@@ -11,16 +12,12 @@ const LAYOUT_COLS: Record<LayoutMode, string> = {
   '3x3': 'grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3',
 };
 
-const FALLBACK_CAMERAS: Camera[] = [
-  { id: 'demo_cam', site_id: '', name: 'Front Entrance', description: '', connection_url: '', substream_url: '', status: 'online', ptz_protocol: 'onvif', retention_days: 7 },
-  { id: 'parking_lot', site_id: '', name: 'Parking Lot', description: '', connection_url: '', substream_url: '', status: 'online', ptz_protocol: 'none', retention_days: 7 },
-  { id: 'warehouse', site_id: '', name: 'Main Warehouse', description: '', connection_url: '', substream_url: '', status: 'offline', ptz_protocol: 'none', retention_days: 7 },
-];
-
 export default function Dashboard() {
-  const [cameras, setCameras] = useState<Camera[]>(FALLBACK_CAMERAS);
+  const [cameras, setCameras] = useState<Camera[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [layout, setLayout] = useState<LayoutMode>('3x3');
+  const [searchParams] = useSearchParams();
+  const selectedSite = searchParams.get('site') || '';
 
   useEffect(() => {
     api.getCameras()
@@ -35,13 +32,22 @@ export default function Dashboard() {
       });
   }, []);
 
+  const filteredCameras = selectedSite
+    ? cameras.filter((c) => c.site_id === selectedSite)
+    : cameras;
+
+  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
+
   return (
     <>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-slate-200">Live View</h2>
           {isLoading && (
-            <span className="text-xs text-slate-500">Connecting to camera service...</span>
+            <span className="text-xs text-slate-500">Connecting...</span>
+          )}
+          {filteredCameras.length > 0 && (
+            <span className="text-xs text-slate-500">{filteredCameras.length} cameras</span>
           )}
         </div>
         <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg p-1">
@@ -63,10 +69,10 @@ export default function Dashboard() {
 
       <div className="-mx-2">
         <VirtuosoGrid
-          totalCount={cameras.length}
+          totalCount={displayCameras.length}
           overscan={200}
           itemContent={(index) => {
-            const cam = cameras[index];
+            const cam = displayCameras[index];
             return (
               <div className="px-2 pb-4">
                 <CameraCard

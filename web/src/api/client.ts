@@ -135,4 +135,24 @@ export const api = {
     request<{ status: string }>(`/admin/users/${id}`, {
       method: 'DELETE',
     }),
+
+  getSites: () =>
+    request<{ sites: { id: string; name: string; location: string }[] }>('/sites'),
+
+  createSite: (name: string, location: string) =>
+    request<{ id: string; name: string; location: string }>('/sites', {
+      method: 'POST',
+      body: JSON.stringify({ name, location }),
+    }),
+
+  smartSearch: (params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params.camera_id) q.set('camera_id', params.camera_id);
+    if (params.object_type) q.set('object_type', params.object_type);
+    if (params.min_confidence !== undefined) q.set('min_confidence', String(params.min_confidence));
+    if (params.start_time) q.set('start_time', params.start_time);
+    if (params.end_time) q.set('end_time', params.end_time);
+    if (params.limit) q.set('limit', String(params.limit));
+    return request<{ results: { id: string; camera_id: string; event_time: string; object_type: string; confidence: number; track_id: string; thumbnail: string }[]; total: number }>(`/search?${q}`);
+  },
 };

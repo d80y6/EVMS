@@ -132,6 +132,17 @@ services:
       nats:
         condition: service_healthy
 
+  discovery:
+    build:
+      context: ../../
+      dockerfile: services/discovery/Dockerfile
+    environment:
+      - METRICS_ADDR=:2112
+      - DISCOVERY_NATS_URL=nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+
   camera-control:
     build:
       context: ../../
