@@ -121,6 +121,24 @@ func _CameraService_ListCameras_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CameraService_GetCamera_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCameraRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CameraServiceServer).GetCamera(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dam_v1.CameraService/GetCamera",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CameraServiceServer).GetCamera(ctx, req.(*GetCameraRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _CameraService_CreateCamera_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateCameraRequest)
 	if err := dec(in); err != nil {
@@ -139,6 +157,60 @@ func _CameraService_CreateCamera_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CameraService_UpdateCamera_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateCameraRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CameraServiceServer).UpdateCamera(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dam_v1.CameraService/UpdateCamera",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CameraServiceServer).UpdateCamera(ctx, req.(*UpdateCameraRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CameraService_DeleteCamera_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteCameraRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CameraServiceServer).DeleteCamera(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dam_v1.CameraService/DeleteCamera",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CameraServiceServer).DeleteCamera(ctx, req.(*DeleteCameraRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CameraService_StreamStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StreamStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CameraServiceServer).StreamStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dam_v1.CameraService/StreamStatus",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CameraServiceServer).StreamStatus(ctx, req.(*StreamStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var CameraService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "dam_v1.CameraService",
 	HandlerType: (*CameraServiceServer)(nil),
@@ -148,10 +220,59 @@ var CameraService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CameraService_ListCameras_Handler,
 		},
 		{
+			MethodName: "GetCamera",
+			Handler:    _CameraService_GetCamera_Handler,
+		},
+		{
 			MethodName: "CreateCamera",
 			Handler:    _CameraService_CreateCamera_Handler,
+		},
+		{
+			MethodName: "UpdateCamera",
+			Handler:    _CameraService_UpdateCamera_Handler,
+		},
+		{
+			MethodName: "DeleteCamera",
+			Handler:    _CameraService_DeleteCamera_Handler,
+		},
+		{
+			MethodName: "StreamStatus",
+			Handler:    _CameraService_StreamStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/proto/v1/camera.proto",
+}
+
+// Client types for gRPC gateway access
+
+type CameraServiceClient interface {
+	ListCameras(ctx context.Context, in *ListCamerasRequest, opts ...grpc.CallOption) (*ListCamerasResponse, error)
+	GetCamera(ctx context.Context, in *GetCameraRequest, opts ...grpc.CallOption) (*Camera, error)
+}
+
+type cameraServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewCameraServiceClient(cc grpc.ClientConnInterface) CameraServiceClient {
+	return &cameraServiceClient{cc}
+}
+
+func (c *cameraServiceClient) ListCameras(ctx context.Context, in *ListCamerasRequest, opts ...grpc.CallOption) (*ListCamerasResponse, error) {
+	out := new(ListCamerasResponse)
+	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/ListCameras", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cameraServiceClient) GetCamera(ctx context.Context, in *GetCameraRequest, opts ...grpc.CallOption) (*Camera, error) {
+	out := new(Camera)
+	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/GetCamera", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

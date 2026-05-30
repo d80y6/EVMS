@@ -53,12 +53,12 @@ func (c *IngestConfig) Validate() error {
 
 // StreamProcessor handles video stream processing
 type StreamProcessor struct {
-	config     IngestConfig
-	cmd        *exec.Cmd
-	cancel     context.CancelFunc
-	nc         *nats.Conn
-	logger     *slog.Logger
-	wg         sync.WaitGroup
+	config IngestConfig
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+	nc     *nats.Conn
+	logger *slog.Logger
+	wg     sync.WaitGroup
 }
 
 // NewStreamProcessor creates a new stream processor
@@ -132,8 +132,8 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 
 	common.StreamActive.WithLabelValues(p.config.CameraID).Set(1)
 
-	p.logger.Info("Starting FFmpeg process", 
-		"camera_id", p.config.CameraID, 
+	p.logger.Info("Starting FFmpeg process",
+		"camera_id", p.config.CameraID,
 		"url", p.config.RTSPURL)
 
 	if err := p.cmd.Start(); err != nil {
@@ -313,14 +313,11 @@ func NewIngestService(config IngestConfig, logger *slog.Logger) (*IngestService,
 	var err error
 
 	if config.NATSURL != "" {
-		for i := 0; i < 5; i++ {
-			nc, err = nats.Connect(config.NATSURL)
-			if err == nil {
-				break
-			}
-			logger.Warn("Retrying NATS connection...", "error", err, "attempt", i+1)
-			time.Sleep(2 * time.Second)
-		}
+		nc, err = nats.Connect(config.NATSURL,
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(2*time.Second),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 		}
@@ -369,7 +366,7 @@ func main() {
 	config := DefaultIngestConfig()
 	config.CameraID = os.Getenv("CAMERA_ID")
 	config.RTSPURL = os.Getenv("RTSP_URL")
-	
+
 	if addr := os.Getenv("NATS_URL"); addr != "" {
 		config.NATSURL = addr
 	}

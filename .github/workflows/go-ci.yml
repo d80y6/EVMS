@@ -1,0 +1,43 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build all services
+        run: |
+          go build ./api/...
+          go build ./pkg/...
+          go build ./services/api-gateway/...
+          go build ./services/auth/...
+          go build ./services/camera-mgmt/...
+          go build ./services/event-proc/...
+          go build ./services/ingest/...
+          go build ./services/metadata/...
+          go build ./services/notification/...
+          go build ./services/playback/...
+          go build ./services/recorder/...
+          go build ./services/webrtc/...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - name: Run tests
+        run: go test ./... -v -count=1

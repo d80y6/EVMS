@@ -21,10 +21,10 @@ import (
 
 // RecorderConfig holds configuration for the recorder service
 type RecorderConfig struct {
-	DBURL         string
-	NATSURL       string
-	MetricsAddr   string
-	RetentionDays int
+	DBURL           string
+	NATSURL         string
+	MetricsAddr     string
+	RetentionDays   int
 	CleanupInterval time.Duration
 }
 
@@ -102,9 +102,9 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 		r.logger.Error("Failed to index segment", "error", err, "camera_id", seg.CameraID)
 		return fmt.Errorf("failed to index segment: %w", err)
 	}
-	r.logger.Info("Indexed recording segment", 
-		"camera_id", seg.CameraID, 
-		"path", seg.FilePath, 
+	r.logger.Info("Indexed recording segment",
+		"camera_id", seg.CameraID,
+		"path", seg.FilePath,
 		"size", seg.FileSize)
 	common.RecordingsIndexed.WithLabelValues(seg.CameraID).Inc()
 	return nil
@@ -112,7 +112,7 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 
 // Listen subscribes to recording events and indexes them
 func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
-	_, err := nc.Subscribe("camera.*.recordings.new", func(msg *nats.Msg) {
+	sub, err := nc.QueueSubscribe("camera.*.recordings.new", "recorder", func(msg *nats.Msg) {
 		var event RecordingEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			r.logger.Debug("Failed to unmarshal recording event", "error", err)
@@ -129,7 +129,11 @@ func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
 			r.logger.Error("Failed to index segment", "error", err)
 		}
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	sub.SetPendingLimits(1024, 64*1024*1024)
+	return nil
 }
 
 // processRecordingEvent processes a recording event and returns a segment
@@ -157,11 +161,11 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 
 	filename := filepath.Base(event.Path)
 	timeStr := strings.TrimSuffix(filename, ".mp4")
-	
+
 	// Format from ingest: 20240101_120000.mp4
 	startTime, err := time.Parse("20060102_150405", timeStr)
 	if err != nil {
-		r.logger.Debug("Could not parse timestamp from filename, using current time", 
+		r.logger.Debug("Could not parse timestamp from filename, using current time",
 			"filename", filename, "error", err)
 		startTime = time.Now()
 	}
@@ -180,7 +184,7 @@ func (r *Recorder) StartRetentionWorker(ctx context.Context) {
 	ticker := time.NewTicker(r.config.CleanupInterval)
 	defer ticker.Stop()
 
-	r.logger.Info("Starting retention worker", 
+	r.logger.Info("Starting retention worker",
 		"interval", r.config.CleanupInterval,
 		"retention_days", r.config.RetentionDays)
 
@@ -201,7 +205,7 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context) {
 	r.logger.Info("Running retention cleanup", "cutoff", cutoff)
 
 	var segments []RecordingSegment
-	err := r.db.SelectContext(ctx, &segments, 
+	err := r.db.SelectContext(ctx, &segments,
 		"SELECT camera_id, file_path FROM recordings WHERE start_time < $1", cutoff)
 	if err != nil {
 		r.logger.Error("Failed to fetch expired segments", "error", err)
@@ -214,8 +218,8 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context) {
 			r.logger.Error("Failed to delete recording file", "path", seg.FilePath, "error", err)
 			continue
 		}
-		
-		if _, err := r.db.ExecContext(ctx, 
+
+		if _, err := r.db.ExecContext(ctx,
 			"DELETE FROM recordings WHERE file_path = $1", seg.FilePath); err != nil {
 			r.logger.Error("Failed to delete recording record", "path", seg.FilePath, "error", err)
 			continue
@@ -236,7 +240,11 @@ type RecorderService struct {
 
 // NewRecorderService creates a new recorder service
 func NewRecorderService(config RecorderConfig, logger *slog.Logger) (*RecorderService, error) {
-	nc, err := nats.Connect(config.NATSURL)
+	nc, err := nats.Connect(config.NATSURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -250,11 +258,17 @@ func NewRecorderService(config RecorderConfig, logger *slog.Logger) (*RecorderSe
 
 // Close gracefully shuts down the service
 func (s *RecorderService) Close() error {
+	var errs []error
+	if s.recorder != nil {
+		if err := s.recorder.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if s.nc != nil {
 		s.nc.Close()
 	}
-	if s.recorder != nil {
-		return s.recorder.Close()
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during shutdown: %v", errs)
 	}
 	return nil
 }

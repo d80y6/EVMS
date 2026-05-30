@@ -1,6 +1,4 @@
-```
 # Dependencies
-go.sum
 
 # Binaries
 *.exe
@@ -39,4 +37,3 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-```

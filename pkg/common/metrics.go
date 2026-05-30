@@ -1,6 +1,7 @@
 package common
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,9 +32,17 @@ var (
 	}, []string{"camera_id"})
 )
 
-// StartMetricsServer starts a Prometheus metrics endpoint on the given port
+// StartMetricsServer starts a Prometheus metrics and health endpoint on the given port
 func StartMetricsServer(addr string) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	go http.ListenAndServe(addr, mux)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	go func() {
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			slog.Warn("Metrics server error", "error", err)
+		}
+	}()
 }

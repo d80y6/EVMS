@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -27,11 +28,11 @@ type StreamSession struct {
 
 // WebRTCService manages WebRTC streaming sessions
 type WebRTCService struct {
-	logger    *slog.Logger
-	natsConn  *nats.Conn
-	sessions  map[string]*StreamSession
+	logger     *slog.Logger
+	natsConn   *nats.Conn
+	sessions   map[string]*StreamSession
 	sessionsMu sync.RWMutex
-	config    WebRTCConfig
+	config     WebRTCConfig
 }
 
 // WebRTCConfig holds configuration for the WebRTC service
@@ -45,18 +46,30 @@ type WebRTCConfig struct {
 
 // DefaultWebRTCConfig returns a configuration with sensible defaults
 func DefaultWebRTCConfig() WebRTCConfig {
+	iceServers := []string{"stun:stun.l.google.com:19302"}
+	if turnURL := os.Getenv("TURN_URL"); turnURL != "" {
+		if turnUsername := os.Getenv("TURN_USERNAME"); turnUsername != "" {
+			if turnCredential := os.Getenv("TURN_CREDENTIAL"); turnCredential != "" {
+				iceServers = append(iceServers, turnUsername+":"+turnCredential+"@"+turnURL)
+			}
+		}
+	}
 	return WebRTCConfig{
-		HTTPAddr:     ":8082",
-		MetricsAddr:  ":2112",
-		NATSURL:      "nats://nats:4222",
-		ICEServers:   []string{"stun:stun.l.google.com:19302"},
+		HTTPAddr:     common.GetEnv("HTTP_ADDR", ":8082"),
+		MetricsAddr:  common.GetEnv("METRICS_ADDR", ":2112"),
+		NATSURL:      common.GetEnv("NATS_URL", "nats://nats:4222"),
+		ICEServers:   iceServers,
 		JWTSecretEnv: "JWT_SECRET",
 	}
 }
 
 // NewWebRTCService creates a new WebRTC service instance
 func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Logger) (*WebRTCService, error) {
-	nc, err := nats.Connect(config.NATSURL)
+	nc, err := nats.Connect(config.NATSURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -104,8 +117,25 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	iceServers := []webrtc.ICEServer{}
+	for _, url := range s.config.ICEServers {
+		if strings.Contains(url, "@") {
+			parts := strings.SplitN(url, "@", 2)
+			creds := strings.SplitN(parts[0], ":", 2)
+			if len(creds) == 2 {
+				iceServers = append(iceServers, webrtc.ICEServer{
+					URLs:           []string{parts[1]},
+					Username:       creds[0],
+					Credential:     creds[1],
+					CredentialType: webrtc.CredentialTypePassword,
+				})
+				continue
+			}
+		}
+		iceServers = append(iceServers, webrtc.ICEServer{URLs: []string{url}})
+	}
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: s.config.ICEServers}},
+		ICEServers: iceServers,
 	}
 
 	peerConnection, err := webrtc.NewPeerConnection(config)
@@ -158,6 +188,8 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	sub.SetPendingLimits(256, 32*1024*1024)
+
 	session := &StreamSession{
 		peerConnection: peerConnection,
 		videoTrack:     videoTrack,
@@ -203,17 +235,37 @@ func (s *WebRTCService) cleanupSession(cameraID string) {
 
 // healthHandler handles health check requests
 func (s *WebRTCService) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
 }
 
-// Start starts the HTTP server
-func (s *WebRTCService) Start() error {
+// Start starts the HTTP server and blocks until ctx is cancelled
+func (s *WebRTCService) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webrtc/offer", common.JWTAuthMiddleware(s.createOfferHandler))
 	mux.HandleFunc("/health", s.healthHandler)
 
-	s.logger.Info("WebRTC Relay Service listening", "address", s.config.HTTPAddr)
-	return http.ListenAndServe(s.config.HTTPAddr, mux)
+	server := &http.Server{
+		Addr:         s.config.HTTPAddr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		s.logger.Info("WebRTC Relay Service listening", "address", s.config.HTTPAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("WebRTC server error", "error", err)
+		}
+	}()
+
+	<-ctx.Done()
+	s.logger.Info("Shutting down WebRTC Service...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return server.Shutdown(shutdownCtx)
 }
 
 func main() {
@@ -224,12 +276,6 @@ func main() {
 	defer stop()
 
 	config := DefaultWebRTCConfig()
-	if addr := os.Getenv("HTTP_ADDR"); addr != "" {
-		config.HTTPAddr = addr
-	}
-	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		config.NATSURL = natsURL
-	}
 
 	common.StartMetricsServer(config.MetricsAddr)
 
@@ -240,7 +286,7 @@ func main() {
 	}
 	defer service.Close()
 
-	if err := service.Start(); err != nil {
+	if err := service.Start(ctx); err != nil {
 		logger.Error("WebRTC service failed", "error", err)
 		os.Exit(1)
 	}

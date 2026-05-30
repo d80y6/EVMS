@@ -6,41 +6,39 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
 )
 
-// PlaybackConfig holds configuration for the playback service
 type PlaybackConfig struct {
 	RecordingsRoot string
 	Port           string
 }
 
-// DefaultPlaybackConfig returns default configuration values
 func DefaultPlaybackConfig() *PlaybackConfig {
 	return &PlaybackConfig{
-		RecordingsRoot: getEnv("RECORDINGS_ROOT", "/recordings"),
-		Port:           getEnv("PLAYBACK_PORT", ":8086"),
+		RecordingsRoot: common.GetEnv("RECORDINGS_ROOT", "/recordings"),
+		Port:           common.GetEnv("PLAYBACK_PORT", ":8086"),
 	}
 }
 
-// PlaybackService handles video playback requests
 type PlaybackService struct {
 	config     *PlaybackConfig
 	logger     *slog.Logger
-	recordings string // absolute path to recordings root
+	recordings string
+	server     *http.Server
 }
 
-// NewPlaybackService creates a new playback service instance
 func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackService, error) {
 	absRoot, err := filepath.Abs(config.RecordingsRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path for recordings root: %w", err)
 	}
-
 	return &PlaybackService{
 		config:     config,
 		logger:     logger,
@@ -48,30 +46,40 @@ func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackS
 	}, nil
 }
 
-// Start begins the HTTP server
 func (s *PlaybackService) Start() error {
-	playbackHandler := http.HandlerFunc(s.handlePlaybackRequest)
-	http.HandleFunc("/playback/", common.JWTAuthMiddleware(playbackHandler))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/playback/", common.JWTAuthMiddleware(http.HandlerFunc(s.handlePlaybackRequest)))
+	mux.HandleFunc("/health", s.healthHandler)
 
-	s.logger.Info("Hardened Playback Service started", "address", s.config.Port, "root", s.recordings)
-
-	server := &http.Server{
+	s.server = &http.Server{
 		Addr:         s.config.Port,
+		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
 
-	return server.ListenAndServe()
+	s.logger.Info("Playback Service started", "address", s.config.Port, "root", s.recordings)
+	return s.server.ListenAndServe()
 }
 
-// handlePlaybackRequest serves recorded mp4 files with security hardening
+func (s *PlaybackService) Shutdown(ctx context.Context) error {
+	if s.server != nil {
+		return s.server.Shutdown(ctx)
+	}
+	return nil
+}
+
+func (s *PlaybackService) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
 func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.Request) {
-	// 1. Path Sanitization & Traversal Prevention
 	relPath := r.URL.Path[len("/playback/"):]
 	fullPath := filepath.Join(s.recordings, relPath)
 
-	// Ensure the resulting path is still within recordings root
 	finalPath, err := filepath.Abs(fullPath)
 	if err != nil || !strings.HasPrefix(finalPath, s.recordings) {
 		s.logger.Warn("Blocked traversal attempt", "path", relPath, "remote_addr", r.RemoteAddr)
@@ -79,7 +87,6 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 2. Check if file exists and is not a directory
 	info, err := os.Stat(finalPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -100,25 +107,16 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 	http.ServeFile(w, r, finalPath)
 }
 
-// Shutdown gracefully stops the HTTP server
-func (s *PlaybackService) Shutdown(ctx context.Context) error {
-	server := &http.Server{Addr: s.config.Port}
-	return server.Shutdown(ctx)
-}
-
-// getEnv retrieves environment variable with a default value
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	config := DefaultPlaybackConfig()
+
+	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 
 	service, err := NewPlaybackService(config, logger)
 	if err != nil {
@@ -126,8 +124,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := service.Start(); err != nil {
-		logger.Error("Playback service failed", "error", err)
-		os.Exit(1)
+	go func() {
+		if err := service.Start(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Playback service failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	logger.Info("Shutting down Playback Service...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		logger.Error("Error during shutdown", "error", err)
 	}
 }
