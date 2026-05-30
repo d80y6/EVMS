@@ -10,6 +10,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// GetEnv retrieves an environment variable with a default value fallback.
+func GetEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 type Claims struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`

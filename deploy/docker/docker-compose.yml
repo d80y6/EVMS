@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: ${DB_NAME:-dam_vms}
       POSTGRES_USER: ${DB_USER:-dam_admin}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-dam_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dam_admin} -d ${DB_NAME:-dam_vms}"]
       interval: 10s
@@ -57,9 +57,9 @@ services:
       context: ../../
       dockerfile: services/auth/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
       - REDIS_URL=redis:6379
-      - JWT_SECRET=${JWT_SECRET:-secret}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     depends_on:
       db:
         condition: service_healthy
@@ -71,7 +71,7 @@ services:
       context: ../../
       dockerfile: services/camera-mgmt/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
     depends_on:
       db:
         condition: service_healthy
@@ -97,7 +97,7 @@ services:
       context: ../../
       dockerfile: services/recorder/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:-dam_password}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
       - NATS_URL=nats://nats:4222
     volumes:
       - recordings:/recordings
@@ -125,7 +125,7 @@ services:
       dockerfile: services/webrtc/Dockerfile
     environment:
       - NATS_URL=nats://nats:4222
-      - JWT_SECRET=${JWT_SECRET:-secret}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     ports:
       - "8082:8082"
     depends_on:
@@ -137,11 +137,33 @@ services:
       context: ../../
       dockerfile: services/playback/Dockerfile
     environment:
-      - JWT_SECRET=${JWT_SECRET:-secret}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     volumes:
       - recordings:/recordings
     ports:
       - "8086:8086"
+
+  api-gateway:
+    build:
+      context: ../../
+      dockerfile: services/api-gateway/Dockerfile
+    environment:
+      - GATEWAY_PORT=:8090
+      - AUTH_SERVICE_URL=http://auth-service:8081
+      - CAMERA_SERVICE_ADDR=camera-mgmt:50051
+      - PLAYBACK_SERVICE_URL=http://playback-service:8086
+      - WEBRTC_SERVICE_URL=http://webrtc-service:8082
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+    ports:
+      - "8090:8090"
+    depends_on:
+      db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      camera-mgmt:
+        condition: service_started
 
 volumes:
   pgdata:

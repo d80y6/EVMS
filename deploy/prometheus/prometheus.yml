@@ -6,6 +6,6 @@ scrape_configs:
     static_configs:
       - targets:
         - 'camera-mgmt:2112'
-        # - 'auth-service:2112'
-        # - 'ingest-service:2112'
-        # - 'recorder-service:2112'
+        - 'ingest-service:2112'
+        - 'recorder-service:2112'
+        - 'webrtc-service:2112'

@@ -32,9 +32,9 @@ type CameraConfig struct {
 // DefaultCameraConfig returns default configuration values
 func DefaultCameraConfig() *CameraConfig {
 	return &CameraConfig{
-		DBURL:           getEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
-		GRPCPort:        getEnv("GRPC_PORT", ":50051"),
-		MetricsPort:     getEnv("METRICS_PORT", ":2112"),
+		DBURL:           common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
+		GRPCPort:        common.GetEnv("GRPC_PORT", ":50051"),
+		MetricsPort:     common.GetEnv("METRICS_ADDR", ":2112"),
 		GracefulTimeout: 30 * time.Second,
 	}
 }
@@ -89,7 +89,7 @@ func (s *CameraService) Start() error {
 	damv1.RegisterCameraServiceServer(s.server, s)
 	reflection.Register(s.server)
 
-	s.logger.Info("Camera Management Service (gRPC) started", 
+	s.logger.Info("Camera Management Service (gRPC) started",
 		"address", s.config.GRPCPort,
 		"metrics_address", s.config.MetricsPort)
 
@@ -108,11 +108,11 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 	var err error
 
 	if req.SiteId != "" {
-		err = s.db.SelectContext(ctx, &cameras, 
-			"SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE site_id = $1", 
+		err = s.db.SelectContext(ctx, &cameras,
+			"SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE site_id = $1",
 			req.SiteId)
 	} else {
-		err = s.db.SelectContext(ctx, &cameras, 
+		err = s.db.SelectContext(ctx, &cameras,
 			"SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras")
 	}
 
@@ -135,8 +135,8 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 // GetCamera returns a single camera by ID
 func (s *CameraService) GetCamera(ctx context.Context, req *damv1.GetCameraRequest) (*damv1.Camera, error) {
 	var c Camera
-	err := s.db.GetContext(ctx, &c, 
-		"SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE id = $1", 
+	err := s.db.GetContext(ctx, &c,
+		"SELECT id, site_id, name, description, connection_url, substream_url, status, created_at FROM cameras WHERE id = $1",
 		req.Id)
 	if err != nil {
 		s.logger.Error("Failed to get camera", "error", err, "id", req.Id)
@@ -148,7 +148,7 @@ func (s *CameraService) GetCamera(ctx context.Context, req *damv1.GetCameraReque
 // CreateCamera creates a new camera record
 func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCameraRequest) (*damv1.Camera, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, 
+	err := s.db.QueryRowContext(ctx,
 		"INSERT INTO cameras (site_id, name, connection_url, substream_url) VALUES ($1, $2, $3, $4) RETURNING id",
 		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl).Scan(&id)
 	if err != nil {
@@ -161,7 +161,7 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 
 // UpdateCamera updates an existing camera record
 func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCameraRequest) (*damv1.Camera, error) {
-	_, err := s.db.ExecContext(ctx, 
+	_, err := s.db.ExecContext(ctx,
 		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, updated_at = NOW() WHERE id = $5",
 		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.Id)
 	if err != nil {
@@ -218,29 +218,23 @@ func (s *CameraService) Shutdown(ctx context.Context) error {
 	if s.server != nil {
 		s.server.GracefulStop()
 	}
-	
+
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("failed to close database: %w", err)
 	}
-	
-	return nil
-}
 
-// getEnv retrieves environment variable with a default value
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
+	return nil
 }
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	config := DefaultCameraConfig()
 
-	// Start metrics server
 	common.StartMetricsServer(config.MetricsPort)
 
 	service, err := NewCameraService(config, logger)
@@ -254,16 +248,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
+	<-ctx.Done()
 	logger.Info("Shutting down Camera Management Service...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), config.GracefulTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.GracefulTimeout)
 	defer cancel()
 
-	if err := service.Shutdown(ctx); err != nil {
+	if err := service.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Error during shutdown", "error", err)
 	}
 }

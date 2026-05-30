@@ -12,17 +12,24 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
+func jsonError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 // AuthConfig holds configuration for the auth service
 type AuthConfig struct {
-	HTTPAddr   string
-	DBURL      string
-	JWTSecret  []byte
+	HTTPAddr    string
+	DBURL       string
+	JWTSecret   []byte
 	TokenExpiry time.Duration
 }
 
@@ -30,7 +37,7 @@ type AuthConfig struct {
 func DefaultAuthConfig() AuthConfig {
 	return AuthConfig{
 		HTTPAddr:    ":8081",
-		DBURL:       "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable",
+		DBURL:       common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
 		JWTSecret:   []byte(os.Getenv("JWT_SECRET")),
 		TokenExpiry: 24 * time.Hour,
 	}
@@ -42,13 +49,6 @@ func (c *AuthConfig) Validate() error {
 		return errors.New("JWT_SECRET environment variable is not set")
 	}
 	return nil
-}
-
-// Claims represents JWT token claims
-type Claims struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	jwt.RegisteredClaims
 }
 
 // User represents a user in the database
@@ -103,26 +103,26 @@ func (s *AuthService) Close() error {
 // handleLogin processes login requests
 func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.Warn("Invalid login request", "error", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	if req.Username == "" || req.Password == "" {
-		http.Error(w, "Username and password required", http.StatusBadRequest)
+		jsonError(w, "username and password required", http.StatusBadRequest)
 		return
 	}
 
 	token, err := s.authenticateUser(r.Context(), req.Username, req.Password)
 	if err != nil {
 		s.logger.Warn("Authentication failed", "username", req.Username, "error", err)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -133,8 +133,8 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 // authenticateUser validates credentials and returns a JWT token
 func (s *AuthService) authenticateUser(ctx context.Context, username, password string) (string, error) {
 	var user User
-	err := s.db.GetContext(ctx, &user, 
-		"SELECT id, username, password_hash, role FROM users WHERE username = $1", 
+	err := s.db.GetContext(ctx, &user,
+		"SELECT id, username, password_hash, role FROM users WHERE username = $1",
 		username)
 	if err != nil {
 		return "", fmt.Errorf("user not found: %w", err)
@@ -150,7 +150,7 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 // generateToken creates a JWT token for a user
 func (s *AuthService) generateToken(user User) (string, error) {
 	expirationTime := time.Now().Add(s.config.TokenExpiry)
-	claims := &Claims{
+	claims := &common.Claims{
 		Username: user.Username,
 		Role:     user.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -165,17 +165,37 @@ func (s *AuthService) generateToken(user User) (string, error) {
 
 // healthHandler handles health check requests
 func (s *AuthService) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
 }
 
-// Start starts the HTTP server
-func (s *AuthService) Start() error {
+// Start starts the HTTP server and blocks until ctx is cancelled
+func (s *AuthService) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login", s.handleLogin)
 	mux.HandleFunc("/health", s.healthHandler)
 
-	s.logger.Info("Auth Service starting", "address", s.config.HTTPAddr)
-	return http.ListenAndServe(s.config.HTTPAddr, mux)
+	server := &http.Server{
+		Addr:         s.config.HTTPAddr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		s.logger.Info("Auth Service starting", "address", s.config.HTTPAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("Auth server error", "error", err)
+		}
+	}()
+
+	<-ctx.Done()
+	s.logger.Info("Shutting down Auth Service...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return server.Shutdown(shutdownCtx)
 }
 
 func main() {
@@ -198,6 +218,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
+
 	service, err := NewAuthService(ctx, config, logger)
 	if err != nil {
 		logger.Error("Failed to create auth service", "error", err)
@@ -205,7 +227,7 @@ func main() {
 	}
 	defer service.Close()
 
-	if err := service.Start(); err != nil {
+	if err := service.Start(ctx); err != nil {
 		logger.Error("Auth service failed", "error", err)
 		os.Exit(1)
 	}

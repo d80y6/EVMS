@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
@@ -26,8 +27,8 @@ type MetadataConfig struct {
 // DefaultMetadataConfig returns default configuration values
 func DefaultMetadataConfig() *MetadataConfig {
 	return &MetadataConfig{
-		DBURL:      getEnv("DB_URL", ""),
-		NATSURL:    getEnv("NATS_URL", "nats://nats:4222"),
+		DBURL:      common.GetEnv("DB_URL", ""),
+		NATSURL:    common.GetEnv("NATS_URL", "nats://nats:4222"),
 		MaxRetries: 3,
 	}
 }
@@ -60,7 +61,11 @@ func NewMetadataService(config *MetadataConfig, logger *slog.Logger) (*MetadataS
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	nc, err := nats.Connect(config.NATSURL)
+	nc, err := nats.Connect(config.NATSURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+	)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
@@ -77,7 +82,7 @@ func NewMetadataService(config *MetadataConfig, logger *slog.Logger) (*MetadataS
 // Start begins listening for AI events
 func (s *MetadataService) Start() error {
 	var err error
-	s.sub, err = s.nc.Subscribe("camera.*.events", s.handleAIEvent)
+	s.sub, err = s.nc.QueueSubscribe("camera.*.events", "metadata", s.handleAIEvent, nats.PendingLimits(1024, 64*1024*1024))
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to NATS subject: %w", err)
 	}
@@ -162,19 +167,16 @@ func (s *MetadataService) Close() error {
 	return nil
 }
 
-// getEnv retrieves environment variable with a default value
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	config := DefaultMetadataConfig()
+
+	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 
 	service, err := NewMetadataService(config, logger)
 	if err != nil {
@@ -188,9 +190,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
+	<-ctx.Done()
 	logger.Info("Shutting down AI Metadata Service...")
 }

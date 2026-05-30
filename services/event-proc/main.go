@@ -11,19 +11,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dam-vms/dam/pkg/common"
 	"github.com/nats-io/nats.go"
 )
 
 // EventProcConfig holds configuration for the event processing service
 type EventProcConfig struct {
-	NATSURL              string
+	NATSURL                   string
 	PersonConfidenceThreshold float64
 }
 
 // DefaultEventProcConfig returns default configuration values
 func DefaultEventProcConfig() *EventProcConfig {
 	return &EventProcConfig{
-		NATSURL:               getEnv("NATS_URL", "nats://nats:4222"),
+		NATSURL:                   common.GetEnv("NATS_URL", "nats://nats:4222"),
 		PersonConfidenceThreshold: 0.8,
 	}
 }
@@ -37,15 +38,19 @@ type Detection struct {
 
 // EventProcessor handles AI event correlation and notification triggering
 type EventProcessor struct {
-	config *EventProcConfig
-	nc     *nats.Conn
-	logger *slog.Logger
+	config   *EventProcConfig
+	nc       *nats.Conn
+	logger   *slog.Logger
 	eventSub *nats.Subscription
 }
 
 // NewEventProcessor creates a new event processor instance
 func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
-	nc, err := nats.Connect(config.NATSURL)
+	nc, err := nats.Connect(config.NATSURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -60,12 +65,12 @@ func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProc
 // Start begins listening for camera events
 func (s *EventProcessor) Start() error {
 	var err error
-	s.eventSub, err = s.nc.Subscribe("camera.*.events", s.handleCameraEvent)
+	s.eventSub, err = s.nc.QueueSubscribe("camera.*.events", "event-proc", s.handleCameraEvent, nats.PendingLimits(1024, 64*1024*1024))
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to camera events: %w", err)
 	}
 
-	s.logger.Info("Event Processing Service started", 
+	s.logger.Info("Event Processing Service started",
 		"person_confidence_threshold", s.config.PersonConfidenceThreshold)
 	return nil
 }
@@ -93,9 +98,9 @@ func (s *EventProcessor) shouldTriggerNotification(d Detection) bool {
 // triggerNotification sends a notification for a significant detection
 func (s *EventProcessor) triggerNotification(subject string, detection Detection) {
 	cameraID := extractCameraID(subject)
-	
-	s.logger.Info("Person detected! Triggering notification.", 
-		"camera", subject, 
+
+	s.logger.Info("Person detected! Triggering notification.",
+		"camera", subject,
 		"camera_id", cameraID,
 		"confidence", detection.Confidence)
 
@@ -103,7 +108,7 @@ func (s *EventProcessor) triggerNotification(subject string, detection Detection
 		"title":   "Security Alert",
 		"message": fmt.Sprintf("Person detected on camera %s with %.0f%% confidence", cameraID, detection.Confidence*100),
 	}
-	
+
 	data, err := json.Marshal(notification)
 	if err != nil {
 		s.logger.Error("Failed to marshal notification", "error", err)
@@ -144,19 +149,16 @@ func (s *EventProcessor) Close() error {
 	return nil
 }
 
-// getEnv retrieves environment variable with a default value
-func getEnv(key string, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	config := DefaultEventProcConfig()
+
+	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 
 	service, err := NewEventProcessor(config, logger)
 	if err != nil {
@@ -170,9 +172,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
+	<-ctx.Done()
 	logger.Info("Shutting down Event Processing Service...")
 }
