@@ -116,6 +116,7 @@ type GatewayConfig struct {
 	CameraServiceAddr  string
 	PlaybackServiceURL string
 	WebRTCServiceURL   string
+	CameraControlURL   string
 	DBURL              string
 	MetricsAddr        string
 }
@@ -127,21 +128,23 @@ func DefaultGatewayConfig() GatewayConfig {
 		CameraServiceAddr:  common.GetEnv("CAMERA_SERVICE_ADDR", "camera-mgmt:50051"),
 		PlaybackServiceURL: common.GetEnv("PLAYBACK_SERVICE_URL", "http://playback-service:8086"),
 		WebRTCServiceURL:   common.GetEnv("WEBRTC_SERVICE_URL", "http://webrtc-service:8082"),
+		CameraControlURL:   common.GetEnv("CAMERA_CONTROL_URL", "http://camera-control:8088"),
 		DBURL:              common.GetEnv("DB_URL", ""),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 	}
 }
 
 type Gateway struct {
-	config        GatewayConfig
-	logger        *slog.Logger
-	db            *sqlx.DB
-	cameraCC      *grpc.ClientConn
-	cameraSvc     damv1.CameraServiceClient
-	authProxy     *httputil.ReverseProxy
-	playbackProxy *httputil.ReverseProxy
-	webrtcProxy   *httputil.ReverseProxy
-	rateLimiter   *rateLimiter
+	config             GatewayConfig
+	logger             *slog.Logger
+	db                 *sqlx.DB
+	cameraCC           *grpc.ClientConn
+	cameraSvc          damv1.CameraServiceClient
+	authProxy          *httputil.ReverseProxy
+	playbackProxy      *httputil.ReverseProxy
+	webrtcProxy        *httputil.ReverseProxy
+	cameraControlProxy *httputil.ReverseProxy
+	rateLimiter        *rateLimiter
 }
 
 func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
@@ -164,17 +167,19 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	authURL, _ := url.Parse(config.AuthServiceURL)
 	playbackURL, _ := url.Parse(config.PlaybackServiceURL)
 	webrtcURL, _ := url.Parse(config.WebRTCServiceURL)
+	cameraControlURL, _ := url.Parse(config.CameraControlURL)
 
 	return &Gateway{
-		config:        config,
-		logger:        logger,
-		db:            db,
-		cameraCC:      cameraCC,
-		cameraSvc:     cameraSvc,
-		authProxy:     httputil.NewSingleHostReverseProxy(authURL),
-		playbackProxy: httputil.NewSingleHostReverseProxy(playbackURL),
-		webrtcProxy:   httputil.NewSingleHostReverseProxy(webrtcURL),
-		rateLimiter:   newRateLimiter(100, 200, 10*time.Minute),
+		config:             config,
+		logger:             logger,
+		db:                 db,
+		cameraCC:           cameraCC,
+		cameraSvc:          cameraSvc,
+		authProxy:          httputil.NewSingleHostReverseProxy(authURL),
+		playbackProxy:      httputil.NewSingleHostReverseProxy(playbackURL),
+		webrtcProxy:        httputil.NewSingleHostReverseProxy(webrtcURL),
+		cameraControlProxy: httputil.NewSingleHostReverseProxy(cameraControlURL),
+		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 	}, nil
 }
 
@@ -201,6 +206,46 @@ func (g *Gateway) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+func (g *Gateway) requireRole(minRole string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				jsonError(w, "authorization required", http.StatusUnauthorized)
+				return
+			}
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			claims, err := common.ValidateJWT(token)
+			if err != nil {
+				jsonError(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			roleLevels := map[string]int{
+				"viewer":   1,
+				"operator": 2,
+				"admin":    3,
+			}
+
+			userLevel, ok := roleLevels[claims.Role]
+			if !ok {
+				userLevel = 0
+			}
+			requiredLevel, ok := roleLevels[minRole]
+			if !ok {
+				requiredLevel = 99
+			}
+
+			if userLevel < requiredLevel {
+				jsonError(w, "insufficient permissions", http.StatusForbidden)
+				return
+			}
+
+			next(w, r)
+		}
 	}
 }
 
@@ -316,6 +361,11 @@ func (g *Gateway) handleWebRTC(w http.ResponseWriter, r *http.Request) {
 	g.webrtcProxy.ServeHTTP(w, r)
 }
 
+func (g *Gateway) handleCameraControl(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	g.cameraControlProxy.ServeHTTP(w, r)
+}
+
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -323,7 +373,7 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -346,6 +396,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handlePlayback))(w, r)
 	case strings.HasPrefix(path, "/api/webrtc/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleWebRTC))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && (strings.Contains(path, "/ptz/") || strings.HasSuffix(path, "/ptz/presets")):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
