@@ -1,8 +1,6 @@
 module github.com/dam-vms/dam
 
-go 1.24
-
-toolchain go1.24.3
+go 1.19
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
