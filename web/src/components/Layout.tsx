@@ -2,15 +2,23 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const navItems = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: string;
+  adminOnly?: boolean;
+}
+
+const navItems: NavItem[] = [
   { to: '/', label: 'Live View', icon: '■' },
   { to: '/recordings', label: 'Recordings', icon: '▶' },
   { to: '/events', label: 'Events', icon: '!' },
+  { to: '/admin', label: 'Admin', icon: '⚙', adminOnly: true },
   { to: '/settings', label: 'Settings', icon: '⚙' },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { logout } = useAuth();
+  const { logout, role, username } = useAuth();
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 font-sans selection:bg-indigo-500/30">
@@ -22,31 +30,39 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
 
           <nav className="flex flex-col gap-2 flex-1">
-            {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === '/'}
-                className={({ isActive }) =>
-                  `px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-3 ${
-                    isActive
-                      ? 'bg-slate-800 text-indigo-400'
-                      : 'text-slate-400 hover:bg-slate-900 hover:text-slate-300'
-                  }`
-                }
-              >
-                <span className="w-5 text-center">{item.icon}</span>
-                {item.label}
-              </NavLink>
-            ))}
+            {navItems
+              .filter((item) => !item.adminOnly || role === 'admin')
+              .map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.to === '/'}
+                  className={({ isActive }) =>
+                    `px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center gap-3 ${
+                      isActive
+                        ? 'bg-slate-800 text-indigo-400'
+                        : 'text-slate-400 hover:bg-slate-900 hover:text-slate-300'
+                    }`
+                  }
+                >
+                  <span className="w-5 text-center">{item.icon}</span>
+                  {item.label}
+                </NavLink>
+              ))}
           </nav>
 
-          <button
-            onClick={logout}
-            className="px-4 py-2 text-sm font-medium text-slate-500 hover:text-red-400 transition-colors text-left"
-          >
-            Sign Out
-          </button>
+          <div className="space-y-2">
+            <div className="px-4 text-xs text-slate-600">
+              <span className="block">{username}</span>
+              <span className="block uppercase tracking-wider text-[10px]">{role}</span>
+            </div>
+            <button
+              onClick={logout}
+              className="w-full px-4 py-2 text-sm font-medium text-slate-500 hover:text-red-400 transition-colors text-left"
+            >
+              Sign Out
+            </button>
+          </div>
         </aside>
 
         <main className="flex-1 flex flex-col">

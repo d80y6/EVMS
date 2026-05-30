@@ -115,4 +115,24 @@ export const api = {
 
   getThumbnailUrl: (path: string) =>
     `${API_BASE}${path}`,
+
+  getUsers: () =>
+    request<{ users: { id: string; username: string; role: string; active: boolean; created_at: string }[] }>('/admin/users'),
+
+  createUser: (username: string, password: string, role: string) =>
+    request<{ id: string; status: string }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, role }),
+    }),
+
+  updateUser: (id: string, data: { role?: string; password?: string }) =>
+    request<{ status: string }>(`/admin/users/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  deleteUser: (id: string) =>
+    request<{ status: string }>(`/admin/users/${id}`, {
+      method: 'DELETE',
+    }),
 };

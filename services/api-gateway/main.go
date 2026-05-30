@@ -277,6 +277,8 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 		ConnectionURL string `json:"connection_url"`
 		SubstreamURL  string `json:"substream_url"`
 		Status        string `json:"status"`
+		PtzProtocol   string `json:"ptz_protocol"`
+		RetentionDays int32  `json:"retention_days"`
 	}
 
 	cameras := make([]cameraJSON, len(resp.Cameras))
@@ -289,6 +291,8 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 			ConnectionURL: c.ConnectionUrl,
 			SubstreamURL:  c.SubstreamUrl,
 			Status:        c.Status,
+			PtzProtocol:   c.PtzProtocol,
+			RetentionDays: c.RetentionDays,
 		}
 	}
 
@@ -410,6 +414,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
 	case strings.HasPrefix(path, "/api/thumbnails/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleThumbnails))(w, r)
+	case strings.HasPrefix(path, "/api/admin/users"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleLogin))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
