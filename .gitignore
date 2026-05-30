@@ -1,58 +1,42 @@
 ```
-# Rust compilation artifacts
-target/
-Cargo.lock
+# Dependencies
+go.sum
 
-# Python artifacts (if any Python components exist)
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv/
-
-# Logs
-*.log
-
-# Environment variables
-.env
-.env.local
-.env.*
-
-# IDE specific
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# Coverage reports
-coverage/
-htmlcov/
-.coverage
-
-# Build outputs
-dist/
-build/
-*.out
+# Binaries
 *.exe
 *.dll
 *.so
 *.a
+*.o
+*.out
 *.obj
 
-# Package managers
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Build artifacts
+bin/
+dist/
+build/
 
-# Testing
-.mypy_cache/
-.pytest_cache/
+# Environment
+.env
+.env.local
+*.env.*
+
+# Logs
+*.log
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# OS
+.DS_Store
+Thumbs.db
 ```
