@@ -1,0 +1,45 @@
+import React, { useState } from 'react';
+import CameraView from './CameraView';
+import PtzOverlay from './PtzOverlay';
+
+interface CameraCardProps {
+  cameraId: string;
+  name: string;
+  status: string;
+  ptzProtocol: string;
+}
+
+export default function CameraCard({ cameraId, name, status, ptzProtocol }: CameraCardProps) {
+  const [ptzVisible, setPtzVisible] = useState(false);
+
+  return (
+    <div className="space-y-3">
+      <div className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group">
+        <CameraView cameraId={cameraId} />
+        {ptzProtocol !== 'none' && (
+          <PtzOverlay
+            cameraId={cameraId}
+            visible={ptzVisible}
+            onVisibilityChange={setPtzVisible}
+          />
+        )}
+      </div>
+      <div className="flex justify-between items-center px-1">
+        <div className="flex items-center gap-2">
+          <div
+            className={`w-1.5 h-1.5 rounded-full ${
+              status === 'online'
+                ? 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]'
+                : 'bg-red-500'
+            }`}
+          />
+          <h3 className="text-sm font-bold text-slate-200">{name}</h3>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">H.264</span>
+          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">1080P</span>
+        </div>
+      </div>
+    </div>
+  );
+}

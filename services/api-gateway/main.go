@@ -117,6 +117,7 @@ type GatewayConfig struct {
 	PlaybackServiceURL string
 	WebRTCServiceURL   string
 	CameraControlURL   string
+	ThumbnailsURL      string
 	DBURL              string
 	MetricsAddr        string
 }
@@ -129,6 +130,7 @@ func DefaultGatewayConfig() GatewayConfig {
 		PlaybackServiceURL: common.GetEnv("PLAYBACK_SERVICE_URL", "http://playback-service:8086"),
 		WebRTCServiceURL:   common.GetEnv("WEBRTC_SERVICE_URL", "http://webrtc-service:8082"),
 		CameraControlURL:   common.GetEnv("CAMERA_CONTROL_URL", "http://camera-control:8088"),
+		ThumbnailsURL:      common.GetEnv("THUMBNAILS_URL", "http://thumbnails:8089"),
 		DBURL:              common.GetEnv("DB_URL", ""),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 	}
@@ -144,6 +146,7 @@ type Gateway struct {
 	playbackProxy      *httputil.ReverseProxy
 	webrtcProxy        *httputil.ReverseProxy
 	cameraControlProxy *httputil.ReverseProxy
+	thumbnailsProxy    *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
 }
 
@@ -168,6 +171,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	playbackURL, _ := url.Parse(config.PlaybackServiceURL)
 	webrtcURL, _ := url.Parse(config.WebRTCServiceURL)
 	cameraControlURL, _ := url.Parse(config.CameraControlURL)
+	thumbnailsURL, _ := url.Parse(config.ThumbnailsURL)
 
 	return &Gateway{
 		config:             config,
@@ -179,6 +183,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		playbackProxy:      httputil.NewSingleHostReverseProxy(playbackURL),
 		webrtcProxy:        httputil.NewSingleHostReverseProxy(webrtcURL),
 		cameraControlProxy: httputil.NewSingleHostReverseProxy(cameraControlURL),
+		thumbnailsProxy:    httputil.NewSingleHostReverseProxy(thumbnailsURL),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 	}, nil
 }
@@ -366,6 +371,11 @@ func (g *Gateway) handleCameraControl(w http.ResponseWriter, r *http.Request) {
 	g.cameraControlProxy.ServeHTTP(w, r)
 }
 
+func (g *Gateway) handleThumbnails(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	g.thumbnailsProxy.ServeHTTP(w, r)
+}
+
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -398,6 +408,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleWebRTC))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && (strings.Contains(path, "/ptz/") || strings.HasSuffix(path, "/ptz/presets")):
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/thumbnails/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleThumbnails))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}

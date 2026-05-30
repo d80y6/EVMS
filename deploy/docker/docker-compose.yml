@@ -132,6 +132,30 @@ services:
       nats:
         condition: service_healthy
 
+  camera-control:
+    build:
+      context: ../../
+      dockerfile: services/camera-control/Dockerfile
+    environment:
+      - CAMERA_SERVICE_ADDR=camera-mgmt:50051
+    depends_on:
+      camera-mgmt:
+        condition: service_started
+
+  thumbnails:
+    build:
+      context: ../../
+      dockerfile: services/thumbnails/Dockerfile
+    environment:
+      - RECORDINGS_ROOT=/recordings
+      - THUMBNAIL_CACHE=/cache/thumbnails
+    volumes:
+      - recordings:/recordings
+      - thumbnail-cache:/cache/thumbnails
+    depends_on:
+      db:
+        condition: service_healthy
+
   playback-service:
     build:
       context: ../../
@@ -153,6 +177,8 @@ services:
       - CAMERA_SERVICE_ADDR=camera-mgmt:50051
       - PLAYBACK_SERVICE_URL=http://playback-service:8086
       - WEBRTC_SERVICE_URL=http://webrtc-service:8082
+      - CAMERA_CONTROL_URL=http://camera-control:8088
+      - THUMBNAILS_URL=http://thumbnails:8089
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     ports:
@@ -164,7 +190,12 @@ services:
         condition: service_started
       camera-mgmt:
         condition: service_started
+      camera-control:
+        condition: service_started
+      thumbnails:
+        condition: service_started
 
 volumes:
   pgdata:
   recordings:
+  thumbnail-cache:

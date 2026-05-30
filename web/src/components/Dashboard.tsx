@@ -1,23 +1,32 @@
 import React, { useEffect, useState } from 'react';
+import { VirtuosoGrid } from 'react-virtuoso';
 import { api, Camera } from '../api/client';
-import CameraView from './CameraView';
+import CameraCard from './CameraCard';
 
-const FALLBACK_CAMERAS = [
-  { id: 'demo_cam', name: 'Front Entrance' },
-  { id: 'parking_lot', name: 'Parking Lot' },
-  { id: 'warehouse', name: 'Main Warehouse' },
+type LayoutMode = '1x1' | '2x2' | '3x3';
+
+const LAYOUT_COLS: Record<LayoutMode, string> = {
+  '1x1': 'grid-cols-1',
+  '2x2': 'grid-cols-1 xl:grid-cols-2',
+  '3x3': 'grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3',
+};
+
+const FALLBACK_CAMERAS: Camera[] = [
+  { id: 'demo_cam', site_id: '', name: 'Front Entrance', description: '', connection_url: '', substream_url: '', status: 'online', ptz_protocol: 'onvif', retention_days: 7 },
+  { id: 'parking_lot', site_id: '', name: 'Parking Lot', description: '', connection_url: '', substream_url: '', status: 'online', ptz_protocol: 'none', retention_days: 7 },
+  { id: 'warehouse', site_id: '', name: 'Main Warehouse', description: '', connection_url: '', substream_url: '', status: 'offline', ptz_protocol: 'none', retention_days: 7 },
 ];
 
 export default function Dashboard() {
-  const [cameras, setCameras] = useState<{ id: string; name: string }[]>(FALLBACK_CAMERAS);
+  const [cameras, setCameras] = useState<Camera[]>(FALLBACK_CAMERAS);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [layout, setLayout] = useState<LayoutMode>('3x3');
 
   useEffect(() => {
     api.getCameras()
       .then((data) => {
         if (data.cameras && data.cameras.length > 0) {
-          setCameras(data.cameras.map((c: Camera) => ({ id: c.id, name: c.name })));
+          setCameras(data.cameras);
         }
         setIsLoading(false);
       })
@@ -29,28 +38,48 @@ export default function Dashboard() {
   return (
     <>
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-lg font-semibold text-slate-200">Live View</h2>
-        {isLoading && (
-          <span className="text-xs text-slate-500">Connecting to camera service...</span>
-        )}
-        {!isLoading && error && (
-          <span className="text-xs text-amber-400">Using fallback camera list</span>
-        )}
+        <div className="flex items-center gap-4">
+          <h2 className="text-lg font-semibold text-slate-200">Live View</h2>
+          {isLoading && (
+            <span className="text-xs text-slate-500">Connecting to camera service...</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg p-1">
+          {(['1x1', '2x2', '3x3'] as LayoutMode[]).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setLayout(mode)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                layout === mode
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-400 hover:text-slate-300'
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-8">
-        {cameras.map((cam) => (
-          <div key={cam.id} className="space-y-3">
-            <CameraView cameraId={cam.id} />
-            <div className="flex justify-between items-center px-1">
-              <h3 className="text-sm font-bold text-slate-200">{cam.name}</h3>
-              <div className="flex gap-2">
-                <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">H.264</span>
-                <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">1080P</span>
+      <div className="-mx-2">
+        <VirtuosoGrid
+          totalCount={cameras.length}
+          overscan={200}
+          itemContent={(index) => {
+            const cam = cameras[index];
+            return (
+              <div className="px-2 pb-4">
+                <CameraCard
+                  cameraId={cam.id}
+                  name={cam.name}
+                  status={cam.status}
+                  ptzProtocol={cam.ptz_protocol}
+                />
               </div>
-            </div>
-          </div>
-        ))}
+            );
+          }}
+          listClassName={`grid ${LAYOUT_COLS[layout]} gap-0`}
+        />
       </div>
     </>
   );

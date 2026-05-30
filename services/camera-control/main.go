@@ -134,12 +134,12 @@ func (s *PTZService) handlePTZRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch action {
-	case "move":
+	switch {
+	case action == "move":
 		s.handleMove(w, r, camera)
-	case "zoom":
+	case action == "zoom":
 		s.handleZoom(w, r, camera)
-	case "presets":
+	case action == "presets":
 		if r.Method == http.MethodGet {
 			s.handleListPresets(w, r, camera)
 		} else if r.Method == http.MethodPost {
@@ -147,9 +147,9 @@ func (s *PTZService) handlePTZRouter(w http.ResponseWriter, r *http.Request) {
 		} else {
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	case "preset/goto":
+	case action == "preset/goto" || strings.HasSuffix(action, "/goto"):
 		s.handleGotoPreset(w, r, camera)
-	case "stop":
+	case action == "stop":
 		s.handleStop(w, r, camera)
 	default:
 		jsonError(w, fmt.Sprintf("unknown PTZ action: %s", action), http.StatusBadRequest)
@@ -278,13 +278,23 @@ func (s *PTZService) handleGotoPreset(w http.ResponseWriter, r *http.Request, ca
 		return
 	}
 
-	var req gotoPresetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
+	presetToken := ""
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/cameras/"), "/")
+	if len(parts) >= 5 && parts[2] == "presets" && parts[len(parts)-1] == "goto" {
+		presetToken = parts[len(parts)-2]
 	}
 
-	if err := s.sendPTZCommand(camera, "goto_preset", strconv.Itoa(req.PresetID), 0); err != nil {
+	if presetToken == "" {
+		var req gotoPresetRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		presetToken = strconv.Itoa(req.PresetID)
+	}
+
+	if err := s.sendPTZCommand(camera, "goto_preset", presetToken, 0); err != nil {
 		s.logger.Error("Failed to goto preset", "camera", camera.Id, "error", err)
 		jsonError(w, fmt.Sprintf("failed to goto preset: %v", err), http.StatusInternalServerError)
 		return

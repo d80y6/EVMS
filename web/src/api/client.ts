@@ -54,6 +54,11 @@ export interface AIEvent {
   event_time: string;
 }
 
+export interface Preset {
+  id: number;
+  name: string;
+}
+
 export interface LoginResponse {
   token: string;
 }
@@ -76,4 +81,38 @@ export const api = {
 
   getPlaybackUrl: (path: string) =>
     `${API_BASE}/playback/${path}`,
+
+  ptzMove: (cameraId: string, direction: string, speed: number) =>
+    request<{ status: string }>(`/cameras/${cameraId}/ptz/move`, {
+      method: 'POST',
+      body: JSON.stringify({ direction, speed }),
+    }),
+
+  ptzStop: (cameraId: string) =>
+    request<{ status: string }>(`/cameras/${cameraId}/ptz/stop`, {
+      method: 'POST',
+    }),
+
+  ptzZoom: (cameraId: string, zoom: number) =>
+    request<{ status: string }>(`/cameras/${cameraId}/ptz/zoom`, {
+      method: 'POST',
+      body: JSON.stringify({ zoom }),
+    }),
+
+  ptzGetPresets: (cameraId: string) =>
+    request<{ presets: Preset[] }>(`/cameras/${cameraId}/ptz/presets`),
+
+  ptzGotoPreset: (cameraId: string, presetId: string) =>
+    request<{ status: string }>(`/cameras/${cameraId}/ptz/presets/${presetId}/goto`, {
+      method: 'POST',
+    }),
+
+  getTimeline: (cameraId: string, start: string, end: string, interval?: number) => {
+    const params = new URLSearchParams({ camera_id: cameraId, start, end });
+    if (interval) params.set('interval', String(interval));
+    return request<{ thumbnails: { timestamp: string; url: string }[] }>(`/thumbnails/timeline?${params}`);
+  },
+
+  getThumbnailUrl: (path: string) =>
+    `${API_BASE}${path}`,
 };
