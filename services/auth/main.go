@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,11 +54,36 @@ func (c *AuthConfig) Validate() error {
 
 // User represents a user in the database
 type User struct {
-	ID           string    `db:"id"`
-	Username     string    `db:"username"`
-	PasswordHash string    `db:"password_hash"`
-	Role         string    `db:"role"`
-	CreatedAt    time.Time `db:"created_at"`
+	ID           string     `db:"id"`
+	Username     string     `db:"username"`
+	PasswordHash string     `db:"password_hash"`
+	Role         string     `db:"role"`
+	Active       bool       `db:"active"`
+	CreatedAt    time.Time  `db:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at"`
+	DeletedAt    *time.Time `db:"deleted_at"`
+}
+
+// UserResponse is the public representation of a user (no password hash)
+type UserResponse struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// CreateUserRequest represents a request to create a user
+type CreateUserRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Role     string `json:"role"`
+}
+
+// UpdateUserRequest represents a request to update a user
+type UpdateUserRequest struct {
+	Role     string `json:"role,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // LoginRequest represents a login request
@@ -163,6 +189,186 @@ func (s *AuthService) generateToken(user User) (string, error) {
 	return token.SignedString(s.config.JWTSecret)
 }
 
+func (s *AuthService) adminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			jsonError(w, "authorization required", http.StatusUnauthorized)
+			return
+		}
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := common.ValidateJWT(token)
+		if err != nil {
+			jsonError(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		if claims.Role != "admin" {
+			jsonError(w, "admin role required", http.StatusForbidden)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func (s *AuthService) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var users []User
+	err := s.db.SelectContext(r.Context(), &users,
+		"SELECT id, username, role, active, created_at, updated_at FROM users ORDER BY created_at DESC")
+	if err != nil {
+		s.logger.Error("Failed to list users", "error", err)
+		jsonError(w, "failed to list users", http.StatusInternalServerError)
+		return
+	}
+
+	resp := make([]UserResponse, len(users))
+	for i, u := range users {
+		resp[i] = UserResponse{
+			ID:        u.ID,
+			Username:  u.Username,
+			Role:      u.Role,
+			Active:    u.Active,
+			CreatedAt: u.CreatedAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"users": resp})
+}
+
+func (s *AuthService) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		jsonError(w, "username and password required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Role == "" {
+		req.Role = "viewer"
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		s.logger.Error("Failed to hash password", "error", err)
+		jsonError(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+
+	var id string
+	err = s.db.QueryRowContext(r.Context(),
+		"INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id",
+		req.Username, string(hash), req.Role).Scan(&id)
+	if err != nil {
+		s.logger.Error("Failed to create user", "error", err)
+		jsonError(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "created"})
+}
+
+func (s *AuthService) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := extractIDFromPath(r.URL.Path, "/auth/admin/users/")
+	if id == "" {
+		jsonError(w, "user id required", http.StatusBadRequest)
+		return
+	}
+
+	var req UpdateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Role != "" {
+		_, err := s.db.ExecContext(r.Context(),
+			"UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 AND active = true",
+			req.Role, id)
+		if err != nil {
+			s.logger.Error("Failed to update user", "error", err)
+			jsonError(w, "failed to update user", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if req.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			s.logger.Error("Failed to hash password", "error", err)
+			jsonError(w, "failed to update user", http.StatusInternalServerError)
+			return
+		}
+		_, err = s.db.ExecContext(r.Context(),
+			"UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND active = true",
+			string(hash), id)
+		if err != nil {
+			s.logger.Error("Failed to update password", "error", err)
+			jsonError(w, "failed to update user", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
+func (s *AuthService) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := extractIDFromPath(r.URL.Path, "/auth/admin/users/")
+	if id == "" {
+		jsonError(w, "user id required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := s.db.ExecContext(r.Context(),
+		"UPDATE users SET active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND active = true",
+		id)
+	if err != nil {
+		s.logger.Error("Failed to deactivate user", "error", err)
+		jsonError(w, "failed to deactivate user", http.StatusInternalServerError)
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		jsonError(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "deactivated"})
+}
+
+func extractIDFromPath(path, prefix string) string {
+	return strings.TrimPrefix(path, prefix)
+}
+
 // healthHandler handles health check requests
 func (s *AuthService) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -174,6 +380,26 @@ func (s *AuthService) healthHandler(w http.ResponseWriter, r *http.Request) {
 func (s *AuthService) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login", s.handleLogin)
+	mux.HandleFunc("/auth/admin/users", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.adminOnly(s.handleAdminListUsers)(w, r)
+		case http.MethodPost:
+			s.adminOnly(s.handleAdminCreateUser)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/auth/admin/users/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			s.adminOnly(s.handleAdminUpdateUser)(w, r)
+		case http.MethodDelete:
+			s.adminOnly(s.handleAdminDeleteUser)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 	mux.HandleFunc("/health", s.healthHandler)
 
 	server := &http.Server{

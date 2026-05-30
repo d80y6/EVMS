@@ -9,6 +9,7 @@ import LoginPage from './pages/LoginPage';
 import RecordingsPage from './pages/RecordingsPage';
 import EventsPage from './pages/EventsPage';
 import SettingsPage from './pages/SettingsPage';
+import AdminPage from './pages/AdminPage';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -43,6 +44,16 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               <ProtectedRoute>
                 <Layout>
                   <EventsPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <AdminPage />
                 </Layout>
               </ProtectedRoute>
             }

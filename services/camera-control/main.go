@@ -338,6 +338,9 @@ func (s *PTZService) listPTZPresets(camera *damv1.Camera) ([]presetItem, error) 
 }
 
 func resolvePTZProtocol(camera *damv1.Camera) string {
+	if camera.PtzProtocol != "" && camera.PtzProtocol != "none" {
+		return camera.PtzProtocol
+	}
 	return "onvif"
 }
 
