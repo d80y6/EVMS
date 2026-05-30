@@ -69,6 +69,7 @@ type Recorder struct {
 	db     *sqlx.DB
 	logger *slog.Logger
 	config RecorderConfig
+	sub    *nats.Subscription
 }
 
 // NewRecorder creates a new recorder instance
@@ -87,8 +88,19 @@ func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger
 
 // Close gracefully shuts down the recorder
 func (r *Recorder) Close() error {
+	var errs []error
+	if r.sub != nil {
+		if err := r.sub.Unsubscribe(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if r.db != nil {
-		return r.db.Close()
+		if err := r.db.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during recorder shutdown: %v", errs)
 	}
 	return nil
 }
@@ -112,7 +124,8 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 
 // Listen subscribes to recording events and indexes them
 func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
-	sub, err := nc.QueueSubscribe("camera.*.recordings.new", "recorder", func(msg *nats.Msg) {
+	var err error
+	r.sub, err = nc.QueueSubscribe("camera.*.recordings.new", "recorder", func(msg *nats.Msg) {
 		var event RecordingEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			r.logger.Debug("Failed to unmarshal recording event", "error", err)
@@ -132,7 +145,7 @@ func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
 	if err != nil {
 		return err
 	}
-	sub.SetPendingLimits(1024, 64*1024*1024)
+	r.sub.SetPendingLimits(1024, 64*1024*1024)
 	return nil
 }
 
