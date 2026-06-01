@@ -2,7 +2,6 @@ package main
 
 import (
 	"image"
-	"image/color"
 	"log/slog"
 	"os"
 	"testing"

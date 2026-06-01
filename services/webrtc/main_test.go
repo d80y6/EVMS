@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/pion/webrtc/v3"
 )
 
 func TestDefaultConfig(t *testing.T) {

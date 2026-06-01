@@ -29,7 +29,7 @@ func setupTestDB(t *testing.T) *sqlx.DB {
 
 func TestService_mapCameraToProto(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	svc := &Service{logger: logger}
+	svc := &CameraService{logger: logger}
 
 	now := time.Now()
 	c := Camera{
