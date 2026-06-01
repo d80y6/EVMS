@@ -117,9 +117,10 @@ type LoginResponse struct {
 
 // AuthService handles authentication operations
 type AuthService struct {
-	logger *slog.Logger
-	db     *sqlx.DB
-	config AuthConfig
+	logger        *slog.Logger
+	db            *sqlx.DB
+	config        AuthConfig
+	healthHandler *common.HealthHandler
 }
 
 // NewAuthService creates a new auth service instance
@@ -458,13 +459,6 @@ func extractIDFromPath(path, prefix string) string {
 	return strings.TrimPrefix(path, prefix)
 }
 
-// healthHandler handles health check requests
-func (s *AuthService) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
-
 // Start starts the HTTP server and blocks until ctx is cancelled
 func (s *AuthService) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
@@ -489,7 +483,11 @@ func (s *AuthService) Start(ctx context.Context) error {
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	mux.HandleFunc("/health", s.healthHandler)
+	handler := common.NewHealthHandler()
+	handler.AddDBChecker(s.db.DB, "postgres")
+	s.healthHandler = handler
+	mux.HandleFunc("/health", handler.Liveness)
+	mux.HandleFunc("/ready", handler.Readiness)
 
 	server := &http.Server{
 		Addr:         s.config.HTTPAddr,

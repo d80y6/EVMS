@@ -149,6 +149,9 @@ func main() {
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 
 	mux := http.NewServeMux()
+	healthHandler := common.NewHealthHandler()
+	mux.HandleFunc("/health", healthHandler.Liveness)
+	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.HandleFunc("/export", handleExport)
 
 	server := &http.Server{

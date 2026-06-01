@@ -368,6 +368,11 @@ func (s *EventProcessor) Start() error {
 	}
 
 	mux := http.NewServeMux()
+	healthHandler := common.NewHealthHandler()
+	healthHandler.AddDBChecker(s.db.DB, "postgres")
+	healthHandler.AddNATSChecker(s.nc, "nats")
+	mux.HandleFunc("/health", healthHandler.Liveness)
+	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.HandleFunc("/api/alert-rules", s.adminHandler)
 	mux.HandleFunc("/api/alert-rules/", s.adminHandler)
 	mux.HandleFunc("/api/alerts", s.alertWorkflow.HandleHTTP)

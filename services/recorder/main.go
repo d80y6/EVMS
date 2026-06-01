@@ -537,6 +537,11 @@ func (s *RecorderService) Start(ctx context.Context) error {
 
 	// Start bookmark API server
 	mux := http.NewServeMux()
+	healthHandler := common.NewHealthHandler()
+	healthHandler.AddDBChecker(recorder.db.DB, "postgres")
+	healthHandler.AddNATSChecker(s.nc, "nats")
+	mux.HandleFunc("/health", healthHandler.Liveness)
+	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.HandleFunc("/storage/estimates", handleStorageEstimate(recorder.db))
 	mux.HandleFunc("/bookmarks", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
