@@ -82,10 +82,11 @@ func NewMetadataService(config *MetadataConfig, logger *slog.Logger) (*MetadataS
 // Start begins listening for AI events
 func (s *MetadataService) Start() error {
 	var err error
-	s.sub, err = s.nc.QueueSubscribe("camera.*.events", "metadata", s.handleAIEvent, nats.PendingLimits(1024, 64*1024*1024))
+	s.sub, err = s.nc.QueueSubscribe("camera.*.events", "metadata", s.handleAIEvent)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to NATS subject: %w", err)
 	}
+	s.sub.SetPendingLimits(1024, 64*1024*1024)
 
 	s.logger.Info("AI Metadata Service (Vector-Enabled) started")
 	return nil

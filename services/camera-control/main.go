@@ -834,3 +834,12 @@ func main() {
 		logger.Error("Error during shutdown", "error", err)
 	}
 }
+
+func extractParam(path, prefix string) string {
+	trimmed := strings.TrimPrefix(path, prefix)
+	idx := strings.IndexByte(trimmed, '/')
+	if idx == -1 {
+		return trimmed
+	}
+	return trimmed[:idx]
+}

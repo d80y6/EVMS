@@ -380,6 +380,7 @@ type CameraServiceClient interface {
 	GetCamera(ctx context.Context, in *GetCameraRequest, opts ...grpc.CallOption) (*Camera, error)
 	ListSites(ctx context.Context, in *ListSitesRequest, opts ...grpc.CallOption) (*ListSitesResponse, error)
 	CreateSite(ctx context.Context, in *CreateSiteRequest, opts ...grpc.CallOption) (*Site, error)
+	UpdateCamera(ctx context.Context, in *UpdateCameraRequest, opts ...grpc.CallOption) (*Camera, error)
 	SmartSearch(ctx context.Context, in *SmartSearchRequest, opts ...grpc.CallOption) (*SmartSearchResponse, error)
 }
 
@@ -421,6 +422,15 @@ func (c *cameraServiceClient) ListSites(ctx context.Context, in *ListSitesReques
 func (c *cameraServiceClient) CreateSite(ctx context.Context, in *CreateSiteRequest, opts ...grpc.CallOption) (*Site, error) {
 	out := new(Site)
 	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/CreateSite", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cameraServiceClient) UpdateCamera(ctx context.Context, in *UpdateCameraRequest, opts ...grpc.CallOption) (*Camera, error) {
+	out := new(Camera)
+	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/UpdateCamera", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
