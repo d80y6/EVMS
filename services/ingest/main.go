@@ -439,6 +439,7 @@ type IngestService struct {
 	logger    *slog.Logger
 	processor *StreamProcessor
 	nc        *nats.Conn
+	healthSrv *http.Server
 }
 
 // NewIngestService creates a new ingest service
@@ -458,15 +459,33 @@ func NewIngestService(config IngestConfig, logger *slog.Logger) (*IngestService,
 		logger.Info("Connected to NATS", "url", config.NATSURL)
 	}
 
+	h := common.NewHealthHandler()
+	if nc != nil {
+		h.AddNATSChecker(nc, "nats")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.Liveness)
+	mux.HandleFunc("/ready", h.Readiness)
+
 	return &IngestService{
-		config: config,
-		logger: logger,
-		nc:     nc,
+		config:    config,
+		logger:    logger,
+		nc:        nc,
+		healthSrv: &http.Server{Addr: ":8092", Handler: mux},
 	}, nil
 }
 
 // Close gracefully shuts down the service
 func (s *IngestService) Close() error {
+	if s.healthSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.healthSrv.Shutdown(ctx); err != nil {
+			s.logger.Error("Health server shutdown error", "error", err)
+		}
+	}
+
 	if s.processor != nil {
 		return s.processor.Stop()
 	}
@@ -540,6 +559,13 @@ func main() {
 		logger.Error("Failed to start ingest service", "error", err)
 		os.Exit(1)
 	}
+
+	go func() {
+		logger.Info("Starting health HTTP server", "addr", ":8092")
+		if err := service.healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Health server error", "error", err)
+		}
+	}()
 
 	go func() {
 		if err := service.Wait(); err != nil {

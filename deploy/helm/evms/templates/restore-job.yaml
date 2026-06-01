@@ -1,0 +1,76 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-restore
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: restore
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pg-restore
+        image: postgres:15-alpine
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -euo pipefail
+          RESTORE_FILE="${RESTORE_FILE:-}"
+          if [ -z "${RESTORE_FILE}" ]; then
+            LATEST=$(ls -t /backups/${DB_NAME}_*.sql.gz 2>/dev/null | head -1)
+            if [ -z "${LATEST}" ]; then
+              echo "No backup file specified and no backups found in /backups/"
+              echo "Skipping restore."
+              exit 0
+            fi
+            RESTORE_FILE="${LATEST}"
+          fi
+          echo "Restoring from: ${RESTORE_FILE}"
+          export PGPASSWORD="${DB_PASSWORD}"
+          if [ "${DROP_BEFORE}" = "true" ]; then
+            psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d postgres \
+              -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid();"
+            psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d postgres \
+              -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+            createdb -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" "${DB_NAME}"
+          fi
+          pg_restore -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+            --format=custom --verbose --exit-on-error \
+            <(zcat "${RESTORE_FILE}")
+          psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -c "ANALYZE;"
+          echo "Restore completed successfully"
+        env:
+        - name: DB_HOST
+          value: {{ .Values.db.host }}
+        - name: DB_PORT
+          value: {{ .Values.db.port | quote }}
+        - name: DB_NAME
+          value: {{ .Values.db.name }}
+        - name: DB_USER
+          value: {{ .Values.db.user }}
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-password
+        - name: DROP_BEFORE
+          value: {{ .Values.backup.restore.dropBefore | default "false" | quote }}
+        - name: RESTORE_FILE
+          value: {{ .Values.backup.restore.file | default "" | quote }}
+        volumeMounts:
+        - name: backups
+          mountPath: /backups
+      volumes:
+      - name: backups
+        persistentVolumeClaim:
+          claimName: db-backups-pvc
+{{- end }}

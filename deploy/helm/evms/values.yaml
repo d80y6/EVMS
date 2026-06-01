@@ -291,6 +291,9 @@ backup:
   storageClass: standard
   s3Bucket: ""
   s3Region: us-east-1
+  restore:
+    dropBefore: false
+    file: ""
 
 recordings:
   storageClass: standard

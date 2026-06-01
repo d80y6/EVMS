@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -82,10 +83,11 @@ type AiEvent struct {
 // CameraService handles camera management operations
 type CameraService struct {
 	damv1.UnimplementedCameraServiceServer
-	config *CameraConfig
-	db     *sqlx.DB
-	logger *slog.Logger
-	server *grpc.Server
+	config    *CameraConfig
+	db        *sqlx.DB
+	logger    *slog.Logger
+	server    *grpc.Server
+	healthSrv *http.Server
 }
 
 func tenantServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
@@ -114,10 +116,18 @@ func NewCameraService(config *CameraConfig, logger *slog.Logger) (*CameraService
 		return nil, fmt.Errorf("migrations failed: %w", err)
 	}
 
+	h := common.NewHealthHandler()
+	h.AddDBChecker(db.DB, "postgres")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.Liveness)
+	mux.HandleFunc("/ready", h.Readiness)
+
 	return &CameraService{
-		config: config,
-		db:     db,
-		logger: logger,
+		config:    config,
+		db:        db,
+		logger:    logger,
+		healthSrv: &http.Server{Addr: ":8083", Handler: mux},
 	}, nil
 }
 
@@ -553,6 +563,12 @@ func (s *CameraService) Shutdown(ctx context.Context) error {
 		s.server.GracefulStop()
 	}
 
+	if s.healthSrv != nil {
+		if err := s.healthSrv.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown health server: %w", err)
+		}
+	}
+
 	if err := s.db.Close(); err != nil {
 		return fmt.Errorf("failed to close database: %w", err)
 	}
@@ -586,6 +602,13 @@ func main() {
 		logger.Error("Failed to start camera service", "error", err)
 		os.Exit(1)
 	}
+
+	go func() {
+		logger.Info("Starting health HTTP server", "addr", ":8083")
+		if err := service.healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Health server error", "error", err)
+		}
+	}()
 
 	<-ctx.Done()
 	logger.Info("Shutting down Camera Management Service...")

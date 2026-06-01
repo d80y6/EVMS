@@ -154,6 +154,11 @@ func DefaultGatewayConfig() GatewayConfig {
 	}
 }
 
+type upstreamHealth struct {
+	Name string
+	URL  string
+}
+
 type Gateway struct {
 	config             GatewayConfig
 	logger             *slog.Logger
@@ -171,6 +176,8 @@ type Gateway struct {
 	auditProxy         *httputil.ReverseProxy
 	posProxy           *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
+	healthHandler      *common.HealthHandler
+	upstreamHealth     []upstreamHealth
 }
 
 func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
@@ -208,6 +215,11 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	auditURL, _ := url.Parse(config.AuditURL)
 	posURL, _ := url.Parse(config.POSURL)
 
+	h := common.NewHealthHandler()
+	if db != nil {
+		h.AddDBChecker(db.DB, "postgres")
+	}
+
 	return &Gateway{
 		config:             config,
 		logger:             logger,
@@ -225,6 +237,23 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		auditProxy:         httputil.NewSingleHostReverseProxy(auditURL),
 		posProxy:           httputil.NewSingleHostReverseProxy(posURL),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
+		healthHandler:      h,
+		upstreamHealth: []upstreamHealth{
+			{"auth", config.AuthServiceURL + "/health"},
+			{"playback", config.PlaybackServiceURL + "/health"},
+			{"webrtc", config.WebRTCServiceURL + "/health"},
+			{"camera-control", config.CameraControlURL + "/health"},
+			{"thumbnails", config.ThumbnailsURL + "/health"},
+			{"recorder", config.RecorderURL + "/health"},
+			{"export", config.ExportURL + "/health"},
+			{"event-proc", config.AlertURL + "/health"},
+			{"audit", config.AuditURL + "/health"},
+			{"camera-mgmt", "http://camera-mgmt:8083/health"},
+			{"metadata", "http://metadata:8089/health"},
+			{"notification", "http://notification:8090/health"},
+			{"ingest", "http://ingest:8092/health"},
+			{"pos-ingest", config.POSURL + "/health"},
+		},
 	}, nil
 }
 
@@ -681,7 +710,73 @@ func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
 
+func (g *Gateway) handleSystemHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	type upstreamResult struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	results := make([]upstreamResult, len(g.upstreamHealth))
+	var wg sync.WaitGroup
+
+	for i, us := range g.upstreamHealth {
+		wg.Add(1)
+		go func(i int, name, url string) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				results[i] = upstreamResult{Name: name, Status: "down", Error: err.Error()}
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results[i] = upstreamResult{Name: name, Status: "down", Error: err.Error()}
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				results[i] = upstreamResult{Name: name, Status: "ok"}
+			} else {
+				results[i] = upstreamResult{Name: name, Status: "degraded", Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+			}
+		}(i, us.Name, us.URL)
+	}
+	wg.Wait()
+
+	overall := "ok"
+	for _, r := range results {
+		if r.Status != "ok" {
+			overall = "degraded"
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    overall,
+		"timestamp": time.Now().UTC(),
+		"services":  results,
+	})
+}
+
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if g.healthHandler != nil {
+		g.healthHandler.Liveness(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) handleReady(w http.ResponseWriter, r *http.Request) {
+	if g.healthHandler != nil {
+		g.healthHandler.Readiness(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -700,8 +795,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	switch {
+	case path == "/api/health/system":
+		g.handleSystemHealth(w, r)
 	case path == "/api/health":
 		g.handleHealth(w, r)
+	case path == "/api/ready":
+		g.handleReady(w, r)
 	case path == "/api/login":
 		g.rateLimiter.rateLimitMiddleware(g.handleLogin)(w, r)
 	case path == "/api/cameras" && r.Method == http.MethodGet:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -43,11 +44,12 @@ type Detection struct {
 
 // MetadataService handles AI event metadata storage
 type MetadataService struct {
-	config *MetadataConfig
-	db     *sqlx.DB
-	nc     *nats.Conn
-	logger *slog.Logger
-	sub    *nats.Subscription
+	config    *MetadataConfig
+	db        *sqlx.DB
+	nc        *nats.Conn
+	logger    *slog.Logger
+	sub       *nats.Subscription
+	healthSrv *http.Server
 }
 
 // NewMetadataService creates a new metadata service instance
@@ -71,11 +73,24 @@ func NewMetadataService(config *MetadataConfig, logger *slog.Logger) (*MetadataS
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
+	h := common.NewHealthHandler()
+	if db != nil {
+		h.AddDBChecker(db.DB, "postgres")
+	}
+	if nc != nil {
+		h.AddNATSChecker(nc, "nats")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.Liveness)
+	mux.HandleFunc("/ready", h.Readiness)
+
 	return &MetadataService{
-		config: config,
-		db:     db,
-		nc:     nc,
-		logger: logger,
+		config:    config,
+		db:        db,
+		nc:        nc,
+		logger:    logger,
+		healthSrv: &http.Server{Addr: ":8089", Handler: mux},
 	}, nil
 }
 
@@ -148,6 +163,14 @@ func (s *MetadataService) storeDetection(cameraID string, detection Detection) e
 func (s *MetadataService) Close() error {
 	var errs []error
 
+	if s.healthSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.healthSrv.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to shutdown health server: %w", err))
+		}
+	}
+
 	if s.sub != nil {
 		if err := s.sub.Unsubscribe(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to unsubscribe: %w", err))
@@ -190,6 +213,13 @@ func main() {
 		logger.Error("Failed to start metadata service", "error", err)
 		os.Exit(1)
 	}
+
+	go func() {
+		logger.Info("Starting health HTTP server", "addr", ":8089")
+		if err := service.healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Health server error", "error", err)
+		}
+	}()
 
 	<-ctx.Done()
 	logger.Info("Shutting down AI Metadata Service...")

@@ -47,10 +47,11 @@ type Notification struct {
 
 // NotificationService handles notification delivery
 type NotificationService struct {
-	config  *NotificationConfig
-	nc      *nats.Conn
-	logger  *slog.Logger
-	pushSub *nats.Subscription
+	config    *NotificationConfig
+	nc        *nats.Conn
+	logger    *slog.Logger
+	pushSub   *nats.Subscription
+	healthSrv *http.Server
 }
 
 // NewNotificationService creates a new notification service instance
@@ -64,10 +65,20 @@ func NewNotificationService(config *NotificationConfig, logger *slog.Logger) (*N
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
+	h := common.NewHealthHandler()
+	if nc != nil {
+		h.AddNATSChecker(nc, "nats")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.Liveness)
+	mux.HandleFunc("/ready", h.Readiness)
+
 	return &NotificationService{
-		config: config,
-		nc:     nc,
-		logger: logger,
+		config:    config,
+		nc:        nc,
+		logger:    logger,
+		healthSrv: &http.Server{Addr: ":8090", Handler: mux},
 	}, nil
 }
 
@@ -168,6 +179,14 @@ func (s *NotificationService) sendEmail(n Notification) error {
 func (s *NotificationService) Close() error {
 	var errs []error
 
+	if s.healthSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.healthSrv.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to shutdown health server: %w", err))
+		}
+	}
+
 	if s.pushSub != nil {
 		if err := s.pushSub.Unsubscribe(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to unsubscribe: %w", err))
@@ -206,6 +225,13 @@ func main() {
 		logger.Error("Failed to start notification service", "error", err)
 		os.Exit(1)
 	}
+
+	go func() {
+		logger.Info("Starting health HTTP server", "addr", ":8090")
+		if err := service.healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Health server error", "error", err)
+		}
+	}()
 
 	<-ctx.Done()
 	logger.Info("Shutting down Notification Service...")

@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: evms-db-restore
+  labels:
+    app: evms
+    component: db-restore
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restore
+          image: postgres:16
+          command:
+            - /bin/sh
+            - /scripts/pg_restore.sh
+          args:
+            - /backups/$(RESTORE_FILE)
+          env:
+            - name: DB_HOST
+              value: "postgres"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "dam_vms"
+            - name: DB_USER
+              value: "dam_admin"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: evms-secrets
+                  key: db_password
+            - name: DROP_BEFORE
+              value: "false"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: backups
+              mountPath: /backups
+      volumes:
+        - name: scripts
+          configMap:
+            name: evms-restore-scripts
+        - name: backups
+          persistentVolumeClaim:
+            claimName: evms-backups
