@@ -1,0 +1,76 @@
+{{- if .Values.services.audit.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit
+spec:
+  replicas: {{ .Values.services.audit.replicas }}
+  selector:
+    matchLabels:
+      app: audit-service
+  template:
+    metadata:
+      labels:
+        app: audit-service
+    spec:
+      containers:
+      - name: audit
+        image: {{ include "evms.image" (dict "image" .Values.services.audit.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.audit.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.audit.port }}
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.audit.port }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        resources:
+          {{- toYaml .Values.services.audit.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit
+spec:
+  selector:
+    app: audit-service
+  ports:
+  - protocol: TCP
+    port: {{ .Values.services.audit.port }}
+    targetPort: {{ .Values.services.audit.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

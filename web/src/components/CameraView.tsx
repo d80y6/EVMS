@@ -1,15 +1,19 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 
 interface CameraViewProps {
   cameraId: string;
+  streamType?: string;
 }
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 const RECONNECT_DELAY = 5000;
 
-export default function CameraView({ cameraId }: CameraViewProps) {
+export default function CameraView({ cameraId, streamType }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting');
+  const [streamReady, setStreamReady] = useState(false);
+  const [dewarped, setDewarped] = useState(false);
+  const thumbnailUrl = `/api/thumbnails/image/${cameraId}/latest.jpg`;
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout>>();
 
@@ -45,7 +49,8 @@ export default function CameraView({ cameraId }: CameraViewProps) {
       const offer = await pc.createOffer({ offerToReceiveVideo: true });
       await pc.setLocalDescription(offer);
 
-      const response = await fetch(`/api/webrtc/offer?camera_id=${cameraId}`, {
+      const streamParam = streamType && streamType !== 'main' ? `&stream_type=${streamType}` : '';
+      const response = await fetch(`/api/webrtc/offer?camera_id=${cameraId}${streamParam}`, {
         method: 'POST',
         body: JSON.stringify(pc.localDescription),
         headers: { 'Content-Type': 'application/json' },
@@ -59,7 +64,7 @@ export default function CameraView({ cameraId }: CameraViewProps) {
       setStatus('offline');
       retryRef.current = setTimeout(startStream, RECONNECT_DELAY);
     }
-  }, [cameraId, cleanup]);
+  }, [cameraId, streamType, cleanup]);
 
   useEffect(() => {
     startStream();
@@ -71,12 +76,21 @@ export default function CameraView({ cameraId }: CameraViewProps) {
 
   return (
     <div className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group">
+      {!streamReady && (
+        <img
+          src={thumbnailUrl}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+        />
+      )}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="w-full h-full object-cover"
+        onCanPlay={() => setStreamReady(true)}
+        className={streamReady ? 'block w-full h-full object-cover' : 'invisible w-full h-full object-cover'}
       />
 
       <div className="absolute top-4 left-4 flex items-center gap-2">
@@ -105,6 +119,19 @@ export default function CameraView({ cameraId }: CameraViewProps) {
           <span className="text-slate-500 text-sm">Stream Offline</span>
         </div>
       )}
+
+      <div className="absolute top-4 right-4 flex items-center gap-2">
+        <button
+          onClick={() => setDewarped(!dewarped)}
+          className={`px-2 py-1 text-xs font-medium rounded shadow-md transition-colors ${
+            dewarped
+              ? 'bg-blue-600 text-white'
+              : 'bg-slate-700/80 text-slate-300 hover:bg-slate-600/80'
+          }`}
+        >
+          Dewarp
+        </button>
+      </div>
     </div>
   );
 }

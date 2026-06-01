@@ -1,0 +1,6 @@
+apiVersion: v2
+name: evms
+description: DAM VMS - Enterprise Video Management System
+type: application
+version: 0.1.0
+appVersion: "1.0"

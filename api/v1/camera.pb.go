@@ -16,10 +16,11 @@ type Camera struct {
 	SubstreamUrl  string
 	Status        string
 	PtzProtocol   string
-	RetentionDays int32
-	OnvifData     string
-	Config        string
-	CreatedAt     *timestamppb.Timestamp
+	RetentionDays    int32
+	PrerecordSeconds int32
+	OnvifData        string
+	Config           string
+	CreatedAt        *timestamppb.Timestamp
 }
 
 type Site struct {
@@ -38,12 +39,13 @@ type ListCamerasResponse struct {
 }
 
 type CreateCameraRequest struct {
-	SiteId        string
-	Name          string
-	ConnectionUrl string
-	SubstreamUrl  string
-	PtzProtocol   string
-	RetentionDays int32
+	SiteId           string
+	Name             string
+	ConnectionUrl    string
+	SubstreamUrl     string
+	PtzProtocol      string
+	RetentionDays    int32
+	PrerecordSeconds int32
 }
 
 type GetCameraRequest struct {
@@ -51,14 +53,15 @@ type GetCameraRequest struct {
 }
 
 type UpdateCameraRequest struct {
-	Id            string
-	Name          string
-	Description   string
-	ConnectionUrl string
-	SubstreamUrl  string
-	PtzProtocol   string
-	RetentionDays int32
-	Config        string
+	Id               string
+	Name             string
+	Description      string
+	ConnectionUrl    string
+	SubstreamUrl     string
+	PtzProtocol      string
+	RetentionDays    int32
+	PrerecordSeconds int32
+	Config           string
 }
 
 type DeleteCameraRequest struct {
@@ -111,6 +114,7 @@ type SmartSearchRequest struct {
 	StartTime     string
 	EndTime       string
 	Limit         int32
+	BoundingBox   string
 }
 
 type SmartSearchResult struct {

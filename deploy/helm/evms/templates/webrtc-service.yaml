@@ -1,0 +1,76 @@
+{{- if .Values.services.webrtc.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webrtc-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webrtc
+spec:
+  replicas: {{ .Values.services.webrtc.replicas }}
+  selector:
+    matchLabels:
+      app: webrtc-service
+  template:
+    metadata:
+      labels:
+        app: webrtc-service
+    spec:
+      containers:
+      - name: webrtc
+        image: {{ include "evms.image" (dict "image" .Values.services.webrtc.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.webrtc.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.webrtc.port }}
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.webrtc.port }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
+        resources:
+          {{- toYaml .Values.services.webrtc.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webrtc
+spec:
+  selector:
+    app: webrtc-service
+  ports:
+  - protocol: TCP
+    port: {{ .Values.services.webrtc.port }}
+    targetPort: {{ .Values.services.webrtc.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

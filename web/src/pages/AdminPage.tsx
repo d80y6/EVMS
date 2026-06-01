@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { LegalHoldPage } from './LegalHoldPage';
 
 interface UserItem {
   id: string;
@@ -12,6 +13,7 @@ interface UserItem {
 
 export default function AdminPage() {
   const { role } = useAuth();
+  const [tab, setTab] = useState<'users' | 'legal-holds'>('users');
   const [users, setUsers] = useState<UserItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +72,27 @@ export default function AdminPage() {
 
   return (
     <div className="max-w-4xl">
+      <div className="flex gap-4 border-b border-slate-800 mb-6">
+        <button
+          onClick={() => setTab('users')}
+          className={`pb-2 text-sm font-medium transition-colors ${
+            tab === 'users' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          User Administration
+        </button>
+        <button
+          onClick={() => setTab('legal-holds')}
+          className={`pb-2 text-sm font-medium transition-colors ${
+            tab === 'legal-holds' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Legal Holds
+        </button>
+      </div>
+
+      {tab === 'users' && (
+        <>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-semibold text-slate-200">User Administration</h2>
         <button
@@ -189,6 +212,10 @@ export default function AdminPage() {
           </table>
         </div>
       )}
+        </>
+      )}
+
+      {tab === 'legal-holds' && <LegalHoldPage />}
     </div>
   );
 }

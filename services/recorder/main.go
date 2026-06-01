@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +22,12 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 )
+
+// DefaultBitrate is the default bitrate in Kbps for H.264 1080p
+const DefaultBitrate = 4096
+
+// DefaultPrerecordSeconds is the default number of seconds for pre-recording buffer
+const DefaultPrerecordSeconds = 5
 
 // RecorderConfig holds configuration for the recorder service
 type RecorderConfig struct {
@@ -64,12 +74,85 @@ type RecordingEvent struct {
 	Path     string `json:"path"`
 }
 
+// ringBuffer implements a pre-recording circular buffer
+type ringBuffer struct {
+	mu       sync.Mutex
+	data     []byte
+	capacity int
+	head     int
+	full     bool
+}
+
+func newRingBuffer(seconds int, bitrate int) *ringBuffer {
+	capBytes := seconds * bitrate * 1024 / 8
+	return &ringBuffer{data: make([]byte, capBytes), capacity: capBytes}
+}
+
+func (rb *ringBuffer) Write(p []byte) (int, error) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	for _, b := range p {
+		rb.data[rb.head] = b
+		rb.head = (rb.head + 1) % rb.capacity
+		if rb.head == 0 {
+			rb.full = true
+		}
+	}
+	return len(p), nil
+}
+
+func (rb *ringBuffer) Bytes() []byte {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if !rb.full {
+		return rb.data[:rb.head]
+	}
+	out := make([]byte, rb.capacity)
+	copy(out, rb.data[rb.head:])
+	copy(out[rb.capacity-rb.head:], rb.data[:rb.head])
+	return out
+}
+
+// CameraRecorder manages per-camera recording state with pre-recording buffer
+type CameraRecorder struct {
+	cameraID string
+	buf      *ringBuffer
+}
+
+// NewCameraRecorder creates a new camera recorder with the given prerecord duration and bitrate
+func NewCameraRecorder(cameraID string, prerecordSeconds int, bitrate int) *CameraRecorder {
+	return &CameraRecorder{
+		cameraID: cameraID,
+		buf:      newRingBuffer(prerecordSeconds, bitrate),
+	}
+}
+
+// WriteNALUs processes incoming NAL units, writing to the ring buffer
+func (cr *CameraRecorder) WriteNALUs(data []byte) {
+	cr.buf.Write(data)
+}
+
+// FlushBuffer begins a new recording segment, flushing the buffer first
+func (cr *CameraRecorder) FlushBuffer(output io.Writer) error {
+	bufData := cr.buf.Bytes()
+	if len(bufData) > 0 {
+		if _, err := output.Write(bufData); err != nil {
+			return fmt.Errorf("failed to write prerecord buffer: %w", err)
+		}
+	}
+	return nil
+}
+
 // Recorder handles recording indexing and retention
 type Recorder struct {
-	db     *sqlx.DB
-	logger *slog.Logger
-	config RecorderConfig
-	sub    *nats.Subscription
+	db       *sqlx.DB
+	logger   *slog.Logger
+	config   RecorderConfig
+	sub      *nats.Subscription
+	frameSub *nats.Subscription
+	mu       sync.Mutex
+	cameras    map[string]*CameraRecorder
+	legalHolds *LegalHoldStore
 }
 
 // NewRecorder creates a new recorder instance
@@ -79,10 +162,17 @@ func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
+	legalHolds := NewLegalHoldStore(db)
+	if err := legalHolds.ImportLegacyHolds(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize legal holds: %w", err)
+	}
+
 	return &Recorder{
-		db:     db,
-		logger: logger,
-		config: config,
+		db:         db,
+		logger:     logger,
+		config:     config,
+		cameras:    make(map[string]*CameraRecorder),
+		legalHolds: legalHolds,
 	}, nil
 }
 
@@ -91,6 +181,11 @@ func (r *Recorder) Close() error {
 	var errs []error
 	if r.sub != nil {
 		if err := r.sub.Unsubscribe(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if r.frameSub != nil {
+		if err := r.frameSub.Unsubscribe(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -122,6 +217,34 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 	return nil
 }
 
+// subscribeFrames subscribes to H264 frame data from the ingest service
+func (r *Recorder) subscribeFrames(nc *nats.Conn) error {
+	var err error
+	r.frameSub, err = nc.Subscribe("camera.*.h264", func(msg *nats.Msg) {
+		subject := msg.Subject
+		parts := strings.SplitN(subject, ".", 3)
+		if len(parts) < 2 {
+			return
+		}
+		cameraID := parts[1]
+
+		r.mu.Lock()
+		cr, ok := r.cameras[cameraID]
+		if !ok {
+			cr = NewCameraRecorder(cameraID, DefaultPrerecordSeconds, DefaultBitrate)
+			r.cameras[cameraID] = cr
+		}
+		r.mu.Unlock()
+
+		cr.WriteNALUs(msg.Data)
+	})
+	if err != nil {
+		return err
+	}
+	r.frameSub.SetPendingLimits(1024, 64*1024*1024)
+	return nil
+}
+
 // Listen subscribes to recording events and indexes them
 func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
 	var err error
@@ -149,6 +272,29 @@ func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
 	return nil
 }
 
+// flushPrerecord writes the pre-recording buffer for a camera to a companion file
+func (r *Recorder) flushPrerecord(cameraID string, recordingPath string) {
+	r.mu.Lock()
+	cr, ok := r.cameras[cameraID]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	prerollPath := recordingPath + ".preroll"
+	f, err := os.Create(prerollPath)
+	if err != nil {
+		r.logger.Error("Failed to create preroll file", "path", prerollPath, "error", err)
+		return
+	}
+	defer f.Close()
+
+	if err := cr.FlushBuffer(f); err != nil {
+		r.logger.Error("Failed to flush prerecord buffer", "camera_id", cameraID, "error", err)
+	}
+	r.logger.Info("Flushed prerecord buffer", "camera_id", cameraID, "path", prerollPath)
+}
+
 // processRecordingEvent processes a recording event and returns a segment
 func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEvent) (RecordingSegment, error) {
 	// Wait for file to be finalized by FFmpeg
@@ -174,6 +320,9 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 
 	filename := filepath.Base(event.Path)
 	timeStr := strings.TrimSuffix(filename, ".mp4")
+
+	// Flush prerecord buffer before returning the segment
+	r.flushPrerecord(event.CameraID, event.Path)
 
 	// Format from ingest: 20240101_120000.mp4
 	startTime, err := time.Parse("20060102_150405", timeStr)
@@ -227,6 +376,10 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context) {
 
 	deletedCount := 0
 	for _, seg := range segments {
+		if r.legalHolds.IsOnHold(seg.CameraID) {
+			r.logger.Debug("Skipping deletion for camera on legal hold", "camera_id", seg.CameraID)
+			continue
+		}
 		if err := os.Remove(seg.FilePath); err != nil && !os.IsNotExist(err) {
 			r.logger.Error("Failed to delete recording file", "path", seg.FilePath, "error", err)
 			continue
@@ -245,10 +398,12 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context) {
 
 // RecorderService manages the recorder service lifecycle
 type RecorderService struct {
-	config   RecorderConfig
-	logger   *slog.Logger
-	recorder *Recorder
-	nc       *nats.Conn
+	config         RecorderConfig
+	logger         *slog.Logger
+	recorder       *Recorder
+	nc             *nats.Conn
+	leader         *LeaderElection
+	bookmarkServer *http.Server
 }
 
 // NewRecorderService creates a new recorder service
@@ -262,10 +417,17 @@ func NewRecorderService(config RecorderConfig, logger *slog.Logger) (*RecorderSe
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
+	hostname, _ := os.Hostname()
+	leader, err := NewLeaderElection(nc, fmt.Sprintf("%s-%d", hostname, os.Getpid()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create leader election: %w", err)
+	}
+
 	return &RecorderService{
 		config: config,
 		logger: logger,
 		nc:     nc,
+		leader: leader,
 	}, nil
 }
 
@@ -277,13 +439,49 @@ func (s *RecorderService) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	if s.leader != nil {
+		s.leader.Stop()
+	}
 	if s.nc != nil {
 		s.nc.Close()
+	}
+	if s.bookmarkServer != nil {
+		if err := s.bookmarkServer.Shutdown(context.Background()); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during shutdown: %v", errs)
 	}
 	return nil
+}
+
+func handleDewarp(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cameraID := r.URL.Query().Get("camera_id")
+		path := r.URL.Query().Get("path")
+		if cameraID == "" || path == "" {
+			jsonError(w, "camera_id and path required", http.StatusBadRequest)
+			return
+		}
+
+		dewarpedPath := path + ".dewarped.mp4"
+		if _, err := os.Stat(dewarpedPath); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"path": dewarpedPath})
+			return
+		}
+
+		args := []string{"-y", "-i", path, "-vf", "lenscorrection=cx=0.5:cy=0.5:k1=-0.15:k2=0.05", "-c:a", "copy", dewarpedPath}
+		cmd := exec.Command("ffmpeg", args...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			jsonError(w, fmt.Sprintf("dewarp failed: %s", string(output)), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"path": dewarpedPath})
+	}
 }
 
 // Start starts the recorder service
@@ -298,8 +496,73 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
 
+	if err := recorder.subscribeFrames(s.nc); err != nil {
+		return fmt.Errorf("failed to subscribe to frames: %w", err)
+	}
+
 	// Start background retention worker
 	go recorder.StartRetentionWorker(ctx)
+
+	// Start archive tiering manager
+	tierConfig := TierConfig{
+		HotPath:  common.GetEnv("RECORDING_PATH", "/recordings"),
+		WarmPath: os.Getenv("WARM_STORAGE_PATH"),
+		ColdPath: os.Getenv("COLD_STORAGE_PATH"),
+		WarmDays: 7,
+		ColdDays: 30,
+	}
+	tm := NewTieringManager(tierConfig, s.logger)
+	go tm.Start(ctx)
+
+	// Start leader election
+	go s.leader.Start(ctx)
+	s.logger.Info("Started leader election", "id", s.leader.ID())
+
+	// Start bookmark API server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/storage/estimates", handleStorageEstimate(recorder.db))
+	mux.HandleFunc("/bookmarks", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListBookmarks(recorder.db)(w, r)
+		case http.MethodPost:
+			handleCreateBookmark(recorder.db)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/legal-holds", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListLegalHolds(recorder.legalHolds, s.logger)(w, r)
+		case http.MethodPost:
+			handleCreateLegalHold(recorder.legalHolds, s.logger)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/legal-holds/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/release") && r.Method == http.MethodPost {
+			handleReleaseLegalHold(recorder.legalHolds, s.logger)(w, r)
+		} else {
+			jsonError(w, "not found", http.StatusNotFound)
+		}
+	})
+
+	mux.HandleFunc("/dewarp", handleDewarp(recorder.db))
+
+	s.bookmarkServer = &http.Server{
+		Addr:    ":8087",
+		Handler: mux,
+	}
+
+	go func() {
+		s.logger.Info("Starting bookmark API server", "addr", ":8087")
+		if err := s.bookmarkServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("Bookmark server error", "error", err)
+		}
+	}()
 
 	return nil
 }

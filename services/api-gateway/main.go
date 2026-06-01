@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/acme/autocert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -118,8 +120,16 @@ type GatewayConfig struct {
 	WebRTCServiceURL   string
 	CameraControlURL   string
 	ThumbnailsURL      string
+	RecorderURL        string
+	ExportURL          string
+	AlertURL          string
+	AuditURL          string
+	POSURL            string
 	DBURL              string
 	MetricsAddr        string
+	TLSEnabled         bool
+	TLSDomain          string
+	TLSEmail           string
 }
 
 func DefaultGatewayConfig() GatewayConfig {
@@ -131,8 +141,16 @@ func DefaultGatewayConfig() GatewayConfig {
 		WebRTCServiceURL:   common.GetEnv("WEBRTC_SERVICE_URL", "http://webrtc-service:8082"),
 		CameraControlURL:   common.GetEnv("CAMERA_CONTROL_URL", "http://camera-control:8088"),
 		ThumbnailsURL:      common.GetEnv("THUMBNAILS_URL", "http://thumbnails:8089"),
+		RecorderURL:        common.GetEnv("RECORDER_URL", "http://recorder:8087"),
+		ExportURL:          common.GetEnv("EXPORT_URL", "http://export:8094"),
+		AlertURL:          common.GetEnv("ALERT_URL", "http://event-proc:8093"),
+		AuditURL:          common.GetEnv("AUDIT_URL", "http://audit:8093"),
+		POSURL:            common.GetEnv("POS_URL", "http://pos-ingest:8096"),
 		DBURL:              common.GetEnv("DB_URL", ""),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
+		TLSEnabled:         common.GetEnv("TLS_ENABLED", "false") == "true",
+		TLSDomain:          common.GetEnv("TLS_DOMAIN", ""),
+		TLSEmail:           common.GetEnv("TLS_EMAIL", ""),
 	}
 }
 
@@ -147,6 +165,11 @@ type Gateway struct {
 	webrtcProxy        *httputil.ReverseProxy
 	cameraControlProxy *httputil.ReverseProxy
 	thumbnailsProxy    *httputil.ReverseProxy
+	recorderProxy      *httputil.ReverseProxy
+	exportProxy        *httputil.ReverseProxy
+	alertProxy         *httputil.ReverseProxy
+	auditProxy         *httputil.ReverseProxy
+	posProxy           *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
 }
 
@@ -172,6 +195,11 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	webrtcURL, _ := url.Parse(config.WebRTCServiceURL)
 	cameraControlURL, _ := url.Parse(config.CameraControlURL)
 	thumbnailsURL, _ := url.Parse(config.ThumbnailsURL)
+	recorderURL, _ := url.Parse(config.RecorderURL)
+	exportURL, _ := url.Parse(config.ExportURL)
+	alertURL, _ := url.Parse(config.AlertURL)
+	auditURL, _ := url.Parse(config.AuditURL)
+	posURL, _ := url.Parse(config.POSURL)
 
 	return &Gateway{
 		config:             config,
@@ -184,6 +212,11 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		webrtcProxy:        httputil.NewSingleHostReverseProxy(webrtcURL),
 		cameraControlProxy: httputil.NewSingleHostReverseProxy(cameraControlURL),
 		thumbnailsProxy:    httputil.NewSingleHostReverseProxy(thumbnailsURL),
+		recorderProxy:      httputil.NewSingleHostReverseProxy(recorderURL),
+		exportProxy:        httputil.NewSingleHostReverseProxy(exportURL),
+		alertProxy:         httputil.NewSingleHostReverseProxy(alertURL),
+		auditProxy:         httputil.NewSingleHostReverseProxy(auditURL),
+		posProxy:           httputil.NewSingleHostReverseProxy(posURL),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 	}, nil
 }
@@ -262,7 +295,8 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	resp, err := g.cameraSvc.ListCameras(ctx, &damv1.ListCamerasRequest{})
+	siteID := r.URL.Query().Get("site_id")
+	resp, err := g.cameraSvc.ListCameras(ctx, &damv1.ListCamerasRequest{SiteId: siteID})
 	if err != nil {
 		g.logger.Error("Failed to list cameras", "error", err)
 		jsonError(w, "failed to list cameras", http.StatusInternalServerError)
@@ -279,6 +313,7 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 		Status        string `json:"status"`
 		PtzProtocol   string `json:"ptz_protocol"`
 		RetentionDays int32  `json:"retention_days"`
+		Config        string `json:"config"`
 	}
 
 	cameras := make([]cameraJSON, len(resp.Cameras))
@@ -293,6 +328,7 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 			Status:        c.Status,
 			PtzProtocol:   c.PtzProtocol,
 			RetentionDays: c.RetentionDays,
+			Config:        c.Config,
 		}
 	}
 
@@ -384,6 +420,7 @@ func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
 		StartTime     string  `json:"start_time"`
 		EndTime       string  `json:"end_time"`
 		Limit         int32   `json:"limit"`
+		BoundingBox   string  `json:"bounding_box"`
 	}
 
 	if r.Method == http.MethodGet {
@@ -391,6 +428,7 @@ func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
 		req.ObjectType = r.URL.Query().Get("object_type")
 		req.StartTime = r.URL.Query().Get("start_time")
 		req.EndTime = r.URL.Query().Get("end_time")
+		req.BoundingBox = r.URL.Query().Get("bounding_box")
 	} else {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -408,6 +446,7 @@ func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		Limit:         req.Limit,
+		BoundingBox:   req.BoundingBox,
 	})
 	if err != nil {
 		g.logger.Error("Failed to smart search", "error", err)
@@ -527,6 +566,81 @@ func (g *Gateway) handleThumbnails(w http.ResponseWriter, r *http.Request) {
 	g.thumbnailsProxy.ServeHTTP(w, r)
 }
 
+func extractParam(path, prefix string) string {
+	return strings.TrimPrefix(path, prefix)
+}
+
+func (g *Gateway) handleStreamURL(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cameraID := extractParam(r.URL.Path, "/api/stream/")
+	streamType := r.URL.Query().Get("type")
+	if streamType == "" {
+		streamType = "main"
+	}
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	url := camera.ConnectionUrl
+	if streamType == "sub" && camera.SubstreamUrl != "" {
+		url = camera.SubstreamUrl
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
+	cameraID := extractParam(r.URL.Path, "/api/cameras/")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		g.logger.Error("Failed to get camera", "error", err)
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(camera)
+}
+
+func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Request) {
+	cameraID := extractParam(r.URL.Path, "/api/cameras/")
+	cameraID = strings.TrimSuffix(cameraID, "/config")
+
+	var req struct {
+		Config json.RawMessage `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := g.cameraSvc.UpdateCamera(ctx, &damv1.UpdateCameraRequest{
+		Id:     cameraID,
+		Config: string(req.Config),
+	})
+	if err != nil {
+		g.logger.Error("Failed to update camera config", "error", err)
+		jsonError(w, "failed to update config", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -549,6 +663,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.handleLogin)(w, r)
 	case path == "/api/cameras" && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameras))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleGetCamera))(w, r)
 	case path == "/api/recordings" && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleRecordings))(w, r)
 	case path == "/api/events" && r.Method == http.MethodGet:
@@ -559,6 +675,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleWebRTC))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && (strings.Contains(path, "/ptz/") || strings.HasSuffix(path, "/ptz/presets")):
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/io"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/config") && r.Method == http.MethodPut:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleUpdateCameraConfig))(w, r)
+	case strings.HasPrefix(path, "/api/stream/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleStreamURL))(w, r)
 	case strings.HasPrefix(path, "/api/thumbnails/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleThumbnails))(w, r)
 	case strings.HasPrefix(path, "/api/admin/users"):
@@ -569,9 +691,134 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleCreateSite))(w, r)
 	case path == "/api/search":
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleSmartSearch))(w, r)
+	case strings.HasPrefix(path, "/api/dewarp"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/storage/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/bookmarks"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/legal-holds"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/export"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.exportProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/alerts"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/rules"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/tours"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/analytics/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case path == "/api/audit/log" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			claims := common.ExtractClaims(r)
+			if claims != nil {
+				r.Header.Set("X-Actor", claims.Username)
+			}
+			g.auditProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case path == "/api/audit/chain" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.auditProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case path == "/api/audit/verify" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.auditProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/pos/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.posProxy.ServeHTTP(w, r)
+		}))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
+}
+
+func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, logger *slog.Logger) error {
+	certManager := &autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(config.TLSDomain),
+		Email:      config.TLSEmail,
+		Cache:      autocert.DirCache(".cache/autocert"),
+	}
+
+	redirectServer := &http.Server{
+		Addr:         ":80",
+		Handler:      certManager.HTTPHandler(nil),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		logger.Info("Starting HTTP redirect server", "addr", ":80")
+		if err := redirectServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("HTTP redirect server error", "error", err)
+		}
+	}()
+
+	tlsServer := &http.Server{
+		Addr:         ":443",
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		TLSConfig: &tls.Config{
+			GetCertificate: certManager.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+		},
+	}
+
+	go func() {
+		logger.Info("API Gateway listening with TLS", "domain", config.TLSDomain, "addr", ":443")
+		if err := tlsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			logger.Error("TLS server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	logger.Info("Shutting down API Gateway...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := tlsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("TLS server shutdown error", "error", err)
+	}
+
+	redirectCtx, redirectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer redirectCancel()
+	redirectServer.Shutdown(redirectCtx)
+
+	return nil
 }
 
 func main() {
@@ -590,6 +837,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer gateway.Close()
+
+	if config.TLSEnabled {
+		if err := serveTLS(ctx, config, gateway, logger); err != nil {
+			logger.Error("TLS server failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	server := &http.Server{
 		Addr:         config.Port,
