@@ -3,9 +3,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o main ./services/auth/main.go
+RUN CGO_ENABLED=0 go build -o main ./services/auth/main.go
 
-FROM alpine:latest
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
 WORKDIR /root/
 COPY --from=builder /app/main .
 CMD ["./main"]

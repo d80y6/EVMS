@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'go-services'
+    static_configs:
+      - targets:
+          - 'auth-service:2112'
+          - 'camera-mgmt:2112'
+          - 'api-gateway:2112'
+          - 'event-proc:2112'
+          - 'metadata:2112'
+          - 'notification:2112'
+          - 'discovery:2112'
+          - 'webrtc-service:2112'
+          - 'camera-control:2112'
+          - 'thumbnails:2112'
+          - 'export-service:2112'
+          - 'onvif-events:2112'
+          - 'audit-service:2112'
+          - 'pos-ingest:2112'

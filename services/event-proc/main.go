@@ -716,7 +716,7 @@ func (s *EventProcessor) Close() error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("errors during shutdown: %w", errs)
+		return fmt.Errorf("errors during shutdown: %v", errs)
 	}
 	return nil
 }

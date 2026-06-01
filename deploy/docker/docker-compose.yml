@@ -229,7 +229,101 @@ services:
       thumbnails:
         condition: service_started
 
+  event-proc:
+    build:
+      context: ../../
+      dockerfile: services/event-proc/Dockerfile
+    environment:
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - NATS_URL=nats://nats:4222
+      - ALERT_ADMIN_PORT=:8093
+    depends_on:
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  metadata:
+    build:
+      context: ../../
+      dockerfile: services/metadata/Dockerfile
+    environment:
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  notification:
+    build:
+      context: ../../
+      dockerfile: services/notification/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  export-service:
+    build:
+      context: ../../
+      dockerfile: services/export/Dockerfile
+    volumes:
+      - recordings:/recordings
+      - exports:/exports
+    ports:
+      - "8094:8094"
+
+  onvif-events:
+    build:
+      context: ../../
+      dockerfile: services/onvif-events/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+      - ONVIF_EVENTS_PORT=:8092
+    ports:
+      - "8092:8092"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  audit-service:
+    build:
+      context: ../../
+      dockerfile: services/audit/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+      - AUDIT_PORT=:8093
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  pos-ingest:
+    build:
+      context: ../../
+      dockerfile: services/pos-ingest/Dockerfile
+    environment:
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  blur-worker:
+    build:
+      context: ../../
+      dockerfile: services/ai-worker/Dockerfile.blur
+    environment:
+      - NATS_URL=nats://nats:4222
+    volumes:
+      - recordings:/recordings
+    depends_on:
+      nats:
+        condition: service_healthy
+
 volumes:
   pgdata:
   recordings:
   thumbnail-cache:
+  exports:
