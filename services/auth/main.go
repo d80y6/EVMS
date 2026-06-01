@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/go-ldap/ldap/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -32,6 +33,14 @@ type AuthConfig struct {
 	DBURL       string
 	JWTSecret   []byte
 	TokenExpiry time.Duration
+
+	LDAPEnabled  bool
+	LDAPHost     string
+	LDAPPort     int
+	LDAPBaseDN   string
+	LDAPBindDN   string
+	LDAPPassword string
+	LDAPFilter   string
 }
 
 // DefaultAuthConfig returns a configuration with sensible defaults
@@ -41,6 +50,14 @@ func DefaultAuthConfig() AuthConfig {
 		DBURL:       common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
 		JWTSecret:   []byte(os.Getenv("JWT_SECRET")),
 		TokenExpiry: 24 * time.Hour,
+
+		LDAPEnabled:  os.Getenv("LDAP_ENABLED") == "true",
+		LDAPHost:     common.GetEnv("LDAP_HOST", "localhost"),
+		LDAPPort:     389,
+		LDAPBaseDN:   common.GetEnv("LDAP_BASE_DN", "dc=example,dc=com"),
+		LDAPBindDN:   common.GetEnv("LDAP_BIND_DN", ""),
+		LDAPPassword: os.Getenv("LDAP_PASSWORD"),
+		LDAPFilter:   common.GetEnv("LDAP_FILTER", "(uid=%s)"),
 	}
 }
 
@@ -158,19 +175,83 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // authenticateUser validates credentials and returns a JWT token
 func (s *AuthService) authenticateUser(ctx context.Context, username, password string) (string, error) {
+	var user *User
+	var err error
+
+	if s.config.LDAPEnabled {
+		user, err = s.authenticateLDAP(ctx, username, password)
+		if err != nil {
+			s.logger.Warn("LDAP auth failed, falling back to local", "username", username, "error", err)
+		}
+	}
+
+	if user == nil {
+		var localUser User
+		err = s.db.GetContext(ctx, &localUser,
+			"SELECT id, username, password_hash, role FROM users WHERE username = $1 AND active = true AND deleted_at IS NULL",
+			username)
+		if err != nil {
+			return "", fmt.Errorf("user not found: %w", err)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(localUser.PasswordHash), []byte(password)); err != nil {
+			return "", errors.New("invalid password")
+		}
+		user = &localUser
+	}
+
+	return s.generateToken(*user)
+}
+
+func (s *AuthService) authenticateLDAP(ctx context.Context, username, password string) (*User, error) {
+	conn, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", s.config.LDAPHost, s.config.LDAPPort))
+	if err != nil {
+		return nil, fmt.Errorf("ldap dial: %w", err)
+	}
+	defer conn.Close()
+
+	if s.config.LDAPBindDN != "" {
+		if err := conn.Bind(s.config.LDAPBindDN, s.config.LDAPPassword); err != nil {
+			return nil, fmt.Errorf("ldap service bind: %w", err)
+		}
+	}
+
+	filter := strings.ReplaceAll(s.config.LDAPFilter, "%s", ldap.EscapeFilter(username))
+	searchReq := &ldap.SearchRequest{
+		BaseDN:     s.config.LDAPBaseDN,
+		Scope:      ldap.ScopeWholeSubtree,
+		Filter:     filter,
+		Attributes: []string{"uid", "mail", "cn"},
+	}
+	result, err := conn.Search(searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("ldap search: %w", err)
+	}
+	if len(result.Entries) == 0 {
+		return nil, errors.New("user not found in ldap")
+	}
+
+	userDN := result.Entries[0].DN
+	if err := conn.Bind(userDN, password); err != nil {
+		return nil, errors.New("ldap bind failed: invalid password")
+	}
+
+	// Auto-provision local user if not exists
 	var user User
-	err := s.db.GetContext(ctx, &user,
-		"SELECT id, username, password_hash, role FROM users WHERE username = $1",
+	err = s.db.GetContext(ctx, &user,
+		"SELECT id, username, password_hash, role, active FROM users WHERE username = $1",
 		username)
 	if err != nil {
-		return "", fmt.Errorf("user not found: %w", err)
+		var id string
+		err = s.db.QueryRowContext(ctx,
+			"INSERT INTO users (username, password_hash, role, active) VALUES ($1, '', 'viewer', true) RETURNING id",
+			username).Scan(&id)
+		if err != nil {
+			return nil, fmt.Errorf("auto-provision user: %w", err)
+		}
+		user = User{ID: id, Username: username, Role: "viewer", Active: true}
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return "", errors.New("invalid password")
-	}
-
-	return s.generateToken(user)
+	return &user, nil
 }
 
 // generateToken creates a JWT token for a user

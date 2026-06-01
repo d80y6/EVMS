@@ -11,6 +11,9 @@ import EventsPage from './pages/EventsPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminPage from './pages/AdminPage';
 import SearchPage from './pages/SearchPage';
+import MapPage from './pages/MapPage';
+import HealthPage from './pages/HealthPage';
+import StoragePage from './pages/StoragePage';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -75,6 +78,36 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               <ProtectedRoute>
                 <Layout>
                   <SettingsPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/map"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <MapPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/health"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <HealthPage />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/storage"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <StoragePage />
                 </Layout>
               </ProtectedRoute>
             }

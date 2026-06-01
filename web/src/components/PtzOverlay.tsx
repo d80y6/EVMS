@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, Preset } from '../api/client';
 
 interface PtzOverlayProps {
@@ -52,7 +52,7 @@ export default function PtzOverlay({ cameraId, visible, onVisibilityChange }: Pt
     }
   }, [cameraId, visible]);
 
-  const sendCommand = useCallback(async (command: string, body?: Record<string, unknown>) => {
+  const sendCommand = useCallback(async (command: string) => {
     setSending(command);
     try {
       await api.ptzMove(cameraId, command, speed);

@@ -20,9 +20,11 @@ CREATE TABLE users (
     username TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL, -- 'admin', 'operator', 'viewer'
+    role TEXT NOT NULL DEFAULT 'viewer', -- 'admin', 'operator', 'viewer'
+    active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- Sites
@@ -31,7 +33,8 @@ CREATE TABLE sites (
     tenant_id UUID REFERENCES tenants(id),
     name TEXT NOT NULL,
     location TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Cameras
@@ -45,6 +48,9 @@ CREATE TABLE cameras (
     onvif_data JSONB,
     status TEXT DEFAULT 'offline', -- 'online', 'offline', 'error'
     config JSONB DEFAULT '{}',
+    ptz_protocol TEXT DEFAULT 'NONE',
+    retention_days INT DEFAULT 30,
+    prerecord_seconds INT DEFAULT 5,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -76,6 +82,19 @@ CREATE TABLE ai_events (
 );
 
 SELECT create_hypertable('ai_events', 'event_time');
+
+-- Bookmarks
+CREATE TABLE bookmarks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    camera_id UUID NOT NULL REFERENCES cameras(id),
+    timestamp TIMESTAMPTZ NOT NULL,
+    label TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_by TEXT NOT NULL
+);
+
+CREATE INDEX idx_bookmarks_camera ON bookmarks(camera_id);
+CREATE INDEX idx_bookmarks_time ON bookmarks(timestamp DESC);
 
 -- Audit Logs
 CREATE TABLE audit_logs (

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { api } from '../api/client';
+import { api, Bookmark } from '../api/client';
 
 interface TimelineScrubberProps {
   cameraId: string;
@@ -26,6 +26,8 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
   const [thumbnails, setThumbnails] = useState<{ timestamp: string; url: string }[]>([]);
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [showBookmarkDialog, setShowBookmarkDialog] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
 
@@ -38,6 +40,22 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
       .then((data) => setThumbnails(data.thumbnails))
       .catch(() => setThumbnails([]));
   }, [cameraId, zoom, start, end]);
+
+  useEffect(() => {
+    api.listBookmarks(cameraId).then((data) => setBookmarks(data.bookmarks)).catch(() => {});
+  }, [cameraId]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      if (e.key === 'b' && !e.ctrlKey && !e.metaKey && !e.repeat) {
+        setShowBookmarkDialog(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   const handleScrubberClick = useCallback((e: React.MouseEvent) => {
     if (!scrubberRef.current) return;
@@ -127,6 +145,22 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
           )}
         </div>
 
+        {bookmarks.map(bm => {
+          const bmTime = new Date(bm.timestamp).getTime();
+          const rangeStart = new Date(start).getTime();
+          const rangeEnd = new Date(end).getTime();
+          const pos = (bmTime - rangeStart) / (rangeEnd - rangeStart);
+          if (pos < 0 || pos > 1) return null;
+          return (
+            <div
+              key={bm.id}
+              className="absolute top-0 w-1 h-full bg-yellow-400 cursor-pointer z-10"
+              style={{ left: `${pos * 100}%`, transform: 'translateX(-50%)' }}
+              title={bm.label}
+            />
+          );
+        })}
+
         {eventPositions.map((ev, i) => (
           <div
             key={i}
@@ -154,6 +188,32 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
           </div>
         )}
       </div>
+
+      {showBookmarkDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-4 rounded">
+            <h3 className="text-sm font-medium text-slate-200">Add Bookmark</h3>
+            <input
+              autoFocus
+              className="w-full p-2 bg-gray-700 rounded mt-2 text-slate-200"
+              placeholder="Label (optional)"
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  try {
+                    await api.createBookmark(cameraId, new Date().toISOString(), (e.target as HTMLInputElement).value);
+                  } catch (err) {
+                    console.error('Failed to create bookmark:', err);
+                  }
+                  setShowBookmarkDialog(false);
+                  const data = await api.listBookmarks(cameraId);
+                  setBookmarks(data.bookmarks);
+                }
+                if (e.key === 'Escape') setShowBookmarkDialog(false);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

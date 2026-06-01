@@ -52,6 +52,22 @@ services:
     depends_on:
       - prometheus
 
+  openldap:
+    image: osixia/openldap:latest
+    environment:
+      LDAP_ORGANISATION: "DAM VMS"
+      LDAP_DOMAIN: "dam.vms"
+      LDAP_ADMIN_PASSWORD: "admin"
+    ports:
+      - "389:389"
+
+  ldap-admin:
+    image: osixia/phpldapadmin:latest
+    ports:
+      - "6443:443"
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: openldap
+
   auth-service:
     build:
       context: ../../
@@ -60,6 +76,13 @@ services:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
       - REDIS_URL=redis:6379
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - LDAP_ENABLED=true
+      - LDAP_HOST=openldap
+      - LDAP_PORT=389
+      - LDAP_BASE_DN=dc=dam,dc=vms
+      - LDAP_BIND_DN=cn=admin,dc=dam,dc=vms
+      - LDAP_PASSWORD=admin
+      - LDAP_FILTER=(uid=%s)
     depends_on:
       db:
         condition: service_healthy

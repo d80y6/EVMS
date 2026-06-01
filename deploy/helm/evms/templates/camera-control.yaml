@@ -1,0 +1,68 @@
+{{- if .Values.services.cameraControl.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camera-control
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: camera-control
+spec:
+  replicas: {{ .Values.services.cameraControl.replicas }}
+  selector:
+    matchLabels:
+      app: camera-control
+  template:
+    metadata:
+      labels:
+        app: camera-control
+    spec:
+      containers:
+      - name: camera-control
+        image: {{ include "evms.image" (dict "image" .Values.services.cameraControl.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.cameraControl.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: CAMERA_SERVICE_ADDR
+          value: "camera-mgmt:50051"
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        resources:
+          {{- toYaml .Values.services.cameraControl.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: camera-control
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: camera-control
+spec:
+  selector:
+    app: camera-control
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: {{ .Values.services.cameraControl.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

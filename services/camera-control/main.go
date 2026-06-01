@@ -83,7 +83,13 @@ func (s *PTZService) Close() error {
 
 func (s *PTZService) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/cameras/", s.handlePTZRouter)
+	mux.HandleFunc("/cameras/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/io") {
+			s.handleIO(w, r)
+			return
+		}
+		s.handlePTZRouter(w, r)
+	})
 	mux.HandleFunc("/health", s.healthHandler)
 
 	s.server = &http.Server{
@@ -210,6 +216,61 @@ func (s *PTZService) handleZoom(w http.ResponseWriter, r *http.Request, camera *
 	}
 
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+func (s *PTZService) handleIO(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cameraID := extractParam(r.URL.Path, "/cameras/")
+	cameraID = strings.TrimSuffix(cameraID, "/io")
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
+	defer cancel()
+
+	camera, err := s.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	var req struct {
+		RelayID string `json:"relay_id"`
+		State   string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if camera.PtzProtocol != "onvif" {
+		jsonError(w, "ONVIF required for IO control", http.StatusBadRequest)
+		return
+	}
+
+	soapBody := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:tr2="http://www.onvif.org/ver10/deviceio/wsdl">
+  <s:Body>
+    <tr2:SetRelayOutputState>
+      <tr2:RelayOutputToken>%s</tr2:RelayOutputToken>
+      <tr2:LogicalState>%s</tr2:LogicalState>
+    </tr2:SetRelayOutputState>
+  </s:Body>
+</s:Envelope>`, req.RelayID, req.State)
+
+	ioURL := strings.TrimRight(camera.ConnectionUrl, "/") + "/onvif/deviceio_service"
+	resp, err := http.Post(ioURL, "application/soap+xml", strings.NewReader(soapBody))
+	if err != nil {
+		jsonError(w, "IO control failed", http.StatusInternalServerError)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	jsonOK(w, map[string]string{"status": "relay " + req.State})
 }
 
 func (s *PTZService) handleStop(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {

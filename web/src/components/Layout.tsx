@@ -20,7 +20,10 @@ const navItems: NavItem[] = [
   { to: '/', label: 'Live View', icon: '■' },
   { to: '/recordings', label: 'Recordings', icon: '▶' },
   { to: '/events', label: 'Events', icon: '!' },
+  { to: '/map', label: 'Map', icon: '◉' },
   { to: '/search', label: 'Search', icon: '⌕' },
+  { to: '/health', label: 'Health', icon: '♥' },
+  { to: '/storage', label: 'Storage', icon: '💾' },
   { to: '/admin', label: 'Admin', icon: '⚙', adminOnly: true },
   { to: '/settings', label: 'Settings', icon: '⚙' },
 ];
