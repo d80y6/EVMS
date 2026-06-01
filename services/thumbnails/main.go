@@ -74,7 +74,7 @@ func (s *ThumbnailService) Start() error {
 
 	s.server = &http.Server{
 		Addr:         s.config.Port,
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
@@ -342,7 +342,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down Thumbnails Service...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := service.Shutdown(shutdownCtx); err != nil {

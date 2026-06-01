@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -35,7 +36,7 @@ func DefaultEventProcConfig() *EventProcConfig {
 		NATSURL:                   common.GetEnv("NATS_URL", "nats://nats:4222"),
 		PersonConfidenceThreshold: 0.8,
 		AlertAdminPort:            common.GetEnv("ALERT_ADMIN_PORT", ":8093"),
-		DBURL:                     common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
+		DBURL:                     os.Getenv("DB_URL"),
 	}
 }
 
@@ -321,17 +322,15 @@ type EventProcessor struct {
 	stopCh        chan struct{}
 }
 
-func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
-	nc, err := nats.Connect(config.NATSURL,
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-	)
+func NewEventProcessor(ctx context.Context, config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
+	natsCB := common.NewNATSCircuitBreaker("event-proc")
+	nc, err := common.ConnectNATSWithCircuitBreaker(config.NATSURL, natsCB)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	db, err := sqlx.Connect("postgres", config.DBURL)
+	dbCB := common.NewDBCircuitBreaker("event-proc")
+	db, err := common.ConnectDBWithCircuitBreaker(ctx, "postgres", config.DBURL, dbCB)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -342,7 +341,7 @@ func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProc
 		logger:        logger,
 		tracker:       NewTracker(0.3, 3*time.Second),
 		alertRules:    NewAlertRuleManager(),
-		alertWorkflow: NewAlertWorkflowManager(AlertWorkflowConfig{
+		alertWorkflow: NewAlertWorkflowManager(ctx, AlertWorkflowConfig{
 			EscalationTimeout: 5 * time.Minute,
 			EscalationWebhook: os.Getenv("ESCALATION_WEBHOOK"),
 		}, logger),
@@ -380,7 +379,7 @@ func (s *EventProcessor) Start() error {
 
 	s.adminServer = &http.Server{
 		Addr:    s.config.AlertAdminPort,
-		Handler: mux,
+		Handler: common.RecoveryMiddleware(mux),
 	}
 
 	go func() {
@@ -512,8 +511,23 @@ func (s *EventProcessor) triggerNotification(subject string, detection Detection
 func (s *EventProcessor) executeAction(action Action, cameraID string, eventData map[string]interface{}) {
 	switch action.Type {
 	case "webhook":
+		target, err := url.Parse(action.Target)
+		if err != nil {
+			s.logger.Error("Invalid webhook target URL", "target", action.Target, "error", err)
+			return
+		}
+		host := strings.ToLower(target.Hostname())
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "10.") || strings.HasPrefix(host, "172.") || strings.HasPrefix(host, "192.168.") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+			s.logger.Error("Webhook target blocked: internal address", "target", action.Target)
+			return
+		}
 		body, _ := json.Marshal(eventData)
-		http.Post(action.Target, "application/json", bytes.NewReader(body))
+		resp, err := http.Post(action.Target, "application/json", bytes.NewReader(body))
+		if err != nil {
+			s.logger.Error("Webhook call failed", "target", action.Target, "error", err)
+			return
+		}
+		resp.Body.Close()
 	case "alert":
 		msg := action.Params["message"]
 		if msg == "" {
@@ -732,7 +746,7 @@ func main() {
 
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 
-	service, err := NewEventProcessor(config, logger)
+	service, err := NewEventProcessor(ctx, config, logger)
 	if err != nil {
 		logger.Error("Failed to initialize event processor", "error", err)
 		os.Exit(1)

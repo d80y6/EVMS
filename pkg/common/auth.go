@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,8 +9,49 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/metadata"
+)
+
+type contextKey string
+
+const (
+	TenantKey contextKey = "tenant_id"
+	UserKey   contextKey = "username"
+	RoleKey   contextKey = "role"
+)
+
+func TenantFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(TenantKey).(string); ok {
+		return v
+	}
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if t := md.Get("tenant_id"); len(t) > 0 {
+			return t[0]
+		}
+	}
+	return ""
+}
+
+func UserFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(UserKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func RoleFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(RoleKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+var (
+	jwtKey     []byte
+	jwtKeyOnce sync.Once
 )
 
 // GetEnv retrieves an environment variable with a default value fallback.
@@ -20,15 +62,25 @@ func GetEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func getJWTKey() []byte {
+	jwtKeyOnce.Do(func() {
+		if key := os.Getenv("JWT_SECRET"); key != "" {
+			jwtKey = []byte(key)
+		}
+	})
+	return jwtKey
+}
+
 type Claims struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	TenantID string `json:"tenant_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
 func ValidateJWT(tokenString string) (*Claims, error) {
-	jwtKey := []byte(os.Getenv("JWT_SECRET"))
-	if len(jwtKey) == 0 {
+	key := getJWTKey()
+	if len(key) == 0 {
 		return nil, errors.New("JWT_SECRET not set")
 	}
 
@@ -36,7 +88,7 @@ func ValidateJWT(tokenString string) (*Claims, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return jwtKey, nil
+		return getJWTKey(), nil
 	})
 
 	if err != nil {
@@ -53,10 +105,12 @@ func ValidateJWT(tokenString string) (*Claims, error) {
 func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			// Also check query param for WebRTC/Video elements
-			authHeader = r.URL.Query().Get("token")
+	if authHeader == "" {
+		authHeader = r.URL.Query().Get("token")
+		if authHeader != "" {
+			r.URL.RawQuery = ""
 		}
+	}
 
 		if authHeader == "" {
 			http.Error(w, "Authorization header required", http.StatusUnauthorized)

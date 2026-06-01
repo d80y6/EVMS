@@ -20,6 +20,55 @@ spec:
     port: {{ .Values.nats.ports.monitor }}
     targetPort: {{ .Values.nats.ports.monitor }}
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+data:
+  nats.conf: |
+    port: {{ .Values.nats.ports.client }}
+
+    http: {{ .Values.nats.ports.monitor }}
+
+    {{- if .Values.certManager.enabled }}
+    tls: {
+      cert_file: "/etc/nats/certs/tls.crt"
+      key_file: "/etc/nats/certs/tls.key"
+      ca_file: "/etc/nats/certs/ca.crt"
+      verify: true
+      timeout: 5
+    }
+    {{- end }}
+
+    jetstream: {
+      store_dir: "/data/jetstream"
+      max_memory_store: {{ .Values.nats.jetstream.maxMemoryStore }}
+      max_file_store: {{ .Values.nats.jetstream.maxFileStore }}
+    }
+
+    cluster {
+      port: {{ .Values.nats.ports.cluster }}
+      listen: "0.0.0.0:{{ .Values.nats.ports.cluster }}"
+      {{- if .Values.certManager.enabled }}
+      tls: {
+        cert_file: "/etc/nats/certs/tls.crt"
+        key_file: "/etc/nats/certs/tls.key"
+        ca_file: "/etc/nats/certs/ca.crt"
+      }
+      {{- end }}
+      routes: [
+        {{- range $i := until (int $.Values.nats.replicas) }}
+        "nats{{- if $.Values.certManager.enabled }}-tls{{- end }}://nats-{{ $i }}.nats.{{ $.Values.global.namespace }}.svc:{{ $.Values.nats.ports.cluster }}",
+        {{- end }}
+      ]
+    }
+
+    max_payload: 8388608
+    disable_old_style: true
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -41,6 +90,11 @@ spec:
       containers:
       - name: nats
         image: {{ .Values.global.imageRegistry }}{{ .Values.nats.image }}
+        command:
+        - "nats"
+        - "-c"
+        - "/etc/nats/nats.conf"
+        - "-js"
         ports:
         - containerPort: {{ .Values.nats.ports.client }}
           name: client
@@ -65,3 +119,33 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+        volumeMounts:
+        - name: nats-config
+          mountPath: /etc/nats/nats.conf
+          subPath: nats.conf
+        - name: jetstream
+          mountPath: /data/jetstream
+        {{- if .Values.certManager.enabled }}
+        - name: nats-tls
+          mountPath: /etc/nats/certs
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: nats-config
+        configMap:
+          name: nats-config
+      {{- if .Values.certManager.enabled }}
+      - name: nats-tls
+        secret:
+          secretName: nats-server-tls
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: jetstream
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: {{ .Values.nats.jetstream.storageClass }}
+      resources:
+        requests:
+          storage: {{ .Values.nats.jetstream.storeSize }}

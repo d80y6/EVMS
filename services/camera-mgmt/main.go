@@ -17,6 +17,7 @@ import (
 	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -33,7 +34,7 @@ type CameraConfig struct {
 // DefaultCameraConfig returns default configuration values
 func DefaultCameraConfig() *CameraConfig {
 	return &CameraConfig{
-		DBURL:           common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
+		DBURL:           os.Getenv("DB_URL"),
 		GRPCPort:        common.GetEnv("GRPC_PORT", ":50051"),
 		MetricsPort:     common.GetEnv("METRICS_ADDR", ":2112"),
 		GracefulTimeout: 30 * time.Second,
@@ -60,6 +61,7 @@ type Camera struct {
 // Site represents a site entity in the database
 type Site struct {
 	ID        string    `db:"id"`
+	TenantID  string    `db:"tenant_id"`
 	Name      string    `db:"name"`
 	Location  string    `db:"location"`
 	CreatedAt time.Time `db:"created_at"`
@@ -86,15 +88,30 @@ type CameraService struct {
 	server *grpc.Server
 }
 
+func tenantServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if tenant := md.Get("tenant_id"); len(tenant) > 0 && tenant[0] != "" {
+			ctx = context.WithValue(ctx, common.TenantKey, tenant[0])
+		}
+	}
+	return handler(ctx, req)
+}
+
 // NewCameraService creates a new camera service instance
 func NewCameraService(config *CameraConfig, logger *slog.Logger) (*CameraService, error) {
 	if config.DBURL == "" {
 		return nil, fmt.Errorf("database URL is required")
 	}
 
-	db, err := sqlx.Connect("postgres", config.DBURL)
+	cb := common.NewDBCircuitBreaker("camera-mgmt")
+	db, err := common.ConnectDBWithCircuitBreaker(context.Background(), "postgres", config.DBURL, cb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	migrator := common.NewMigrator(db, common.GetEnv("MIGRATIONS_DIR", "/migrations"), logger)
+	if err := migrator.Run(); err != nil {
+		return nil, fmt.Errorf("migrations failed: %w", err)
 	}
 
 	return &CameraService{
@@ -111,7 +128,15 @@ func (s *CameraService) Start() error {
 		return fmt.Errorf("failed to listen on %s: %w", s.config.GRPCPort, err)
 	}
 
-	s.server = grpc.NewServer()
+	var opts []grpc.ServerOption
+	opts = append(opts, grpc.ChainUnaryInterceptor(tenantServerInterceptor))
+	if creds, err := common.GRPCServerTLSCredentials(); err != nil {
+		return fmt.Errorf("failed to configure TLS: %w", err)
+	} else if creds != nil {
+		opts = append(opts, grpc.Creds(creds))
+		s.logger.Info("gRPC server configured with TLS")
+	}
+	s.server = grpc.NewServer(opts...)
 	damv1.RegisterCameraServiceServer(s.server, s)
 	reflection.Register(s.server)
 
@@ -128,18 +153,60 @@ func (s *CameraService) Start() error {
 	return nil
 }
 
+const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '') AS onvif_data, COALESCE(c.config, '') AS config, c.created_at"
+
+func (s *CameraService) tenantFilter(ctx context.Context) (string, string) {
+	tenantID := common.TenantFromContext(ctx)
+	if tenantID != "" {
+		return " JOIN sites s ON c.site_id = s.id AND s.tenant_id = $", tenantID
+	}
+	return "", ""
+}
+
+func (s *CameraService) cameraByIDWithTenant(ctx context.Context, id, tenantID string) (*Camera, error) {
+	var c Camera
+	var err error
+	if tenantID != "" {
+		err = s.db.GetContext(ctx, &c,
+			"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.id = $1",
+			id, tenantID)
+	} else {
+		err = s.db.GetContext(ctx, &c,
+			"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.id = $1",
+			id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // ListCameras returns a list of cameras, optionally filtered by site ID
 func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasRequest) (*damv1.ListCamerasResponse, error) {
 	var cameras []Camera
 	var err error
 
+	tenantID := common.TenantFromContext(ctx)
+
 	if req.SiteId != "" {
-		err = s.db.SelectContext(ctx, &cameras,
-			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE site_id = $1",
-			req.SiteId)
+		if tenantID != "" {
+			err = s.db.SelectContext(ctx, &cameras,
+				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.site_id = $1",
+				req.SiteId, tenantID)
+		} else {
+			err = s.db.SelectContext(ctx, &cameras,
+				"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.site_id = $1",
+				req.SiteId)
+		}
 	} else {
-		err = s.db.SelectContext(ctx, &cameras,
-			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras")
+		if tenantID != "" {
+			err = s.db.SelectContext(ctx, &cameras,
+				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $1",
+				tenantID)
+		} else {
+			err = s.db.SelectContext(ctx, &cameras,
+				"SELECT "+camerasSelectCols+" FROM cameras c")
+		}
 	}
 
 	if err != nil {
@@ -160,19 +227,31 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 
 // GetCamera returns a single camera by ID
 func (s *CameraService) GetCamera(ctx context.Context, req *damv1.GetCameraRequest) (*damv1.Camera, error) {
-	var c Camera
-	err := s.db.GetContext(ctx, &c,
-		"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE id = $1",
-		req.Id)
+	tenantID := common.TenantFromContext(ctx)
+	c, err := s.cameraByIDWithTenant(ctx, req.Id, tenantID)
 	if err != nil {
 		s.logger.Error("Failed to get camera", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.NotFound, "camera not found")
 	}
-	return s.mapCameraToProto(c), nil
+	return s.mapCameraToProto(*c), nil
 }
 
 // CreateCamera creates a new camera record
 func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCameraRequest) (*damv1.Camera, error) {
+	tenantID := common.TenantFromContext(ctx)
+	if tenantID != "" {
+		var siteTenantID string
+		err := s.db.GetContext(ctx, &siteTenantID, "SELECT tenant_id::text FROM sites WHERE id = $1", req.SiteId)
+		if err != nil {
+			s.logger.Error("Site not found", "site_id", req.SiteId)
+			return nil, status.Errorf(codes.NotFound, "site not found")
+		}
+		if siteTenantID != tenantID {
+			s.logger.Warn("cross-tenant camera creation attempt", "tenant", tenantID, "site_tenant", siteTenantID)
+			return nil, status.Errorf(codes.PermissionDenied, "cannot create camera in another tenant's site")
+		}
+	}
+
 	ptzProtocol := req.PtzProtocol
 	if ptzProtocol == "" {
 		ptzProtocol = "NONE"
@@ -200,6 +279,16 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 
 // UpdateCamera updates an existing camera record
 func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCameraRequest) (*damv1.Camera, error) {
+	tenantID := common.TenantFromContext(ctx)
+	if tenantID != "" {
+		existing, err := s.cameraByIDWithTenant(ctx, req.Id, tenantID)
+		if err != nil {
+			s.logger.Error("Camera not found for tenant", "id", req.Id, "tenant", tenantID)
+			return nil, status.Errorf(codes.NotFound, "camera not found")
+		}
+		_ = existing
+	}
+
 	prerecordSeconds := req.PrerecordSeconds
 	if prerecordSeconds == 0 {
 		prerecordSeconds = 5
@@ -217,6 +306,15 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 
 // DeleteCamera removes a camera record
 func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCameraRequest) (*damv1.DeleteCameraResponse, error) {
+	tenantID := common.TenantFromContext(ctx)
+	if tenantID != "" {
+		existing, err := s.cameraByIDWithTenant(ctx, req.Id, tenantID)
+		if err != nil {
+			s.logger.Error("Camera not found for tenant", "id", req.Id, "tenant", tenantID)
+			return nil, status.Errorf(codes.NotFound, "camera not found")
+		}
+		_ = existing
+	}
 	_, err := s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1", req.Id)
 	if err != nil {
 		s.logger.Error("Failed to delete camera", "error", err, "id", req.Id)
@@ -240,10 +338,20 @@ func (s *CameraService) StreamStatus(ctx context.Context, req *damv1.StreamStatu
 	}, nil
 }
 
-// ListSites returns a list of all sites
+// ListSites returns a list of all sites for the current tenant
 func (s *CameraService) ListSites(ctx context.Context, req *damv1.ListSitesRequest) (*damv1.ListSitesResponse, error) {
 	var sites []Site
-	err := s.db.SelectContext(ctx, &sites, "SELECT id, name, location, created_at FROM sites ORDER BY name")
+	tenantID := common.TenantFromContext(ctx)
+
+	var err error
+	if tenantID != "" {
+		err = s.db.SelectContext(ctx, &sites,
+			"SELECT id, tenant_id, name, location, created_at FROM sites WHERE tenant_id = $1 ORDER BY name",
+			tenantID)
+	} else {
+		err = s.db.SelectContext(ctx, &sites,
+			"SELECT id, tenant_id, name, location, created_at FROM sites ORDER BY name")
+	}
 	if err != nil {
 		s.logger.Error("Failed to list sites", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to list sites: %v", err)
@@ -265,12 +373,21 @@ func (s *CameraService) ListSites(ctx context.Context, req *damv1.ListSitesReque
 	return resp, nil
 }
 
-// CreateSite creates a new site record
+// CreateSite creates a new site record for the current tenant
 func (s *CameraService) CreateSite(ctx context.Context, req *damv1.CreateSiteRequest) (*damv1.Site, error) {
+	tenantID := common.TenantFromContext(ctx)
+
 	var site Site
-	err := s.db.QueryRowContext(ctx,
-		"INSERT INTO sites (name, location) VALUES ($1, $2) RETURNING id, name, location, created_at",
-		req.Name, req.Location).Scan(&site.ID, &site.Name, &site.Location, &site.CreatedAt)
+	var err error
+	if tenantID != "" {
+		err = s.db.QueryRowContext(ctx,
+			"INSERT INTO sites (tenant_id, name, location) VALUES ($1, $2, $3) RETURNING id, tenant_id, name, location, created_at",
+			tenantID, req.Name, req.Location).Scan(&site.ID, &site.TenantID, &site.Name, &site.Location, &site.CreatedAt)
+	} else {
+		err = s.db.QueryRowContext(ctx,
+			"INSERT INTO sites (name, location) VALUES ($1, $2) RETURNING id, tenant_id, name, location, created_at",
+			req.Name, req.Location).Scan(&site.ID, &site.TenantID, &site.Name, &site.Location, &site.CreatedAt)
+	}
 	if err != nil {
 		s.logger.Error("Failed to create site", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to create site: %v", err)
@@ -284,12 +401,21 @@ func (s *CameraService) CreateSite(ctx context.Context, req *damv1.CreateSiteReq
 	}, nil
 }
 
-// UpdateSite updates an existing site record
+// UpdateSite updates an existing site record (tenant-scoped)
 func (s *CameraService) UpdateSite(ctx context.Context, req *damv1.UpdateSiteRequest) (*damv1.Site, error) {
+	tenantID := common.TenantFromContext(ctx)
+
 	var site Site
-	err := s.db.QueryRowContext(ctx,
-		"UPDATE sites SET name = $1, location = $2, updated_at = NOW() WHERE id = $3 RETURNING id, name, location, created_at",
-		req.Name, req.Location, req.Id).Scan(&site.ID, &site.Name, &site.Location, &site.CreatedAt)
+	var err error
+	if tenantID != "" {
+		err = s.db.QueryRowContext(ctx,
+			"UPDATE sites SET name = $1, location = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4 RETURNING id, tenant_id, name, location, created_at",
+			req.Name, req.Location, req.Id, tenantID).Scan(&site.ID, &site.TenantID, &site.Name, &site.Location, &site.CreatedAt)
+	} else {
+		err = s.db.QueryRowContext(ctx,
+			"UPDATE sites SET name = $1, location = $2, updated_at = NOW() WHERE id = $3 RETURNING id, tenant_id, name, location, created_at",
+			req.Name, req.Location, req.Id).Scan(&site.ID, &site.TenantID, &site.Name, &site.Location, &site.CreatedAt)
+	}
 	if err != nil {
 		s.logger.Error("Failed to update site", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.Internal, "failed to update site: %v", err)
@@ -303,9 +429,15 @@ func (s *CameraService) UpdateSite(ctx context.Context, req *damv1.UpdateSiteReq
 	}, nil
 }
 
-// DeleteSite removes a site record
+// DeleteSite removes a site record (tenant-scoped)
 func (s *CameraService) DeleteSite(ctx context.Context, req *damv1.DeleteSiteRequest) (*damv1.DeleteSiteResponse, error) {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM sites WHERE id = $1", req.Id)
+	tenantID := common.TenantFromContext(ctx)
+	var err error
+	if tenantID != "" {
+		_, err = s.db.ExecContext(ctx, "DELETE FROM sites WHERE id = $1 AND tenant_id = $2", req.Id, tenantID)
+	} else {
+		_, err = s.db.ExecContext(ctx, "DELETE FROM sites WHERE id = $1", req.Id)
+	}
 	if err != nil {
 		s.logger.Error("Failed to delete site", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.Internal, "failed to delete site: %v", err)
@@ -435,6 +567,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := common.InitTelemetry("camera-mgmt"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	config := DefaultCameraConfig()
 
 	common.StartMetricsServer(config.MetricsPort)
@@ -453,7 +590,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down Camera Management Service...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.GracefulTimeout)
+	shutdownCtx, cancel := context.WithTimeout(ctx, config.GracefulTimeout)
 	defer cancel()
 
 	if err := service.Shutdown(shutdownCtx); err != nil {

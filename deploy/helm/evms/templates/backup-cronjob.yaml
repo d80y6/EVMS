@@ -1,0 +1,84 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: pg-dump
+            image: postgres:15-alpine
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="/backups/${DB_NAME}_${TIMESTAMP}.sql.gz"
+              export PGPASSWORD="${DB_PASSWORD}"
+              mkdir -p /backups
+              pg_dump -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+                --format=custom --compress=9 --file="${BACKUP_FILE}"
+              echo "Backup created: ${BACKUP_FILE}"
+              find /backups -name "${DB_NAME}_*.sql.gz" -mtime +"${RETENTION_DAYS}" -delete
+              if [ -n "${S3_BUCKET}" ]; then
+                aws s3 cp "${BACKUP_FILE}" "s3://${S3_BUCKET}/database/${TIMESTAMP}.sql.gz" \
+                  --region "${S3_REGION}"
+              fi
+            env:
+            - name: DB_HOST
+              value: {{ .Values.db.host }}
+            - name: DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.db.name }}
+            - name: DB_USER
+              value: {{ .Values.db.user }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: evms-secrets
+                  key: db-password
+            - name: RETENTION_DAYS
+              value: {{ .Values.backup.retentionDays | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.backup.s3Bucket }}
+            - name: S3_REGION
+              value: {{ .Values.backup.s3Region }}
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+          volumes:
+          - name: backups
+            persistentVolumeClaim:
+              claimName: db-backups-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-backups-pvc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: {{ .Values.backup.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.storageSize }}
+{{- end }}

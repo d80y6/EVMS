@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { api, Camera, Recording, POSTransaction } from '../api/client';
+import { api, Camera, Recording, type POSTransaction } from '../api/client';
 import TimelineScrubber from '../components/TimelineScrubber';
 import SyncPlaybackView from '../components/SyncPlaybackView';
 import { useSyncPlayback } from '../hooks/useSyncPlayback';
@@ -15,7 +15,6 @@ export default function RecordingsPage() {
   const sync = useSyncPlayback();
 
   const [posOverlay, setPosOverlay] = useState(false);
-  const [posTransactions, setPosTransactions] = useState<POSTransaction[]>([]);
   const [currentTx, setCurrentTx] = useState<POSTransaction | null>(null);
 
   const fetchPOSTxns = useCallback(async () => {
@@ -23,15 +22,14 @@ export default function RecordingsPage() {
     const start = new Date(sync.state.currentTime - 10000).toISOString();
     const end = new Date(sync.state.currentTime + 10000).toISOString();
     try {
-      const data = await api.getPOSTransactions(selectedCamera, start, end);
-      setPosTransactions(data.transactions);
-      const match = data.transactions.find(t => {
+      const data = await api.getPOSTransactions({ camera_id: selectedCamera, start_time: start, end_time: end });
+      const transactions = data.transactions;
+      const match = transactions.find(t => {
         const txnTime = new Date(t.timestamp).getTime();
         return Math.abs(txnTime - sync.state.currentTime) < 5000;
       });
       setCurrentTx(match || null);
     } catch {
-      setPosTransactions([]);
       setCurrentTx(null);
     }
   }, [selectedCamera, sync.state.currentTime]);
@@ -226,7 +224,7 @@ export default function RecordingsPage() {
                 <span>Tender:</span>
                 <span className="text-slate-300">{currentTx.tender_type}</span>
               </div>
-              {currentTx.items.map((item, i) => (
+              {currentTx.items.map((item: { description: string; quantity: number; total: number }, i: number) => (
                 <div key={i} className="flex justify-between border-t border-slate-800 pt-1">
                   <span className="truncate max-w-[140px]">{item.description}</span>
                   <span className="text-slate-300">x{item.quantity} ${item.total.toFixed(2)}</span>

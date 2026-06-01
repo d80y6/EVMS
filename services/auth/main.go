@@ -47,7 +47,7 @@ type AuthConfig struct {
 func DefaultAuthConfig() AuthConfig {
 	return AuthConfig{
 		HTTPAddr:    ":8081",
-		DBURL:       common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
+		DBURL:       os.Getenv("DB_URL"),
 		JWTSecret:   []byte(os.Getenv("JWT_SECRET")),
 		TokenExpiry: 24 * time.Hour,
 
@@ -75,6 +75,7 @@ type User struct {
 	Username     string     `db:"username"`
 	PasswordHash string     `db:"password_hash"`
 	Role         string     `db:"role"`
+	TenantID     string     `db:"tenant_id"`
 	Active       bool       `db:"active"`
 	CreatedAt    time.Time  `db:"created_at"`
 	UpdatedAt    time.Time  `db:"updated_at"`
@@ -123,9 +124,15 @@ type AuthService struct {
 
 // NewAuthService creates a new auth service instance
 func NewAuthService(ctx context.Context, config AuthConfig, logger *slog.Logger) (*AuthService, error) {
-	db, err := sqlx.ConnectContext(ctx, "postgres", config.DBURL)
+	cb := common.NewDBCircuitBreaker("auth")
+	db, err := common.ConnectDBWithCircuitBreaker(ctx, "postgres", config.DBURL, cb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	migrator := common.NewMigrator(db, common.GetEnv("MIGRATIONS_DIR", "/migrations"), logger)
+	if err := migrator.Run(); err != nil {
+		return nil, fmt.Errorf("migrations failed: %w", err)
 	}
 
 	return &AuthService{
@@ -188,7 +195,7 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 	if user == nil {
 		var localUser User
 		err = s.db.GetContext(ctx, &localUser,
-			"SELECT id, username, password_hash, role FROM users WHERE username = $1 AND active = true AND deleted_at IS NULL",
+			"SELECT id, username, password_hash, role, tenant_id FROM users WHERE username = $1 AND active = true AND deleted_at IS NULL",
 			username)
 		if err != nil {
 			return "", fmt.Errorf("user not found: %w", err)
@@ -238,7 +245,7 @@ func (s *AuthService) authenticateLDAP(ctx context.Context, username, password s
 	// Auto-provision local user if not exists
 	var user User
 	err = s.db.GetContext(ctx, &user,
-		"SELECT id, username, password_hash, role, active FROM users WHERE username = $1",
+		"SELECT id, username, password_hash, role, tenant_id, active FROM users WHERE username = $1",
 		username)
 	if err != nil {
 		var id string
@@ -260,6 +267,7 @@ func (s *AuthService) generateToken(user User) (string, error) {
 	claims := &common.Claims{
 		Username: user.Username,
 		Role:     user.Role,
+		TenantID: user.TenantID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -485,7 +493,7 @@ func (s *AuthService) Start(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:         s.config.HTTPAddr,
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -500,7 +508,7 @@ func (s *AuthService) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 	s.logger.Info("Shutting down Auth Service...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
 }

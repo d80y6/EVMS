@@ -10,21 +10,30 @@ nats:
     client: 4222
     cluster: 6222
     monitor: 8222
+  jetstream:
+    storeSize: 50Gi
+    storageClass: standard
+    maxMemoryStore: 1GB
+    maxFileStore: 50GB
+
+externalSecrets:
+  enabled: false
+  provider: aws
+  secretStoreRef:
+    name: aws-secrets-store
+    kind: SecretStore
+  refreshInterval: "1h"
 
 db:
-  url: "postgres://dam_admin:changeit@db:5432/dam_vms"
+  url: ""
   host: db
   port: 5432
   name: dam_vms
   user: dam_admin
-  password: changeit
+  password: ""
 
 jwt:
-  secret: change-me-jwt-secret
-
-redis:
-  host: redis
-  port: 6379
+  secret: ""
 
 ldap:
   enabled: false
@@ -32,7 +41,7 @@ ldap:
   port: 389
   baseDn: dc=dam,dc=vms
   bindDn: cn=admin,dc=dam,dc=vms
-  password: admin
+  password: ""
   filter: "(uid=%s)"
 
 services:
@@ -69,6 +78,9 @@ services:
     port: 8087
     metricsPort: 2112
     retentionDays: 7
+    sharding:
+      enabled: false
+      totalShards: 3
     resources:
       requests:
         cpu: 200m
@@ -213,7 +225,7 @@ services:
     enabled: true
     replicas: 1
     image: damvms/audit
-    port: 8093
+    port: 8097
     resources:
       requests:
         cpu: 100m
@@ -233,6 +245,52 @@ services:
       limits:
         cpu: 2000m
         memory: 512Mi
+
+ingress:
+  enabled: false
+  domain: ""
+  email: ""
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+certManager:
+  enabled: false
+  clusterIssuer:
+    name: letsencrypt-prod
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ""
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - http01:
+otelCollector:
+  enabled: false
+  image: otel/opentelemetry-collector-contrib:latest
+  debug: true
+  otlpEndpoint: ""
+  insecure: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ingress:
+          class: nginx
+
+backup:
+  enabled: false
+  schedule: "0 2 * * *"
+  retentionDays: 30
+  storageSize: 50Gi
+  storageClass: standard
+  s3Bucket: ""
+  s3Region: us-east-1
 
 recordings:
   storageClass: standard

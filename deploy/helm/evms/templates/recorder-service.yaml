@@ -1,4 +1,78 @@
 {{- if .Values.services.recorder.enabled }}
+{{- if .Values.services.recorder.sharding.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: recorder-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recorder
+spec:
+  serviceName: recorder-service
+  replicas: {{ .Values.services.recorder.replicas }}
+  selector:
+    matchLabels:
+      app: recorder-service
+  template:
+    metadata:
+      labels:
+        app: recorder-service
+    spec:
+      containers:
+      - name: recorder
+        image: {{ include "evms.image" (dict "image" .Values.services.recorder.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.recorder.metricsPort }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.recorder.metricsPort }}
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.recorder.metricsPort }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: RETENTION_DAYS
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: RETENTION_DAYS
+        - name: RECORDER_TOTAL_SHARDS
+          value: {{ .Values.services.recorder.sharding.totalShards | quote }}
+        - name: RECORDER_SHARD_INDEX
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+        volumeMounts:
+        - name: recordings
+          mountPath: /recordings
+        resources:
+          {{- toYaml .Values.services.recorder.resources | nindent 10 }}
+      volumes:
+      - name: recordings
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -64,4 +138,5 @@ spec:
       - name: recordings
         persistentVolumeClaim:
           claimName: recordings-pvc
+{{- end }}
 {{- end }}

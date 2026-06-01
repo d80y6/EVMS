@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -138,7 +139,7 @@ func (s *DiscoveryService) Start() error {
 
 	s.server = &http.Server{
 		Addr:    s.config.Port,
-		Handler: mux,
+		Handler: common.RecoveryMiddleware(mux),
 	}
 
 	go func() {
@@ -284,7 +285,10 @@ func (s *DiscoveryService) getDeviceInfo(ctx context.Context, xaddr string) (str
 		s.logger.Warn("Failed to get device info", "xaddr", xaddr, "error", err)
 		return "", "", ""
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
@@ -389,7 +393,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down Discovery Service...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.GracefulTimeout)
+	shutdownCtx, cancel := context.WithTimeout(ctx, config.GracefulTimeout)
 	defer cancel()
 
 	if err := service.Shutdown(shutdownCtx); err != nil {

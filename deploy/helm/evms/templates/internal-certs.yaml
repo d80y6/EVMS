@@ -1,0 +1,81 @@
+{{- if .Values.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: evms-internal-ca
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: evms-ca-certificate
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: evms-internal-ca
+  secretName: evms-internal-ca-tls
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: evms-internal-ca
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: evms-issuer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: evms-internal-ca-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nats-server-tls
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+spec:
+  secretName: nats-server-tls
+  commonName: nats
+  dnsNames:
+  - nats
+  - "*.nats.{{ .Values.global.namespace }}.svc"
+  - "nats.{{ .Values.global.namespace }}.svc"
+  usages:
+  - server auth
+  - client auth
+  issuerRef:
+    name: evms-issuer
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: camera-mgmt-tls
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+spec:
+  secretName: camera-mgmt-tls
+  commonName: camera-mgmt
+  dnsNames:
+  - camera-mgmt
+  - "camera-mgmt.{{ .Values.global.namespace }}.svc"
+  usages:
+  - server auth
+  - client auth
+  issuerRef:
+    name: evms-issuer
+    kind: Issuer
+{{- end }}

@@ -18,7 +18,6 @@ import (
 	"github.com/dam-vms/dam/api/v1"
 	"github.com/dam-vms/dam/pkg/common"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
@@ -58,8 +57,12 @@ type PTZService struct {
 }
 
 func NewPTZService(config *PTZConfig, logger *slog.Logger) (*PTZService, error) {
+	creds, err := common.GRPCClientTLSCredentials("camera-mgmt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure gRPC credentials: %w", err)
+	}
 	cameraCC, err := grpc.NewClient(config.CameraSvcAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to camera service: %w", err)
 	}
@@ -94,7 +97,7 @@ func (s *PTZService) Start() error {
 
 	s.server = &http.Server{
 		Addr:         s.config.Port,
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
@@ -827,7 +830,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down Camera Control Service...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := service.Shutdown(shutdownCtx); err != nil {

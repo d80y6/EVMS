@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,17 +34,48 @@ type ExportResult struct {
 	Size     int64  `json:"size_bytes"`
 }
 
+func sanitizeCameraID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || id == "." || id == ".." {
+		return ""
+	}
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return -1
+	}, id)
+}
+
 func findSegments(cameraID, start, end string) ([]string, error) {
+	cameraID = sanitizeCameraID(cameraID)
+	if cameraID == "" {
+		return nil, fmt.Errorf("invalid camera_id")
+	}
 	dir := fmt.Sprintf("/recordings/%s", cameraID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	startTime, startErr := time.Parse(time.RFC3339, start)
+	endTime, endErr := time.Parse(time.RFC3339, end)
 	var segments []string
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".mp4" {
-			segments = append(segments, filepath.Join(dir, e.Name()))
+		if filepath.Ext(e.Name()) != ".mp4" {
+			continue
 		}
+		if startErr == nil || endErr == nil {
+			segTime, segErr := time.Parse("2006-01-02T15:04:05", strings.TrimSuffix(e.Name(), ".mp4"))
+			if segErr == nil {
+				if startErr == nil && segTime.Before(startTime) {
+					continue
+				}
+				if endErr == nil && segTime.After(endTime) {
+					continue
+				}
+			}
+		}
+		segments = append(segments, filepath.Join(dir, e.Name()))
 	}
 	return segments, nil
 }
@@ -65,6 +97,7 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.CameraID = sanitizeCameraID(req.CameraID)
 	outputPath := filepath.Join("/exports", fmt.Sprintf("export_%s_%s.mp4", req.CameraID, time.Now().Format("20060102150405")))
 	args := []string{"-y"}
 	for _, seg := range segments {
@@ -120,7 +153,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":8094",
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
@@ -134,7 +167,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
 }

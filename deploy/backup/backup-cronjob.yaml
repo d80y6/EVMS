@@ -1,0 +1,115 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  namespace: dam-vms
+  labels:
+    app.kubernetes.io/name: evms
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: pg-dump
+            image: postgres:15-alpine
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="/backups/${DB_NAME}_${TIMESTAMP}.sql.gz"
+              export PGPASSWORD="${DB_PASSWORD}"
+              mkdir -p /backups
+              pg_dump -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+                --format=custom --compress=9 --file="${BACKUP_FILE}"
+              echo "Backup created: ${BACKUP_FILE}"
+              find /backups -name "${DB_NAME}_*.sql.gz" -mtime +"${RETENTION_DAYS}" -delete
+              if [ -n "${S3_BUCKET}" ]; then
+                aws s3 cp "${BACKUP_FILE}" "s3://${S3_BUCKET}/database/${TIMESTAMP}.sql.gz" \
+                  --region "${S3_REGION}"
+                aws s3 sync /wal_archive "s3://${S3_BUCKET}/wal/" \
+                  --region "${S3_REGION}" --exclude "*" --include "*.wal"
+              fi
+            env:
+            - name: DB_HOST
+              value: "db"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: evms-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: evms-config
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: evms-secrets
+                  key: db-password
+            - name: BACKUP_DIR
+              value: "/backups"
+            - name: RETENTION_DAYS
+              value: "30"
+            - name: S3_BUCKET
+              value: ""
+            - name: S3_REGION
+              value: "us-east-1"
+            - name: WAL_DIR
+              value: "/wal_archive"
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+            - name: wal-archive
+              mountPath: /wal_archive
+          volumes:
+          - name: backups
+            persistentVolumeClaim:
+              claimName: db-backups-pvc
+          - name: wal-archive
+            persistentVolumeClaim:
+              claimName: db-wal-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-backups-pvc
+  namespace: dam-vms
+  labels:
+    app.kubernetes.io/name: evms
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-wal-pvc
+  namespace: dam-vms
+  labels:
+    app.kubernetes.io/name: evms
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 50Gi

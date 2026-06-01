@@ -11,7 +11,8 @@ func TestSimpleRuleMatch(t *testing.T) {
 		Conditions: []Condition{
 			{Source: "object_type", Operator: "equals", Value: "person"},
 		},
-		Logic: "AND",
+		Actions: []Action{{Type: "alert", Params: map[string]string{"message": "test"}}},
+		Logic:   "AND",
 	})
 
 	actions := re.Evaluate(map[string]interface{}{
@@ -50,6 +51,7 @@ func TestORLogic(t *testing.T) {
 			{Source: "object_type", Operator: "equals", Value: "person"},
 			{Source: "object_type", Operator: "equals", Value: "car"},
 		},
+		Actions: []Action{{Type: "alert", Params: map[string]string{"message": "test"}}},
 	})
 
 	actions := re.Evaluate(map[string]interface{}{"object_type": "car"})

@@ -68,6 +68,12 @@ export default function Dashboard() {
     setHeatmapData(data);
   }, []);
 
+  const filteredCameras = selectedSite
+    ? cameras.filter((c) => c.site_id === selectedSite)
+    : cameras;
+
+  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
+
   useEffect(() => {
     if (heatmapEnabled && displayCameras.length > 0) {
       fetchHeatmaps(displayCameras);
@@ -75,12 +81,6 @@ export default function Dashboard() {
       setHeatmapData({});
     }
   }, [heatmapEnabled, displayCameras, fetchHeatmaps]);
-
-  const filteredCameras = selectedSite
-    ? cameras.filter((c) => c.site_id === selectedSite)
-    : cameras;
-
-  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
 
   return (
     <>

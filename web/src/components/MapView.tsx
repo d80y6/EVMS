@@ -32,13 +32,15 @@ export default function MapView({ positions, onCameraClick, onPositionChange }: 
       const color = pos.status === 'online' ? '#22c55e' : pos.status === 'error' ? '#ef4444' : '#6b7280';
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:16px;height:16px;border-radius:50%;background:${color};border:2px solid white;cursor:pointer;box-shadow:0 0 6px rgba(0,0,0,0.4)"></div>`,
+        html: `<div style="width:16px;height:16px;border-radius:50%;background:${color.replace(/[^a-z0-9#]/gi, '')};border:2px solid white;cursor:pointer;box-shadow:0 0 6px rgba(0,0,0,0.4)"></div>`,
         iconSize: [16, 16],
         iconAnchor: [8, 8],
       });
+      const escapedName = pos.name.replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c] || c));
+      const escapedStatus = pos.status.replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c] || c));
       const marker = L.marker([pos.lat, pos.lng], { icon, draggable: true })
         .addTo(map)
-        .bindPopup(`<b>${pos.name}</b><br/>Status: ${pos.status}`);
+        .bindPopup(`<b>${escapedName}</b><br/>Status: ${escapedStatus}`);
 
       marker.on('click', () => onCameraClick(pos.cameraId));
       marker.on('dragend', () => {

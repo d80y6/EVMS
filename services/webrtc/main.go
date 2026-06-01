@@ -249,7 +249,7 @@ func (s *WebRTCService) Start(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:         s.config.HTTPAddr,
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -264,7 +264,7 @@ func (s *WebRTCService) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 	s.logger.Info("Shutting down WebRTC Service...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
 }

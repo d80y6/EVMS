@@ -16,6 +16,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+      - wal-archive:/wal_archive
+    command:
+      - "-c"
+      - "config_file=/etc/postgresql/postgresql.conf"
 
   redis:
     image: redis:7-alpine
@@ -29,6 +34,7 @@ services:
 
   nats:
     image: nats:2.9-alpine
+    command: ["-c", "/etc/nats/nats.conf", "-js"]
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "4222"]
       interval: 5s
@@ -36,12 +42,17 @@ services:
       retries: 5
     ports:
       - "4222:4222"
+      - "6222:6222"
       - "8222:8222"
+    volumes:
+      - ../nats/nats.conf:/etc/nats/nats.conf
+      - nats-data:/data/jetstream
 
   prometheus:
     image: prom/prometheus:latest
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml
     ports:
       - "9090:9090"
 
@@ -57,7 +68,7 @@ services:
     environment:
       LDAP_ORGANISATION: "DAM VMS"
       LDAP_DOMAIN: "dam.vms"
-      LDAP_ADMIN_PASSWORD: "admin"
+      LDAP_ADMIN_PASSWORD: "${LDAP_PASSWORD:?LDAP_PASSWORD must be set}"
     ports:
       - "389:389"
 
@@ -74,19 +85,19 @@ services:
       dockerfile: services/auth/Dockerfile
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
-      - REDIS_URL=redis:6379
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - MIGRATIONS_DIR=/migrations
       - LDAP_ENABLED=true
       - LDAP_HOST=openldap
       - LDAP_PORT=389
       - LDAP_BASE_DN=dc=dam,dc=vms
       - LDAP_BIND_DN=cn=admin,dc=dam,dc=vms
-      - LDAP_PASSWORD=admin
+      - LDAP_PASSWORD=${LDAP_PASSWORD:?LDAP_PASSWORD must be set}
       - LDAP_FILTER=(uid=%s)
+    volumes:
+      - ../../migrations:/migrations
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   camera-mgmt:
@@ -95,6 +106,9 @@ services:
       dockerfile: services/camera-mgmt/Dockerfile
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - MIGRATIONS_DIR=/migrations
+    volumes:
+      - ../../migrations:/migrations
     depends_on:
       db:
         condition: service_healthy
@@ -310,6 +324,15 @@ services:
       nats:
         condition: service_healthy
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/config.yaml:/etc/otel/config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
   blur-worker:
     build:
       context: ../../
@@ -324,6 +347,8 @@ services:
 
 volumes:
   pgdata:
+  nats-data:
+  wal-archive:
   recordings:
   thumbnail-cache:
   exports:

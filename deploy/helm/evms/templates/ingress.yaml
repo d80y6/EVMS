@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+  annotations:
+    {{- range $key, $value := .Values.ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+    {{- if .Values.certManager.enabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.certManager.clusterIssuer.name }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.certManager.enabled }}
+  tls:
+  - hosts:
+    - {{ .Values.ingress.domain }}
+    secretName: evms-tls
+  {{- end }}
+  rules:
+  - host: {{ .Values.ingress.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway
+            port:
+              number: {{ .Values.services.apiGateway.port }}
+{{- end }}

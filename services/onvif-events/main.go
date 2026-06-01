@@ -83,7 +83,7 @@ func (s *OnvifEventsService) Start() error {
 
 	s.httpSrv = &http.Server{
 		Addr:    s.config.Port,
-		Handler: mux,
+		Handler: common.RecoveryMiddleware(mux),
 	}
 
 	go func() {

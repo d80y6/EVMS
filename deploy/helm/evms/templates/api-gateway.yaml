@@ -66,8 +66,26 @@ spec:
             configMapKeyRef:
               name: evms-config
               key: REDIS_PORT
+        {{- if .Values.certManager.enabled }}
+        - name: TLS_CA_FILE
+          value: /etc/ca-certs/ca.crt
+        - name: TLS_CERT_FILE
+          value: /etc/ca-certs/tls.crt
+        - name: TLS_KEY_FILE
+          value: /etc/ca-certs/tls.key
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/ca-certs
+          readOnly: true
+        {{- end }}
         resources:
           {{- toYaml .Values.services.apiGateway.resources | nindent 10 }}
+      {{- if .Values.certManager.enabled }}
+      volumes:
+      - name: ca-cert
+        secret:
+          secretName: evms-internal-ca-tls
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -32,7 +32,7 @@ export function FloorPlanView({ imageUrl, cameras, siteId: _siteId, onCameraClic
       const cam = cameras.find(c => c.id === cameraId)
       const config = cam?.config ? JSON.parse(cam.config) : {}
       config.floor_plan_position = { x, y }
-      await api.updateCameraConfig(cameraId, { config: JSON.stringify(config) })
+      await api.updateCameraConfig(cameraId, { config })
     } catch (e) {
       console.error('Failed to save position', e)
     }

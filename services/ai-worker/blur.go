@@ -111,7 +111,9 @@ func (w *BlurWorker) processBlur(req BlurRequest) error {
 
 	args := []string{"-y", "-i", req.RecordingPath, "-vf", strings.Join(filters, ","), "-c:a", "copy", outputPath}
 
-	cmd := exec.Command("ffmpeg", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg failed: %w, output: %s", err, string(output))

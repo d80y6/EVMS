@@ -74,8 +74,16 @@ func main() {
 			tx.Timestamp = time.Now().UTC()
 		}
 
-		data, _ := json.Marshal(tx)
-		nc.Publish("pos.transaction", data)
+		data, err := json.Marshal(tx)
+		if err != nil {
+			jsonError(w, "failed to marshal transaction", http.StatusInternalServerError)
+			return
+		}
+		if err := nc.Publish("pos.transaction", data); err != nil {
+			logger.Error("Failed to publish POS transaction", "error", err)
+			jsonError(w, "failed to publish transaction", http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -84,7 +92,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":8096",
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -99,7 +107,7 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("Shutting down POS ingest...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
 }

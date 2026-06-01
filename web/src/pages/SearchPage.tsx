@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import { useState, useRef, useEffect, type FormEvent } from 'react';
 import { api, Camera } from '../api/client';
 
 interface SearchResult {
@@ -50,7 +50,7 @@ export default function SearchPage() {
     regionRef.current = { x1: x, y1: y, x2: x, y2: y };
     setRegion({ x1: x, y1: y, x2: x, y2: y });
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
       if (!drawingRef.current || !regionRef.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       regionRef.current = { ...regionRef.current, x2: (e.clientX - rect.left) / rect.width, y2: (e.clientY - rect.top) / rect.height };
@@ -67,13 +67,13 @@ export default function SearchPage() {
     document.addEventListener('mouseup', handleMouseUp);
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     api.getCameras()
       .then((data) => setCameras(data.cameras || []))
       .catch(() => {});
   }, []);
 
-  const handleSearch = async (e: React.FormEvent) => {
+  const handleSearch = async (e: FormEvent) => {
     e.preventDefault();
     setIsSearching(true);
     setHasSearched(true);

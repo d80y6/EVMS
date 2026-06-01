@@ -13,12 +13,28 @@ spec:
       labels:
         app: auth-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: auth
         image: damvms/auth:latest
         ports:
         - containerPort: 8081
         - containerPort: 2112
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         livenessProbe:
           httpGet:
             path: /health
@@ -84,12 +100,28 @@ spec:
       labels:
         app: camera-mgmt
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: camera-mgmt
         image: damvms/camera-mgmt:latest
         ports:
         - containerPort: 50051
         - containerPort: 2112
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         livenessProbe:
           tcpSocket:
             port: 50051
@@ -144,11 +176,27 @@ spec:
       labels:
         app: recorder-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: recorder
         image: damvms/recorder:latest
         ports:
         - containerPort: 2112
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         livenessProbe:
           httpGet:
             path: /health
@@ -194,12 +242,28 @@ spec:
       labels:
         app: playback-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: playback
         image: damvms/playback:latest
         ports:
-        - containerPort: 8086
+        - containerPort: 8083
         - containerPort: 2112
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         livenessProbe:
           httpGet:
             path: /health
@@ -541,12 +605,28 @@ spec:
       labels:
         app: discovery
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: discovery
         image: damvms/discovery:latest
         ports:
         - containerPort: 8091
         - containerPort: 2112
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         livenessProbe:
           httpGet:
             path: /health
@@ -581,3 +661,32 @@ spec:
     port: 2112
     targetPort: 2112
   type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: dam-vms
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway
+  namespace: dam-vms
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - port: 8080
+    - port: 443
+  policyTypes:
+  - Ingress

@@ -21,3 +21,6 @@ data:
   THUMBNAIL_CACHE: /cache/thumbnails
   METRICS_ADDR: ":2112"
   RETENTION_DAYS: {{ .Values.services.recorder.retentionDays | quote }}
+  {{- if .Values.otelCollector.enabled }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+  {{- end }}

@@ -13,7 +13,6 @@ export default function SettingsPage() {
   const [tourName, setTourName] = useState('');
   const [tourInterval, setTourInterval] = useState(10);
   const [tourSteps, setTourSteps] = useState<TourStep[]>([{ camera_id: '', preset_token: '', dwell_seconds: 5 }]);
-  const [editingTour, setEditingTour] = useState<Tour | null>(null);
   const [floorPlanImage, setFloorPlanImage] = useState<string | null>(null);
   const [floorPlanSiteId, setFloorPlanSiteId] = useState<string>('default');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -85,7 +84,7 @@ export default function SettingsPage() {
   const saveRetention = async (cameraId: string) => {
     setSaving(cameraId);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await api.updateCameraConfig(cameraId, { config: JSON.stringify({ retention_days: retentions[cameraId] }) });
       setSaving(null);
     } catch {
       setSaving(null);

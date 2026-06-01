@@ -92,10 +92,14 @@ func (s *AuditService) handleAuditMessage(msg *nats.Msg) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	prevHash := ""
-	if len(s.entries) == 0 {
-		prevHash = "0000000000000000000000000000000000000000000000000000000000000000"
-	} else {
+	for _, e := range s.entries {
+		if e.ID == entry.ID {
+			return
+		}
+	}
+
+	prevHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	if len(s.entries) > 0 {
 		prevHash = s.entries[len(s.entries)-1].Hash
 	}
 	entry.PreviousHash = prevHash
@@ -253,7 +257,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         ":" + service.port,
-		Handler:      mux,
+		Handler:      common.RecoveryMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -269,7 +273,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down audit service...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
 }

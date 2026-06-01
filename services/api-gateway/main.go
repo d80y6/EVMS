@@ -23,7 +23,7 @@ import (
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/acme/autocert"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
@@ -176,15 +176,22 @@ type Gateway struct {
 func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	var db *sqlx.DB
 	if config.DBURL != "" {
+		cb := common.NewDBCircuitBreaker("api-gateway")
 		var err error
-		db, err = sqlx.Connect("postgres", config.DBURL)
+		db, err = common.ConnectDBWithCircuitBreaker(context.Background(), "postgres", config.DBURL, cb)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to DB: %w", err)
 		}
 	}
 
+	creds, err := common.GRPCClientTLSCredentials("camera-mgmt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure gRPC credentials: %w", err)
+	}
 	cameraCC, err := grpc.NewClient(config.CameraServiceAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(creds),
+		grpc.WithUnaryInterceptor(tenantUnaryInterceptor),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to camera service: %w", err)
 	}
@@ -221,6 +228,14 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	}, nil
 }
 
+func tenantUnaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if tenant := common.TenantFromContext(ctx); tenant != "" {
+		md := metadata.Pairs("tenant_id", tenant)
+		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
+	return invoker(ctx, method, req, reply, cc, opts...)
+}
+
 func (g *Gateway) Close() error {
 	if g.db != nil {
 		g.db.Close()
@@ -239,10 +254,23 @@ func (g *Gateway) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if _, err := common.ValidateJWT(token); err != nil {
+		claims, err := common.ValidateJWT(token)
+		if err != nil {
 			jsonError(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
+		if claims.TenantID != "" {
+			r.Header.Set("X-Tenant-ID", claims.TenantID)
+		}
+		r.Header.Set("X-Username", claims.Username)
+		r.Header.Set("X-Role", claims.Role)
+		ctx := r.Context()
+		if claims.TenantID != "" {
+			ctx = context.WithValue(ctx, common.TenantKey, claims.TenantID)
+		}
+		ctx = context.WithValue(ctx, common.UserKey, claims.Username)
+		ctx = context.WithValue(ctx, common.RoleKey, claims.Role)
+		r = r.WithContext(ctx)
 		next(w, r)
 	}
 }
@@ -282,6 +310,18 @@ func (g *Gateway) requireRole(minRole string) func(http.HandlerFunc) http.Handle
 				return
 			}
 
+			if claims.TenantID != "" {
+				r.Header.Set("X-Tenant-ID", claims.TenantID)
+			}
+			r.Header.Set("X-Username", claims.Username)
+			r.Header.Set("X-Role", claims.Role)
+			ctx := r.Context()
+			if claims.TenantID != "" {
+				ctx = context.WithValue(ctx, common.TenantKey, claims.TenantID)
+			}
+			ctx = context.WithValue(ctx, common.UserKey, claims.Username)
+			ctx = context.WithValue(ctx, common.RoleKey, claims.Role)
+			r = r.WithContext(ctx)
 			next(w, r)
 		}
 	}
@@ -647,9 +687,12 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -728,7 +771,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/tours"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
-			g.alertProxy.ServeHTTP(w, r)
+			g.cameraControlProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/analytics/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -786,7 +829,7 @@ func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, l
 
 	tlsServer := &http.Server{
 		Addr:         ":443",
-		Handler:      handler,
+		Handler:      common.RecoveryMiddleware(handler),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -807,14 +850,14 @@ func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, l
 	<-ctx.Done()
 	logger.Info("Shutting down API Gateway...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := tlsServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("TLS server shutdown error", "error", err)
 	}
 
-	redirectCtx, redirectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	redirectCtx, redirectCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer redirectCancel()
 	redirectServer.Shutdown(redirectCtx)
 
@@ -827,6 +870,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if err := common.InitTelemetry("api-gateway"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
 
 	config := DefaultGatewayConfig()
 	common.StartMetricsServer(config.MetricsAddr)
@@ -848,7 +896,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         config.Port,
-		Handler:      gateway,
+		Handler:      common.RecoveryMiddleware(gateway),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -865,7 +913,7 @@ func main() {
 	<-ctx.Done()
 	logger.Info("Shutting down API Gateway...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
 }

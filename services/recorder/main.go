@@ -145,19 +145,21 @@ func (cr *CameraRecorder) FlushBuffer(output io.Writer) error {
 
 // Recorder handles recording indexing and retention
 type Recorder struct {
-	db       *sqlx.DB
-	logger   *slog.Logger
-	config   RecorderConfig
-	sub      *nats.Subscription
-	frameSub *nats.Subscription
-	mu       sync.Mutex
-	cameras    map[string]*CameraRecorder
+	db        *sqlx.DB
+	logger    *slog.Logger
+	config    RecorderConfig
+	shard     common.ShardConfig
+	sub       *nats.Subscription
+	frameSub  *nats.Subscription
+	mu        sync.Mutex
+	cameras   map[string]*CameraRecorder
 	legalHolds *LegalHoldStore
 }
 
 // NewRecorder creates a new recorder instance
 func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger) (*Recorder, error) {
-	db, err := sqlx.ConnectContext(ctx, "postgres", config.DBURL)
+	cb := common.NewDBCircuitBreaker("recorder")
+	db, err := common.ConnectDBWithCircuitBreaker(ctx, "postgres", config.DBURL, cb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -167,10 +169,18 @@ func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger
 		return nil, fmt.Errorf("failed to initialize legal holds: %w", err)
 	}
 
+	shard := common.ShardConfigFromEnv()
+	if shard.IsSharded() {
+		logger.Info("recorder sharding enabled",
+			"shard_index", shard.ShardIndex,
+			"total_shards", shard.TotalShards)
+	}
+
 	return &Recorder{
 		db:         db,
 		logger:     logger,
 		config:     config,
+		shard:      shard,
 		cameras:    make(map[string]*CameraRecorder),
 		legalHolds: legalHolds,
 	}, nil
@@ -228,6 +238,10 @@ func (r *Recorder) subscribeFrames(nc *nats.Conn) error {
 		}
 		cameraID := parts[1]
 
+		if !r.shard.OwnsCamera(cameraID) {
+			return
+		}
+
 		r.mu.Lock()
 		cr, ok := r.cameras[cameraID]
 		if !ok {
@@ -252,6 +266,10 @@ func (r *Recorder) Listen(ctx context.Context, nc *nats.Conn) error {
 		var event RecordingEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			r.logger.Debug("Failed to unmarshal recording event", "error", err)
+			return
+		}
+
+		if !r.shard.OwnsCamera(event.CameraID) {
 			return
 		}
 
@@ -408,11 +426,8 @@ type RecorderService struct {
 
 // NewRecorderService creates a new recorder service
 func NewRecorderService(config RecorderConfig, logger *slog.Logger) (*RecorderService, error) {
-	nc, err := nats.Connect(config.NATSURL,
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-	)
+	cb := common.NewNATSCircuitBreaker("recorder")
+	nc, err := common.ConnectNATSWithCircuitBreaker(config.NATSURL, cb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -446,9 +461,11 @@ func (s *RecorderService) Close() error {
 		s.nc.Close()
 	}
 	if s.bookmarkServer != nil {
-		if err := s.bookmarkServer.Shutdown(context.Background()); err != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.bookmarkServer.Shutdown(shutdownCtx); err != nil {
 			errs = append(errs, err)
 		}
+		shutdownCancel()
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during shutdown: %v", errs)
@@ -554,7 +571,7 @@ func (s *RecorderService) Start(ctx context.Context) error {
 
 	s.bookmarkServer = &http.Server{
 		Addr:    ":8087",
-		Handler: mux,
+		Handler: common.RecoveryMiddleware(mux),
 	}
 
 	go func() {

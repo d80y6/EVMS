@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS cameras (
 -- Recordings (TimescaleDB Hypertable)
 CREATE TABLE IF NOT EXISTS recordings (
     id UUID DEFAULT uuid_generate_v4(),
-    camera_id UUID NOT NULL,
+    camera_id UUID NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ,
     file_path TEXT NOT NULL,
@@ -122,3 +122,27 @@ CREATE TABLE IF NOT EXISTS bookmarks (
 
 CREATE INDEX IF NOT EXISTS idx_bookmarks_camera ON bookmarks(camera_id);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_time ON bookmarks(timestamp DESC);
+
+-- Legal Holds
+CREATE TABLE IF NOT EXISTS legal_holds (
+    id UUID PRIMARY KEY,
+    camera_id UUID NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    released_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_holds_camera ON legal_holds(camera_id);
+
+-- Crowd Heatmaps (TimescaleDB Hypertable)
+CREATE TABLE IF NOT EXISTS crowd_heatmaps (
+    camera_id UUID NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    cell_x INT NOT NULL,
+    cell_y INT NOT NULL,
+    bucket TIMESTAMPTZ NOT NULL,
+    count INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (camera_id, cell_x, cell_y, bucket)
+);
+
+SELECT create_hypertable('crowd_heatmaps', 'bucket', if_not_exists => true);

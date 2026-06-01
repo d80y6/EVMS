@@ -39,6 +39,8 @@ type AlertWorkflowManager struct {
 	alerts map[string]*Alert
 	config AlertWorkflowConfig
 	logger *slog.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type AlertWorkflowConfig struct {
@@ -47,17 +49,20 @@ type AlertWorkflowConfig struct {
 	CheckInterval     time.Duration `json:"check_interval"`
 }
 
-func NewAlertWorkflowManager(cfg AlertWorkflowConfig, logger *slog.Logger) *AlertWorkflowManager {
+func NewAlertWorkflowManager(ctx context.Context, cfg AlertWorkflowConfig, logger *slog.Logger) *AlertWorkflowManager {
 	if cfg.EscalationTimeout == 0 {
 		cfg.EscalationTimeout = 5 * time.Minute
 	}
 	if cfg.CheckInterval == 0 {
 		cfg.CheckInterval = 30 * time.Second
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	m := &AlertWorkflowManager{
 		alerts: make(map[string]*Alert),
 		config: cfg,
 		logger: logger,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	go m.escalationLoop()
 	return m
@@ -97,20 +102,25 @@ func (m *AlertWorkflowManager) Acknowledge(id, username string) error {
 func (m *AlertWorkflowManager) escalationLoop() {
 	ticker := time.NewTicker(m.config.CheckInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.mu.Lock()
-		now := time.Now()
-		for _, alert := range m.alerts {
-			if alert.Status == AlertTriggered && now.Sub(alert.CreatedAt) > m.config.EscalationTimeout {
-				alert.Status = AlertEscalated
-				alert.Escalated = true
-				m.logger.Warn("Alert escalated", "id", alert.ID)
-				if m.config.EscalationWebhook != "" {
-					go m.fireEscalationWebhook(alert)
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			now := time.Now()
+			for _, alert := range m.alerts {
+				if alert.Status == AlertTriggered && now.Sub(alert.CreatedAt) > m.config.EscalationTimeout {
+					alert.Status = AlertEscalated
+					alert.Escalated = true
+					m.logger.Warn("Alert escalated", "id", alert.ID)
+					if m.config.EscalationWebhook != "" {
+						go m.fireEscalationWebhook(alert)
+					}
 				}
 			}
+			m.mu.Unlock()
 		}
-		m.mu.Unlock()
 	}
 }
 
@@ -121,7 +131,7 @@ func (m *AlertWorkflowManager) fireEscalationWebhook(alert *Alert) {
 		m.logger.Error("Escalation webhook failed", "error", err)
 		return
 	}
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }
 

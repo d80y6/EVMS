@@ -221,7 +221,7 @@ export const api = {
       body: JSON.stringify({ name, location }),
     }),
 
-  smartSearch: (params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number; bounding_box?: string }) => {
+  smartSearch: (params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number; bounding_box?: string; metadata?: string }) => {
     const q = new URLSearchParams();
     if (params.camera_id) q.set('camera_id', params.camera_id);
     if (params.object_type) q.set('object_type', params.object_type);
@@ -230,6 +230,7 @@ export const api = {
     if (params.end_time) q.set('end_time', params.end_time);
     if (params.limit) q.set('limit', String(params.limit));
     if (params.bounding_box) q.set('bounding_box', params.bounding_box);
+    if (params.metadata) q.set('metadata', params.metadata);
     return request<{ results: { id: string; camera_id: string; event_time: string; object_type: string; confidence: number; track_id: string; thumbnail: string }[]; total: number }>(`/search?${q}`);
   },
 
@@ -276,7 +277,7 @@ export const api = {
     }),
 
   getFacialDetections: (params: {camera_id?: string; name?: string; start_time?: string; end_time?: string; limit?: number}) => {
-    const qs = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([_, v]) => v))).toString();
+    const qs = Object.entries(params).filter(([_, v]) => v !== undefined && v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&');
     return request<any>(`/analytics/facial?${qs}`);
   },
 
@@ -285,5 +286,32 @@ export const api = {
     if (start) params.set('start', start);
     if (end) params.set('end', end);
     return request<{cells: any[]}>(`/analytics/heatmap?${params}`);
+  },
+
+  listTours: () =>
+    request<{ tours: Tour[] }>('/tours'),
+
+  createTour: (data: { name: string; steps: TourStep[]; interval: number }) =>
+    request<{ id: string; status: string }>('/tours', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  startTour: (id: string) =>
+    request<{ status: string }>(`/tours/${id}/start`, { method: 'POST' }),
+
+  stopTour: (id: string) =>
+    request<{ status: string }>(`/tours/${id}/stop`, { method: 'POST' }),
+
+  deleteTour: (id: string) =>
+    request<{ status: string }>(`/tours/${id}`, { method: 'DELETE' }),
+
+  getPOSTransactions: (params: { camera_id?: string; start_time?: string; end_time?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params.camera_id) q.set('camera_id', params.camera_id);
+    if (params.start_time) q.set('start_time', params.start_time);
+    if (params.end_time) q.set('end_time', params.end_time);
+    if (params.limit) q.set('limit', String(params.limit));
+    return request<{ transactions: POSTransaction[] }>(`/pos/transactions?${q}`);
   },
 };

@@ -24,6 +24,21 @@ func startTestNATS(t *testing.T) *nats.Conn {
 	if err != nil {
 		t.Skipf("NATS server not available at %s: %v", url, err)
 	}
+	js, err := nc.JetStream()
+	if err != nil {
+		nc.Close()
+		t.Skipf("NATS JetStream not available: %v", err)
+	}
+	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket: "_evms_test_health",
+		TTL:    time.Minute,
+	})
+	if err != nil {
+		nc.Close()
+		t.Skipf("NATS JetStream KV not available: %v", err)
+	}
+	js.DeleteKeyValue("_evms_test_health")
+	_ = kv
 	t.Cleanup(nc.Close)
 	return nc
 }
