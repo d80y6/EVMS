@@ -74,10 +74,11 @@ func NewNotificationService(config *NotificationConfig, logger *slog.Logger) (*N
 // Start begins listening for notification requests
 func (s *NotificationService) Start() error {
 	var err error
-	s.pushSub, err = s.nc.QueueSubscribe("notifications.push", "notification", s.handlePushNotification, nats.PendingLimits(1024, 64*1024*1024))
+	s.pushSub, err = s.nc.QueueSubscribe("notifications.push", "notification", s.handlePushNotification)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to notifications.push: %w", err)
 	}
+	s.pushSub.SetPendingLimits(1024, 64*1024*1024)
 
 	s.logger.Info("Notification Service started")
 	return nil
