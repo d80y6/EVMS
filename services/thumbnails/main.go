@@ -50,10 +50,11 @@ func DefaultThumbnailConfig() *ThumbnailConfig {
 }
 
 type ThumbnailService struct {
-	config *ThumbnailConfig
-	logger *slog.Logger
-	server *http.Server
-	mu     sync.Mutex
+	config        *ThumbnailConfig
+	logger        *slog.Logger
+	server        *http.Server
+	mu            sync.Mutex
+	healthHandler *common.HealthHandler
 }
 
 func NewThumbnailService(config *ThumbnailConfig, logger *slog.Logger) (*ThumbnailService, error) {
@@ -61,8 +62,9 @@ func NewThumbnailService(config *ThumbnailConfig, logger *slog.Logger) (*Thumbna
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
 	return &ThumbnailService{
-		config: config,
-		logger: logger,
+		config:        config,
+		logger:        logger,
+		healthHandler: common.NewHealthHandler(),
 	}, nil
 }
 
@@ -70,7 +72,8 @@ func (s *ThumbnailService) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/thumbnails/timeline", s.handleTimeline)
 	mux.HandleFunc("/thumbnails/image/", s.handleImage)
-	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/health", s.healthHandler.Liveness)
+	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
 	s.server = &http.Server{
 		Addr:         s.config.Port,
@@ -91,11 +94,7 @@ func (s *ThumbnailService) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *ThumbnailService) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
+
 
 type timelineRequest struct {
 	CameraID string `json:"camera_id"`

@@ -103,19 +103,21 @@ type deviceInfoResponse struct {
 }
 
 type DiscoveryService struct {
-	config   *DiscoveryConfig
-	logger   *slog.Logger
-	mu       sync.RWMutex
-	results  []discoveredCamera
-	natsConn *nats.Conn
-	server   *http.Server
+	config        *DiscoveryConfig
+	logger        *slog.Logger
+	mu            sync.RWMutex
+	results       []discoveredCamera
+	natsConn      *nats.Conn
+	server        *http.Server
+	healthHandler *common.HealthHandler
 }
 
 func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*DiscoveryService, error) {
 	s := &DiscoveryService{
-		config:  config,
-		logger:  logger,
-		results: nil,
+		config:        config,
+		logger:        logger,
+		results:       nil,
+		healthHandler: common.NewHealthHandler(),
 	}
 
 	if config.NATSURL != "" {
@@ -128,6 +130,8 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 		}
 	}
 
+	s.healthHandler.AddNATSChecker(s.natsConn, "nats")
+
 	return s, nil
 }
 
@@ -135,7 +139,8 @@ func (s *DiscoveryService) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/discovery/scan", s.handleScan)
 	mux.HandleFunc("/discovery/results", s.handleResults)
-	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/health", s.healthHandler.Liveness)
+	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
 	s.server = &http.Server{
 		Addr:    s.config.Port,
@@ -363,10 +368,7 @@ func (s *DiscoveryService) handleResults(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(s.results)
 }
 
-func (s *DiscoveryService) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
-}
+
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

@@ -28,10 +28,11 @@ func DefaultPlaybackConfig() *PlaybackConfig {
 }
 
 type PlaybackService struct {
-	config     *PlaybackConfig
-	logger     *slog.Logger
-	recordings string
-	server     *http.Server
+	config        *PlaybackConfig
+	logger        *slog.Logger
+	recordings    string
+	server        *http.Server
+	healthHandler *common.HealthHandler
 }
 
 func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackService, error) {
@@ -50,16 +51,18 @@ func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackS
 		return nil, fmt.Errorf("recordings root is not a directory: %s", absRoot)
 	}
 	return &PlaybackService{
-		config:     config,
-		logger:     logger,
-		recordings: absRoot,
+		config:        config,
+		logger:        logger,
+		recordings:    absRoot,
+		healthHandler: common.NewHealthHandler(),
 	}, nil
 }
 
 func (s *PlaybackService) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/playback/", common.JWTAuthMiddleware(http.HandlerFunc(s.handlePlaybackRequest)))
-	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/health", s.healthHandler.Liveness)
+	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
 	s.server = &http.Server{
 		Addr:         s.config.Port,
@@ -80,11 +83,7 @@ func (s *PlaybackService) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *PlaybackService) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
+
 
 func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.Request) {
 	relPath := strings.TrimPrefix(r.URL.Path, "/playback/")

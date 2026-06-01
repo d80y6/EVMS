@@ -55,6 +55,10 @@ func main() {
 	defer nc.Close()
 
 	mux := http.NewServeMux()
+	healthHandler := common.NewHealthHandler()
+	healthHandler.AddNATSChecker(nc, "nats")
+	mux.HandleFunc("/health", healthHandler.Liveness)
+	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.HandleFunc("/api/pos/transaction", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)

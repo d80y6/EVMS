@@ -48,12 +48,13 @@ type subscription struct {
 }
 
 type OnvifEventsService struct {
-	config  *OnvifEventsConfig
-	nc      *nats.Conn
-	logger  *slog.Logger
-	mu      sync.Mutex
-	subs    map[string]*subscription
-	httpSrv *http.Server
+	config        *OnvifEventsConfig
+	nc            *nats.Conn
+	logger        *slog.Logger
+	mu            sync.Mutex
+	subs          map[string]*subscription
+	httpSrv       *http.Server
+	healthHandler *common.HealthHandler
 }
 
 func NewOnvifEventsService(config *OnvifEventsConfig, logger *slog.Logger) (*OnvifEventsService, error) {
@@ -66,12 +67,15 @@ func NewOnvifEventsService(config *OnvifEventsConfig, logger *slog.Logger) (*Onv
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	return &OnvifEventsService{
-		config: config,
-		nc:     nc,
-		logger: logger,
-		subs:   make(map[string]*subscription),
-	}, nil
+	svc := &OnvifEventsService{
+		config:        config,
+		nc:            nc,
+		logger:        logger,
+		subs:          make(map[string]*subscription),
+		healthHandler: common.NewHealthHandler(),
+	}
+	svc.healthHandler.AddNATSChecker(nc, "nats")
+	return svc, nil
 }
 
 func (s *OnvifEventsService) Start() error {
@@ -79,7 +83,8 @@ func (s *OnvifEventsService) Start() error {
 	mux.HandleFunc("/onvif-events/subscribe", s.handleSubscribe)
 	mux.HandleFunc("/onvif-events/subscribe/", s.handleUnsubscribe)
 	mux.HandleFunc("/onvif-events/subscriptions", s.handleListSubscriptions)
-	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/health", s.healthHandler.Liveness)
+	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
 	s.httpSrv = &http.Server{
 		Addr:    s.config.Port,
@@ -248,10 +253,7 @@ func (s *OnvifEventsService) handleListSubscriptions(w http.ResponseWriter, r *h
 	json.NewEncoder(w).Encode(subs)
 }
 
-func (s *OnvifEventsService) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
-}
+
 
 func (s *OnvifEventsService) createPullPointSubscription(deviceURL, username, password string) (string, error) {
 	subID := uuid.New().String()

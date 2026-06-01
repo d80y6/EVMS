@@ -48,12 +48,13 @@ func DefaultPTZConfig() *PTZConfig {
 }
 
 type PTZService struct {
-	config    *PTZConfig
-	logger    *slog.Logger
-	cameraCC  *grpc.ClientConn
-	cameraSvc damv1.CameraServiceClient
-	httpCli   *http.Client
-	server    *http.Server
+	config        *PTZConfig
+	logger        *slog.Logger
+	cameraCC      *grpc.ClientConn
+	cameraSvc     damv1.CameraServiceClient
+	httpCli       *http.Client
+	server        *http.Server
+	healthHandler *common.HealthHandler
 }
 
 func NewPTZService(config *PTZConfig, logger *slog.Logger) (*PTZService, error) {
@@ -93,7 +94,10 @@ func (s *PTZService) Start() error {
 		}
 		s.handlePTZRouter(w, r)
 	})
-	mux.HandleFunc("/health", s.healthHandler)
+	handler := common.NewHealthHandler()
+	s.healthHandler = handler
+	mux.HandleFunc("/health", handler.Liveness)
+	mux.HandleFunc("/ready", handler.Readiness)
 
 	s.server = &http.Server{
 		Addr:         s.config.Port,
@@ -112,12 +116,6 @@ func (s *PTZService) Shutdown(ctx context.Context) error {
 		return s.server.Shutdown(ctx)
 	}
 	return nil
-}
-
-func (s *PTZService) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
 }
 
 func (s *PTZService) handlePTZRouter(w http.ResponseWriter, r *http.Request) {

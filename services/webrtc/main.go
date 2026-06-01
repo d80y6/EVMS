@@ -29,11 +29,12 @@ type StreamSession struct {
 
 // WebRTCService manages WebRTC streaming sessions
 type WebRTCService struct {
-	logger     *slog.Logger
-	natsConn   *nats.Conn
-	sessions   map[string]*StreamSession
-	sessionsMu sync.RWMutex
-	config     WebRTCConfig
+	logger        *slog.Logger
+	natsConn      *nats.Conn
+	sessions      map[string]*StreamSession
+	sessionsMu    sync.RWMutex
+	config        WebRTCConfig
+	healthHandler *common.HealthHandler
 }
 
 // WebRTCConfig holds configuration for the WebRTC service
@@ -75,12 +76,15 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	return &WebRTCService{
-		logger:   logger,
-		natsConn: nc,
-		sessions: make(map[string]*StreamSession),
-		config:   config,
-	}, nil
+	svc := &WebRTCService{
+		logger:        logger,
+		natsConn:      nc,
+		sessions:      make(map[string]*StreamSession),
+		config:        config,
+		healthHandler: common.NewHealthHandler(),
+	}
+	svc.healthHandler.AddNATSChecker(nc, "nats")
+	return svc, nil
 }
 
 // Close gracefully shuts down the service
@@ -234,18 +238,14 @@ func (s *WebRTCService) cleanupSession(cameraID string) {
 	s.logger.Info("Cleaned up WebRTC session", "camera_id", cameraID)
 }
 
-// healthHandler handles health check requests
-func (s *WebRTCService) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
+
 
 // Start starts the HTTP server and blocks until ctx is cancelled
 func (s *WebRTCService) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webrtc/offer", common.JWTAuthMiddleware(s.createOfferHandler))
-	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/health", s.healthHandler.Liveness)
+	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
 	server := &http.Server{
 		Addr:         s.config.HTTPAddr,

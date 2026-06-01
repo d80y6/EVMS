@@ -251,6 +251,10 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	healthHandler := common.NewHealthHandler()
+	healthHandler.AddNATSChecker(service.nc, "nats")
+	mux.HandleFunc("/health", healthHandler.Liveness)
+	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.HandleFunc("/api/audit/log", service.handleCreateEntry)
 	mux.HandleFunc("/api/audit/chain", service.handleGetChain)
 	mux.HandleFunc("/api/audit/verify", service.handleVerify)
