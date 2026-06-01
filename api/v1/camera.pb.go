@@ -378,6 +378,8 @@ var CameraService_ServiceDesc = grpc.ServiceDesc{
 type CameraServiceClient interface {
 	ListCameras(ctx context.Context, in *ListCamerasRequest, opts ...grpc.CallOption) (*ListCamerasResponse, error)
 	GetCamera(ctx context.Context, in *GetCameraRequest, opts ...grpc.CallOption) (*Camera, error)
+	CreateCamera(ctx context.Context, in *CreateCameraRequest, opts ...grpc.CallOption) (*Camera, error)
+	UpdateCamera(ctx context.Context, in *UpdateCameraRequest, opts ...grpc.CallOption) (*Camera, error)
 	ListSites(ctx context.Context, in *ListSitesRequest, opts ...grpc.CallOption) (*ListSitesResponse, error)
 	CreateSite(ctx context.Context, in *CreateSiteRequest, opts ...grpc.CallOption) (*Site, error)
 	SmartSearch(ctx context.Context, in *SmartSearchRequest, opts ...grpc.CallOption) (*SmartSearchResponse, error)
@@ -403,6 +405,24 @@ func (c *cameraServiceClient) ListCameras(ctx context.Context, in *ListCamerasRe
 func (c *cameraServiceClient) GetCamera(ctx context.Context, in *GetCameraRequest, opts ...grpc.CallOption) (*Camera, error) {
 	out := new(Camera)
 	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/GetCamera", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cameraServiceClient) CreateCamera(ctx context.Context, in *CreateCameraRequest, opts ...grpc.CallOption) (*Camera, error) {
+	out := new(Camera)
+	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/CreateCamera", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cameraServiceClient) UpdateCamera(ctx context.Context, in *UpdateCameraRequest, opts ...grpc.CallOption) (*Camera, error) {
+	out := new(Camera)
+	err := c.cc.Invoke(ctx, "/dam_v1.CameraService/UpdateCamera", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}

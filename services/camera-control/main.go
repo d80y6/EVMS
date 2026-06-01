@@ -21,6 +21,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+func extractParam(path, prefix string) string {
+	return strings.TrimPrefix(path, prefix)
+}
+
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

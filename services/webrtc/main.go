@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/nats-io/nats.go"
@@ -127,7 +128,7 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 					URLs:           []string{parts[1]},
 					Username:       creds[0],
 					Credential:     creds[1],
-					CredentialType: webrtc.CredentialTypePassword,
+					CredentialType: 		webrtc.ICECredentialTypePassword,
 				})
 				continue
 			}

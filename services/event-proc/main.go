@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -355,7 +356,11 @@ func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProc
 
 func (s *EventProcessor) Start() error {
 	var err error
-	s.eventSub, err = s.nc.QueueSubscribe("camera.*.events", "event-proc", s.handleCameraEvent, nats.PendingLimits(1024, 64*1024*1024))
+	s.eventSub, err = s.nc.QueueSubscribe("camera.*.events", "event-proc", s.handleCameraEvent)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to camera events: %w", err)
+	}
+	s.eventSub.SetPendingLimits(1024, 64*1024*1024)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to camera events: %w", err)
 	}

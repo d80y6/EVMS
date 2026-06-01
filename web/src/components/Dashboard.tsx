@@ -30,6 +30,12 @@ export default function Dashboard() {
   const [searchParams] = useSearchParams();
   const selectedSite = searchParams.get('site') || '';
 
+  const filteredCameras = selectedSite
+    ? cameras.filter((c) => c.site_id === selectedSite)
+    : cameras;
+
+  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
+
   useEffect(() => {
     api.getCameras()
       .then((data) => {
@@ -75,12 +81,6 @@ export default function Dashboard() {
       setHeatmapData({});
     }
   }, [heatmapEnabled, displayCameras, fetchHeatmaps]);
-
-  const filteredCameras = selectedSite
-    ? cameras.filter((c) => c.site_id === selectedSite)
-    : cameras;
-
-  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
 
   return (
     <>

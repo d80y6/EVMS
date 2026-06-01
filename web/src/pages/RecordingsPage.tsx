@@ -15,7 +15,6 @@ export default function RecordingsPage() {
   const sync = useSyncPlayback();
 
   const [posOverlay, setPosOverlay] = useState(false);
-  const [posTransactions, setPosTransactions] = useState<POSTransaction[]>([]);
   const [currentTx, setCurrentTx] = useState<POSTransaction | null>(null);
 
   const fetchPOSTxns = useCallback(async () => {
@@ -24,14 +23,12 @@ export default function RecordingsPage() {
     const end = new Date(sync.state.currentTime + 10000).toISOString();
     try {
       const data = await api.getPOSTransactions(selectedCamera, start, end);
-      setPosTransactions(data.transactions);
-      const match = data.transactions.find(t => {
+      const match = (data.transactions || []).find((t: POSTransaction) => {
         const txnTime = new Date(t.timestamp).getTime();
         return Math.abs(txnTime - sync.state.currentTime) < 5000;
       });
       setCurrentTx(match || null);
     } catch {
-      setPosTransactions([]);
       setCurrentTx(null);
     }
   }, [selectedCamera, sync.state.currentTime]);
