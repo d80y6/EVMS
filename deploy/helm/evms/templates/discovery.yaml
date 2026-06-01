@@ -1,0 +1,71 @@
+{{- if .Values.services.discovery.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discovery
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: discovery
+spec:
+  replicas: {{ .Values.services.discovery.replicas }}
+  selector:
+    matchLabels:
+      app: discovery
+  template:
+    metadata:
+      labels:
+        app: discovery
+    spec:
+      containers:
+      - name: discovery
+        image: {{ include "evms.image" (dict "image" .Values.services.discovery.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.discovery.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: DISCOVERY_NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        resources:
+          {{- toYaml .Values.services.discovery.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: discovery
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: discovery
+spec:
+  selector:
+    app: discovery
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: {{ .Values.services.discovery.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 
@@ -70,4 +72,26 @@ func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+func MustNewReverseProxy(envKey, defaultURL string) *httputil.ReverseProxy {
+	targetURL := GetEnv(envKey, defaultURL)
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		panic(fmt.Sprintf("MustNewReverseProxy: failed to parse URL %s: %v", targetURL, err))
+	}
+	return httputil.NewSingleHostReverseProxy(u)
+}
+
+func ExtractClaims(r *http.Request) *Claims {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil
+	}
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	claims, err := ValidateJWT(tokenString)
+	if err != nil {
+		return nil
+	}
+	return claims
 }

@@ -1,0 +1,243 @@
+global:
+  namespace: dam-vms
+  imageRegistry: ""
+  imageTag: latest
+
+nats:
+  image: nats:2.9-alpine
+  replicas: 3
+  ports:
+    client: 4222
+    cluster: 6222
+    monitor: 8222
+
+db:
+  url: "postgres://dam_admin:changeit@db:5432/dam_vms"
+  host: db
+  port: 5432
+  name: dam_vms
+  user: dam_admin
+  password: changeit
+
+jwt:
+  secret: change-me-jwt-secret
+
+redis:
+  host: redis
+  port: 6379
+
+ldap:
+  enabled: false
+  host: openldap
+  port: 389
+  baseDn: dc=dam,dc=vms
+  bindDn: cn=admin,dc=dam,dc=vms
+  password: admin
+  filter: "(uid=%s)"
+
+services:
+  auth:
+    enabled: true
+    replicas: 2
+    image: damvms/auth
+    port: 8081
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  cameraMgmt:
+    enabled: true
+    replicas: 2
+    image: damvms/camera-mgmt
+    port: 50051
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  recorder:
+    enabled: true
+    replicas: 1
+    image: damvms/recorder
+    port: 8087
+    metricsPort: 2112
+    retentionDays: 7
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+
+  playback:
+    enabled: true
+    replicas: 2
+    image: damvms/playback
+    port: 8086
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  webrtc:
+    enabled: true
+    replicas: 2
+    image: damvms/webrtc
+    port: 8082
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  apiGateway:
+    enabled: true
+    replicas: 2
+    image: damvms/api-gateway
+    port: 8090
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    tls:
+      enabled: false
+      domain: ""
+      email: ""
+
+  cameraControl:
+    enabled: true
+    replicas: 1
+    image: damvms/camera-control
+    port: 8088
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  thumbnails:
+    enabled: true
+    replicas: 1
+    image: damvms/thumbnails
+    port: 8089
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  discovery:
+    enabled: true
+    replicas: 1
+    image: damvms/discovery
+    port: 8091
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+  eventProc:
+    enabled: true
+    replicas: 1
+    image: damvms/event-proc
+    port: 8093
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  aiWorker:
+    enabled: true
+    replicas: 1
+    image: damvms/ai-worker
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+
+  ingest:
+    enabled: true
+    replicas: 1
+    image: damvms/ingest
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  export:
+    enabled: true
+    replicas: 1
+    image: damvms/export
+    port: 8094
+    resources:
+      requests:
+        cpu: 500m
+        memory: 256Mi
+      limits:
+        cpu: 2000m
+        memory: 512Mi
+
+  audit:
+    enabled: true
+    replicas: 1
+    image: damvms/audit
+    port: 8093
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+  blurWorker:
+    enabled: true
+    replicas: 1
+    image: damvms/blur-worker
+    resources:
+      requests:
+        cpu: 500m
+        memory: 256Mi
+      limits:
+        cpu: 2000m
+        memory: 512Mi
+
+recordings:
+  storageClass: standard
+  size: 100Gi
+
+thumbnailCache:
+  storageClass: standard
+  size: 10Gi

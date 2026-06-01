@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,18 +42,19 @@ func DefaultCameraConfig() *CameraConfig {
 
 // Camera represents a camera entity in the database
 type Camera struct {
-	ID            string    `db:"id"`
-	SiteID        string    `db:"site_id"`
-	Name          string    `db:"name"`
-	Description   string    `db:"description"`
-	ConnectionURL string    `db:"connection_url"`
-	SubstreamURL  string    `db:"substream_url"`
-	Status        string    `db:"status"`
-	PtzProtocol   string    `db:"ptz_protocol"`
-	RetentionDays int       `db:"retention_days"`
-	OnvifData     string    `db:"onvif_data"`
-	Config        string    `db:"config"`
-	CreatedAt     time.Time `db:"created_at"`
+	ID               string    `db:"id"`
+	SiteID           string    `db:"site_id"`
+	Name             string    `db:"name"`
+	Description      string    `db:"description"`
+	ConnectionURL    string    `db:"connection_url"`
+	SubstreamURL     string    `db:"substream_url"`
+	Status           string    `db:"status"`
+	PtzProtocol      string    `db:"ptz_protocol"`
+	RetentionDays    int       `db:"retention_days"`
+	PrerecordSeconds int       `db:"prerecord_seconds"`
+	OnvifData        string    `db:"onvif_data"`
+	Config           string    `db:"config"`
+	CreatedAt        time.Time `db:"created_at"`
 }
 
 // Site represents a site entity in the database
@@ -133,11 +135,11 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 
 	if req.SiteId != "" {
 		err = s.db.SelectContext(ctx, &cameras,
-			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE site_id = $1",
+			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE site_id = $1",
 			req.SiteId)
 	} else {
 		err = s.db.SelectContext(ctx, &cameras,
-			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras")
+			"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras")
 	}
 
 	if err != nil {
@@ -160,7 +162,7 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 func (s *CameraService) GetCamera(ctx context.Context, req *damv1.GetCameraRequest) (*damv1.Camera, error) {
 	var c Camera
 	err := s.db.GetContext(ctx, &c,
-		"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE id = $1",
+		"SELECT id, site_id, name, description, connection_url, substream_url, status, ptz_protocol, retention_days, COALESCE(prerecord_seconds, 0) AS prerecord_seconds, COALESCE(onvif_data, '') AS onvif_data, COALESCE(config, '') AS config, created_at FROM cameras WHERE id = $1",
 		req.Id)
 	if err != nil {
 		s.logger.Error("Failed to get camera", "error", err, "id", req.Id)
@@ -181,9 +183,13 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 	}
 
 	var id string
+	prerecordSeconds := req.PrerecordSeconds
+	if prerecordSeconds == 0 {
+		prerecordSeconds = 5
+	}
 	err := s.db.QueryRowContext(ctx,
-		"INSERT INTO cameras (site_id, name, connection_url, substream_url, ptz_protocol, retention_days) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays).Scan(&id)
+		"INSERT INTO cameras (site_id, name, connection_url, substream_url, ptz_protocol, retention_days, prerecord_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays, prerecordSeconds).Scan(&id)
 	if err != nil {
 		s.logger.Error("Failed to create camera", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to create camera: %v", err)
@@ -194,9 +200,13 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 
 // UpdateCamera updates an existing camera record
 func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCameraRequest) (*damv1.Camera, error) {
+	prerecordSeconds := req.PrerecordSeconds
+	if prerecordSeconds == 0 {
+		prerecordSeconds = 5
+	}
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, ptz_protocol = $5, retention_days = $6, config = $7, updated_at = NOW() WHERE id = $8",
-		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, req.Config, req.Id)
+		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, ptz_protocol = $5, retention_days = $6, prerecord_seconds = $7, config = $8, updated_at = NOW() WHERE id = $9",
+		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, prerecordSeconds, req.Config, req.Id)
 	if err != nil {
 		s.logger.Error("Failed to update camera", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.Internal, "failed to update camera: %v", err)
@@ -341,6 +351,15 @@ func (s *CameraService) SmartSearch(ctx context.Context, req *damv1.SmartSearchR
 		}
 	}
 
+	if req.BoundingBox != "" {
+		parts := strings.Split(req.BoundingBox, ",")
+		if len(parts) == 4 {
+			query += fmt.Sprintf(" AND bounding_box @> $%d::jsonb", argIdx)
+			args = append(args, fmt.Sprintf(`[%s,%s,%s,%s]`, parts[0], parts[1], parts[2], parts[3]))
+			argIdx++
+		}
+	}
+
 	query += " ORDER BY event_time DESC"
 
 	limit := req.Limit
@@ -380,18 +399,19 @@ func (s *CameraService) SmartSearch(ctx context.Context, req *damv1.SmartSearchR
 // mapCameraToProto converts a database Camera to a protobuf Camera
 func (s *CameraService) mapCameraToProto(c Camera) *damv1.Camera {
 	return &damv1.Camera{
-		Id:            c.ID,
-		SiteId:        c.SiteID,
-		Name:          c.Name,
-		Description:   c.Description,
-		ConnectionUrl: c.ConnectionURL,
-		SubstreamUrl:  c.SubstreamURL,
-		Status:        c.Status,
-		PtzProtocol:   c.PtzProtocol,
-		RetentionDays: int32(c.RetentionDays),
-		OnvifData:     c.OnvifData,
-		Config:        c.Config,
-		CreatedAt:     timestamppb.New(c.CreatedAt),
+		Id:               c.ID,
+		SiteId:           c.SiteID,
+		Name:             c.Name,
+		Description:      c.Description,
+		ConnectionUrl:    c.ConnectionURL,
+		SubstreamUrl:     c.SubstreamURL,
+		Status:           c.Status,
+		PtzProtocol:      c.PtzProtocol,
+		RetentionDays:    int32(c.RetentionDays),
+		PrerecordSeconds: int32(c.PrerecordSeconds),
+		OnvifData:        c.OnvifData,
+		Config:           c.Config,
+		CreatedAt:        timestamppb.New(c.CreatedAt),
 	}
 }
 

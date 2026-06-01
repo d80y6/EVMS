@@ -26,6 +26,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+export type StreamType = 'main' | 'sub' | 'thumbnail';
+
 export interface Camera {
   id: string;
   site_id: string;
@@ -36,6 +38,7 @@ export interface Camera {
   status: string;
   ptz_protocol: string;
   retention_days: number;
+  config?: string;
 }
 
 export interface Recording {
@@ -59,9 +62,68 @@ export interface Preset {
   name: string;
 }
 
+export interface TourStep {
+  camera_id: string;
+  preset_token?: string;
+  dwell_seconds: number;
+}
+
+export interface Tour {
+  id: string;
+  name: string;
+  enabled: boolean;
+  steps: TourStep[];
+  interval: number;
+  created_at: string;
+}
+
+export interface POSItem {
+  sku: string;
+  description: string;
+  quantity: number;
+  unit_price: number;
+  total: number;
+}
+
+export interface POSTransaction {
+  id: string;
+  camera_id: string;
+  store_id: string;
+  register_id: string;
+  transaction_id: string;
+  timestamp: string;
+  items: POSItem[];
+  subtotal: number;
+  tax: number;
+  total: number;
+  tender_type: string;
+}
+
+export interface Bookmark {
+  id: string;
+  camera_id: string;
+  timestamp: string;
+  label: string;
+  created_at: string;
+  created_by: string;
+}
+
 export interface LoginResponse {
   token: string;
 }
+
+export const apiClient = {
+  fetch: (path: string, options?: RequestInit) => {
+    const token = localStorage.getItem('auth_token');
+    const headers: Record<string, string> = {
+      ...(options?.headers as Record<string, string>),
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    return fetch(path, { ...options, headers });
+  },
+};
 
 export const api = {
   login: (username: string, password: string) =>
@@ -72,6 +134,20 @@ export const api = {
 
   getCameras: () =>
     request<{ cameras: Camera[] }>('/cameras'),
+
+  listCameras: (siteId?: string) => {
+    const q = siteId ? `?site_id=${siteId}` : '';
+    return request<{ cameras: Camera[] }>(`/cameras${q}`).then((res) => res.cameras);
+  },
+
+  getCamera: (id: string) =>
+    request<Camera>(`/cameras/${id}`),
+
+  updateCameraConfig: (cameraId: string, config: Record<string, unknown>) =>
+    request<{ status: string }>(`/cameras/${cameraId}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
+    }),
 
   getRecordings: () =>
     request<{ recordings: Recording[] }>('/recordings'),
@@ -145,7 +221,7 @@ export const api = {
       body: JSON.stringify({ name, location }),
     }),
 
-  smartSearch: (params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number }) => {
+  smartSearch: (params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number; bounding_box?: string }) => {
     const q = new URLSearchParams();
     if (params.camera_id) q.set('camera_id', params.camera_id);
     if (params.object_type) q.set('object_type', params.object_type);
@@ -153,6 +229,87 @@ export const api = {
     if (params.start_time) q.set('start_time', params.start_time);
     if (params.end_time) q.set('end_time', params.end_time);
     if (params.limit) q.set('limit', String(params.limit));
+    if (params.bounding_box) q.set('bounding_box', params.bounding_box);
     return request<{ results: { id: string; camera_id: string; event_time: string; object_type: string; confidence: number; track_id: string; thumbnail: string }[]; total: number }>(`/search?${q}`);
   },
+
+  getStreamUrl: async (cameraId: string, type: StreamType = 'main'): Promise<string> => {
+    const data = await request<{ url: string }>(`/stream/${cameraId}?type=${type}`);
+    return data.url;
+  },
+
+  listBookmarks: (cameraId?: string) => {
+    const params = cameraId ? `?camera_id=${cameraId}` : '';
+    return request<{ bookmarks: Bookmark[] }>(`/bookmarks${params}`);
+  },
+
+  createBookmark: (cameraId: string, timestamp: string, label: string) => {
+    const username = localStorage.getItem('username') || 'unknown';
+    return request<{ id: string; status: string }>('/bookmarks', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: cameraId, timestamp, label, created_by: username }),
+    });
+  },
+
+  exportRecording: (cameraId: string, startTime: string, endTime: string, watermark: boolean) =>
+    request<{ file_path: string; sha256: string; size_bytes: number }>('/export', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: cameraId, start_time: startTime, end_time: endTime, watermark }),
+    }),
+
+  listAlerts: () =>
+    request<{ alerts: { id: string; rule_id: string; camera_id: string; message: string; status: string; created_at: string }[] }>('/alerts'),
+
+  acknowledgeAlert: (id: string, username: string) =>
+    request<{ status: string }>('/alerts', {
+      method: 'POST',
+      body: JSON.stringify({ id, username }),
+    }),
+
+  getPeopleCounts: () =>
+    request<{ counts: { camera_id: string; zone_id: string; count: number }[] }>('/analytics/people-counts'),
+
+  setRelayState: (cameraId: string, relayId: string, state: boolean) =>
+    request<{ status: string }>(`/cameras/${cameraId}/io`, {
+      method: 'POST',
+      body: JSON.stringify({ relay_id: relayId, state: state ? 'on' : 'off' }),
+    }),
+
+  getFacialDetections: (params: {camera_id?: string; name?: string; start_time?: string; end_time?: string; limit?: number}) => {
+    const q = new URLSearchParams();
+    if (params.camera_id) q.set('camera_id', params.camera_id);
+    if (params.name) q.set('name', params.name);
+    if (params.start_time) q.set('start_time', params.start_time);
+    if (params.end_time) q.set('end_time', params.end_time);
+    if (params.limit) q.set('limit', String(params.limit));
+    return request<any>(`/analytics/facial?${q}`);
+  },
+
+  getHeatmap: (cameraId: string, start?: string, end?: string) => {
+    const params = new URLSearchParams({ camera_id: cameraId });
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    return request<{cells: any[]}>(`/analytics/heatmap?${params}`);
+  },
+
+  getPOSTransactions: (cameraId: string, start: string, end: string) =>
+    request<{ transactions: any[] }>(`/pos/transactions?camera_id=${cameraId}&start=${start}&end=${end}`),
+
+  listTours: () =>
+    request<{ tours: Tour[] }>('/tours'),
+
+  createTour: (tour: { name: string; steps: TourStep[]; interval: number }) =>
+    request<{ id: string; status: string }>('/tours', {
+      method: 'POST',
+      body: JSON.stringify(tour),
+    }),
+
+  deleteTour: (id: string) =>
+    request<{ status: string }>(`/tours?id=${id}`, { method: 'DELETE' }),
+
+  startTour: (id: string) =>
+    request<{ status: string }>(`/tours/start?id=${id}`, { method: 'POST' }),
+
+  stopTour: (id: string) =>
+    request<{ status: string }>(`/tours/stop?id=${id}`, { method: 'POST' }),
 };

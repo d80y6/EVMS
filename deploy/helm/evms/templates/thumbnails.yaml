@@ -1,0 +1,88 @@
+{{- if .Values.services.thumbnails.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thumbnails
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: thumbnails
+spec:
+  replicas: {{ .Values.services.thumbnails.replicas }}
+  selector:
+    matchLabels:
+      app: thumbnails
+  template:
+    metadata:
+      labels:
+        app: thumbnails
+    spec:
+      containers:
+      - name: thumbnails
+        image: {{ include "evms.image" (dict "image" .Values.services.thumbnails.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.thumbnails.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: RECORDINGS_ROOT
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: RECORDINGS_ROOT
+        - name: THUMBNAIL_CACHE
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: THUMBNAIL_CACHE
+        volumeMounts:
+        - name: recordings
+          mountPath: /recordings
+        - name: thumbnail-cache
+          mountPath: /cache/thumbnails
+        resources:
+          {{- toYaml .Values.services.thumbnails.resources | nindent 10 }}
+      volumes:
+      - name: recordings
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+      - name: thumbnail-cache
+        persistentVolumeClaim:
+          claimName: thumbnail-cache-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thumbnails
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: thumbnails
+spec:
+  selector:
+    app: thumbnails
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: {{ .Values.services.thumbnails.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

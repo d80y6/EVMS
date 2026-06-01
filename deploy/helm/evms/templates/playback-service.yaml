@@ -1,0 +1,75 @@
+{{- if .Values.services.playback.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playback-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: playback
+spec:
+  replicas: {{ .Values.services.playback.replicas }}
+  selector:
+    matchLabels:
+      app: playback-service
+  template:
+    metadata:
+      labels:
+        app: playback-service
+    spec:
+      containers:
+      - name: playback
+        image: {{ include "evms.image" (dict "image" .Values.services.playback.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.playback.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        volumeMounts:
+        - name: recordings
+          mountPath: /recordings
+        resources:
+          {{- toYaml .Values.services.playback.resources | nindent 10 }}
+      volumes:
+      - name: recordings
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playback-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: playback
+spec:
+  selector:
+    app: playback-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: {{ .Values.services.playback.port }}
+  type: ClusterIP
+{{- end }}

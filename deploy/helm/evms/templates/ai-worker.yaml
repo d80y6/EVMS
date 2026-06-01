@@ -1,0 +1,47 @@
+{{- if .Values.services.aiWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-worker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-worker
+spec:
+  replicas: {{ .Values.services.aiWorker.replicas }}
+  selector:
+    matchLabels:
+      app: ai-worker
+  template:
+    metadata:
+      labels:
+        app: ai-worker
+    spec:
+      containers:
+      - name: ai-worker
+        image: {{ include "evms.image" (dict "image" .Values.services.aiWorker.image "Values" .Values "global" .Values.global) }}
+        livenessProbe:
+          exec:
+            command:
+            - pgrep
+            - python
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          exec:
+            command:
+            - pgrep
+            - python
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        env:
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: CAMERA_ID
+          value: "demo_cam"
+        resources:
+          {{- toYaml .Values.services.aiWorker.resources | nindent 10 }}
+{{- end }}

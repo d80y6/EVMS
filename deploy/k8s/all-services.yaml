@@ -44,6 +44,16 @@ spec:
               key: jwt-secret
         - name: METRICS_ADDR
           value: ":2112"
+        - name: LDAP_ENABLED
+          value: "false"
+        - name: LDAP_HOST
+          value: "openldap"
+        - name: LDAP_PORT
+          value: "389"
+        - name: LDAP_BASE_DN
+          value: "dc=dam,dc=vms"
+        - name: LDAP_FILTER
+          value: "(uid=%s)"
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,83 @@
+{{- if .Values.services.export.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: export-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: export
+spec:
+  replicas: {{ .Values.services.export.replicas }}
+  selector:
+    matchLabels:
+      app: export-service
+  template:
+    metadata:
+      labels:
+        app: export-service
+    spec:
+      containers:
+      - name: export
+        image: {{ include "evms.image" (dict "image" .Values.services.export.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.export.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        volumeMounts:
+        - name: recordings
+          mountPath: /recordings
+        resources:
+          {{- toYaml .Values.services.export.resources | nindent 10 }}
+      volumes:
+      - name: recordings
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: export-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: export
+spec:
+  selector:
+    app: export-service
+  ports:
+  - protocol: TCP
+    port: {{ .Values.services.export.port }}
+    targetPort: {{ .Values.services.export.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

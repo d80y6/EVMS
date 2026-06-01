@@ -1,0 +1,50 @@
+{{- if .Values.services.eventProc.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-proc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: event-proc
+spec:
+  replicas: {{ .Values.services.eventProc.replicas }}
+  selector:
+    matchLabels:
+      app: event-proc
+  template:
+    metadata:
+      labels:
+        app: event-proc
+    spec:
+      containers:
+      - name: event-proc
+        image: {{ include "evms.image" (dict "image" .Values.services.eventProc.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        resources:
+          {{- toYaml .Values.services.eventProc.resources | nindent 10 }}
+{{- end }}

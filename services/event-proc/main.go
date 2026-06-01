@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,16 +16,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
-
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
+	"github.com/nats-io/nats.go"
 )
 
 type EventProcConfig struct {
 	NATSURL                   string
 	PersonConfidenceThreshold float64
 	AlertAdminPort            string
+	DBURL                     string
 }
 
 func DefaultEventProcConfig() *EventProcConfig {
@@ -32,6 +35,7 @@ func DefaultEventProcConfig() *EventProcConfig {
 		NATSURL:                   common.GetEnv("NATS_URL", "nats://nats:4222"),
 		PersonConfidenceThreshold: 0.8,
 		AlertAdminPort:            common.GetEnv("ALERT_ADMIN_PORT", ":8093"),
+		DBURL:                     common.GetEnv("DB_URL", "postgres://dam_admin:dam_password@localhost:5432/dam_vms?sslmode=disable"),
 	}
 }
 
@@ -302,14 +306,19 @@ func (t *Tracker) StartCleanupLoop(stopCh <-chan struct{}) {
 }
 
 type EventProcessor struct {
-	config      *EventProcConfig
-	nc          *nats.Conn
-	logger      *slog.Logger
-	eventSub    *nats.Subscription
-	tracker     *Tracker
-	alertRules  *AlertRuleManager
-	adminServer *http.Server
-	stopCh      chan struct{}
+	config        *EventProcConfig
+	nc            *nats.Conn
+	logger        *slog.Logger
+	eventSub      *nats.Subscription
+	tracker       *Tracker
+	alertRules    *AlertRuleManager
+	alertWorkflow *AlertWorkflowManager
+	ruleEngine    *RuleEngine
+	tourScheduler *TourScheduler
+	ha            *HeatmapAggregator
+	db            *sqlx.DB
+	adminServer   *http.Server
+	stopCh        chan struct{}
 }
 
 func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
@@ -322,28 +331,55 @@ func NewEventProcessor(config *EventProcConfig, logger *slog.Logger) (*EventProc
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
+	db, err := sqlx.Connect("postgres", config.DBURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
 	return &EventProcessor{
-		config:     config,
-		nc:         nc,
-		logger:     logger,
-		tracker:    NewTracker(0.3, 3*time.Second),
-		alertRules: NewAlertRuleManager(),
-		stopCh:     make(chan struct{}),
+		config:        config,
+		nc:            nc,
+		logger:        logger,
+		tracker:       NewTracker(0.3, 3*time.Second),
+		alertRules:    NewAlertRuleManager(),
+		alertWorkflow: NewAlertWorkflowManager(AlertWorkflowConfig{
+			EscalationTimeout: 5 * time.Minute,
+			EscalationWebhook: os.Getenv("ESCALATION_WEBHOOK"),
+		}, logger),
+		ruleEngine:    NewRuleEngine(logger),
+		tourScheduler: NewTourScheduler(logger),
+		ha:            NewHeatmapAggregator(db),
+		db:            db,
+		stopCh:        make(chan struct{}),
 	}, nil
 }
 
 func (s *EventProcessor) Start() error {
 	var err error
-	s.eventSub, err = s.nc.QueueSubscribe("camera.*.events", "event-proc", s.handleCameraEvent, nats.PendingLimits(1024, 64*1024*1024))
+	s.eventSub, err = s.nc.QueueSubscribe("camera.*.events", "event-proc", s.handleCameraEvent)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to camera events: %w", err)
+	}
+	s.eventSub.SetPendingLimits(1024, 64*1024*1024)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to camera events: %w", err)
 	}
 
 	go s.tracker.StartCleanupLoop(s.stopCh)
 
+	if err := s.ha.Init(context.Background()); err != nil {
+		return fmt.Errorf("failed to initialize heatmap aggregator: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/alert-rules", s.adminHandler)
 	mux.HandleFunc("/api/alert-rules/", s.adminHandler)
+	mux.HandleFunc("/api/alerts", s.alertWorkflow.HandleHTTP)
+	mux.HandleFunc("/api/rules", s.ruleEngine.HandleHTTP)
+	mux.HandleFunc("/api/rules/", s.ruleEngine.HandleHTTP)
+	mux.HandleFunc("/api/tours", s.tourScheduler.HandleHTTP)
+	mux.HandleFunc("/api/tours/", s.tourScheduler.HandleHTTP)
+	mux.HandleFunc("/api/analytics/heatmap", handleHeatmap(s.ha))
 
 	s.adminServer = &http.Server{
 		Addr:    s.config.AlertAdminPort,
@@ -385,12 +421,16 @@ func (s *EventProcessor) handleCameraEvent(msg *nats.Msg) {
 		}
 	}
 
+	now := time.Now()
+
 	for _, d := range detections {
 		if s.shouldTriggerNotification(d) {
 			s.triggerNotification(msg.Subject, d)
 		}
 
 		if len(d.BBox) >= 4 {
+			s.ha.RecordDetection(cameraID, [4]float64{d.BBox[0], d.BBox[1], d.BBox[2], d.BBox[3]}, now)
+
 			center := [2]float64{
 				(d.BBox[0] + d.BBox[2]) / 2,
 				(d.BBox[1] + d.BBox[3]) / 2,
@@ -398,7 +438,20 @@ func (s *EventProcessor) handleCameraEvent(msg *nats.Msg) {
 			matches := s.alertRules.GetMatching(cameraID, d.Label, d.Confidence, center)
 			for _, rule := range matches {
 				s.triggerAlert(rule, d, cameraID)
+				s.alertWorkflow.CreateAlert(rule.ID, cameraID, fmt.Sprintf("Rule '%s' triggered on %s", rule.Name, cameraID))
 			}
+		}
+
+		// Evaluate rule engine
+		eventData := map[string]interface{}{
+			"camera_id":   cameraID,
+			"object_type": d.Label,
+			"confidence":  d.Confidence,
+			"bbox":        d.BBox,
+		}
+		actions := s.ruleEngine.Evaluate(eventData)
+		for _, action := range actions {
+			s.executeAction(action, cameraID, eventData)
 		}
 	}
 }
@@ -456,6 +509,20 @@ func (s *EventProcessor) triggerNotification(subject string, detection Detection
 
 	if err := s.nc.Publish("notifications.push", data); err != nil {
 		s.logger.Error("Failed to publish notification", "error", err)
+	}
+}
+
+func (s *EventProcessor) executeAction(action Action, cameraID string, eventData map[string]interface{}) {
+	switch action.Type {
+	case "webhook":
+		body, _ := json.Marshal(eventData)
+		http.Post(action.Target, "application/json", bytes.NewReader(body))
+	case "alert":
+		msg := action.Params["message"]
+		if msg == "" {
+			msg = fmt.Sprintf("Rule action triggered on %s", cameraID)
+		}
+		s.alertWorkflow.CreateAlert("rule", cameraID, msg)
 	}
 }
 
@@ -584,7 +651,7 @@ func (s *EventProcessor) updateAlertRule(w http.ResponseWriter, r *http.Request,
 	rule := &AlertRule{
 		ID:            id,
 		Name:          req.Name,
-		ObjectType:   req.ObjectType,
+		ObjectType:    req.ObjectType,
 		Zone:          req.Zone,
 		MinConfidence: req.MinConfidence,
 		Action:        req.Action,
@@ -643,6 +710,12 @@ func (s *EventProcessor) Close() error {
 
 	if s.nc != nil {
 		s.nc.Close()
+	}
+
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close database: %w", err))
+		}
 	}
 
 	if len(errs) > 0 {

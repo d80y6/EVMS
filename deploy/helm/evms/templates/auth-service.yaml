@@ -1,0 +1,95 @@
+{{- if .Values.services.auth.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auth
+spec:
+  replicas: {{ .Values.services.auth.replicas }}
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+      - name: auth
+        image: {{ include "evms.image" (dict "image" .Values.services.auth.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.auth.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.auth.port }}
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.auth.port }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: LDAP_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: LDAP_ENABLED
+        - name: LDAP_HOST
+          value: {{ .Values.ldap.host | quote }}
+        - name: LDAP_PORT
+          value: {{ .Values.ldap.port | quote }}
+        - name: LDAP_BASE_DN
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: LDAP_BASE_DN
+        - name: LDAP_FILTER
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: LDAP_FILTER
+        resources:
+          {{- toYaml .Values.services.auth.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auth
+spec:
+  selector:
+    app: auth-service
+  ports:
+  - protocol: TCP
+    port: {{ .Values.services.auth.port }}
+    targetPort: {{ .Values.services.auth.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}
