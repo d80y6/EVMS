@@ -485,6 +485,21 @@ func handleDewarp(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		cameraID = common.SanitizeCameraID(cameraID)
+		if cameraID == "" {
+			jsonError(w, "invalid camera_id", http.StatusBadRequest)
+			return
+		}
+
+		if err := common.ValidateRecordingPath(path); err != nil {
+			jsonError(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := common.ValidateFilePath(path, common.GetEnv("RECORDING_PATH", "/recordings")); err != nil {
+			jsonError(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		dewarpedPath := path + ".dewarped.mp4"
 		if _, err := os.Stat(dewarpedPath); err == nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -545,8 +560,8 @@ func (s *RecorderService) Start(ctx context.Context) error {
 	healthHandler.AddNATSChecker(s.nc, "nats")
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
-	mux.HandleFunc("/storage/estimates", handleStorageEstimate(recorder.db))
-	mux.HandleFunc("/bookmarks", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/storage/estimates", common.JWTAuthMiddleware(handleStorageEstimate(recorder.db)))
+	mux.Handle("/bookmarks", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			handleListBookmarks(recorder.db)(w, r)
@@ -555,9 +570,8 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		default:
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-
-	mux.HandleFunc("/legal-holds", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/legal-holds", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			handleListLegalHolds(recorder.legalHolds, s.logger)(w, r)
@@ -566,16 +580,15 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		default:
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/legal-holds/", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/legal-holds/", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/release") && r.Method == http.MethodPost {
 			handleReleaseLegalHold(recorder.legalHolds, s.logger)(w, r)
 		} else {
 			jsonError(w, "not found", http.StatusNotFound)
 		}
-	})
-
-	mux.HandleFunc("/dewarp", handleDewarp(recorder.db))
+	})))
+	mux.Handle("/dewarp", common.JWTAuthMiddleware(handleDewarp(recorder.db)))
 
 	s.bookmarkServer = &http.Server{
 		Addr:    ":8087",

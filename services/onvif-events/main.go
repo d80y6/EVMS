@@ -80,9 +80,9 @@ func NewOnvifEventsService(config *OnvifEventsConfig, logger *slog.Logger) (*Onv
 
 func (s *OnvifEventsService) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/onvif-events/subscribe", s.handleSubscribe)
-	mux.HandleFunc("/onvif-events/subscribe/", s.handleUnsubscribe)
-	mux.HandleFunc("/onvif-events/subscriptions", s.handleListSubscriptions)
+	mux.Handle("/onvif-events/subscribe", common.JWTAuthMiddleware(s.handleSubscribe))
+	mux.Handle("/onvif-events/subscribe/", common.JWTAuthMiddleware(s.handleUnsubscribe))
+	mux.Handle("/onvif-events/subscriptions", common.JWTAuthMiddleware(s.handleListSubscriptions))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 

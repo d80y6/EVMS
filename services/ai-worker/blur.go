@@ -96,6 +96,18 @@ func (w *BlurWorker) handleRequest(msg *nats.Msg) {
 }
 
 func (w *BlurWorker) processBlur(req BlurRequest) error {
+	req.CameraID = common.SanitizeCameraID(req.CameraID)
+	if req.CameraID == "" {
+		return fmt.Errorf("invalid camera_id")
+	}
+
+	if err := common.ValidateRecordingPath(req.RecordingPath); err != nil {
+		return fmt.Errorf("invalid recording path: %w", err)
+	}
+	if err := common.ValidateFilePath(req.RecordingPath, common.GetEnv("RECORDING_PATH", "/recordings")); err != nil {
+		return fmt.Errorf("recording path outside allowed root: %w", err)
+	}
+
 	if _, err := os.Stat(req.RecordingPath); os.IsNotExist(err) {
 		return fmt.Errorf("recording file not found: %s", req.RecordingPath)
 	}

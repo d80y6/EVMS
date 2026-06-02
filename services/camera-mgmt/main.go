@@ -335,8 +335,17 @@ func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCamer
 
 // StreamStatus returns the current stream status for a camera
 func (s *CameraService) StreamStatus(ctx context.Context, req *damv1.StreamStatusRequest) (*damv1.StreamStatusResponse, error) {
+	tenantID := common.TenantFromContext(ctx)
+
 	var statusStr string
-	err := s.db.GetContext(ctx, &statusStr, "SELECT status FROM cameras WHERE id = $1", req.CameraId)
+	var err error
+	if tenantID != "" {
+		err = s.db.GetContext(ctx, &statusStr,
+			"SELECT c.status FROM cameras c JOIN sites s ON c.site_id = s.id WHERE c.id = $1 AND s.tenant_id = $2",
+			req.CameraId, tenantID)
+	} else {
+		err = s.db.GetContext(ctx, &statusStr, "SELECT status FROM cameras WHERE id = $1", req.CameraId)
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "camera not found")
 	}
@@ -457,9 +466,21 @@ func (s *CameraService) DeleteSite(ctx context.Context, req *damv1.DeleteSiteReq
 
 // SmartSearch queries the ai_events table with filters
 func (s *CameraService) SmartSearch(ctx context.Context, req *damv1.SmartSearchRequest) (*damv1.SmartSearchResponse, error) {
-	query := "SELECT id, camera_id, event_time, object_type, confidence, bounding_box, track_id, thumbnail FROM ai_events WHERE 1=1"
+	tenantID := common.TenantFromContext(ctx)
+
+	query := `SELECT e.id, e.camera_id, e.event_time, e.object_type, e.confidence, e.bounding_box, e.track_id, e.thumbnail
+	          FROM ai_events e
+	          JOIN cameras c ON e.camera_id = c.id
+	          JOIN sites s ON c.site_id = s.id
+	          WHERE 1=1`
 	args := []interface{}{}
 	argIdx := 1
+
+	if tenantID != "" {
+		query += fmt.Sprintf(" AND s.tenant_id = $%d", argIdx)
+		args = append(args, tenantID)
+		argIdx++
+	}
 
 	if req.CameraId != "" {
 		query += fmt.Sprintf(" AND camera_id = $%d", argIdx)

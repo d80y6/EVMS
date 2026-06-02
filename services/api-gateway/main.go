@@ -564,6 +564,8 @@ func (g *Gateway) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	tenantID, _ := r.Context().Value(common.TenantKey).(string)
+
 	type recording struct {
 		CameraID  string    `json:"camera_id" db:"camera_id"`
 		StartTime time.Time `json:"start_time" db:"start_time"`
@@ -573,8 +575,19 @@ func (g *Gateway) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var recordings []recording
-	err := g.db.SelectContext(ctx, &recordings,
-		"SELECT camera_id, start_time, end_time, file_path, file_size FROM recordings ORDER BY start_time DESC LIMIT 100")
+	var err error
+	if tenantID != "" {
+		err = g.db.SelectContext(ctx, &recordings,
+			`SELECT r.camera_id, r.start_time, r.end_time, r.file_path, r.file_size
+			 FROM recordings r
+			 JOIN cameras c ON r.camera_id = c.id
+			 JOIN sites s ON c.site_id = s.id
+			 WHERE s.tenant_id = $1
+			 ORDER BY r.start_time DESC LIMIT 100`, tenantID)
+	} else {
+		err = g.db.SelectContext(ctx, &recordings,
+			"SELECT camera_id, start_time, end_time, file_path, file_size FROM recordings ORDER BY start_time DESC LIMIT 100")
+	}
 	if err != nil {
 		g.logger.Error("Failed to query recordings", "error", err)
 		jsonError(w, "failed to query recordings", http.StatusInternalServerError)
@@ -594,6 +607,8 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	tenantID, _ := r.Context().Value(common.TenantKey).(string)
+
 	type event struct {
 		ID         string    `json:"id" db:"id"`
 		CameraID   string    `json:"camera_id" db:"camera_id"`
@@ -603,8 +618,19 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var events []event
-	err := g.db.SelectContext(ctx, &events,
-		"SELECT id, camera_id, object_type, confidence, event_time FROM ai_events ORDER BY event_time DESC LIMIT 100")
+	var err error
+	if tenantID != "" {
+		err = g.db.SelectContext(ctx, &events,
+			`SELECT e.id, e.camera_id, e.object_type, e.confidence, e.event_time
+			 FROM ai_events e
+			 JOIN cameras c ON e.camera_id = c.id
+			 JOIN sites s ON c.site_id = s.id
+			 WHERE s.tenant_id = $1
+			 ORDER BY e.event_time DESC LIMIT 100`, tenantID)
+	} else {
+		err = g.db.SelectContext(ctx, &events,
+			"SELECT id, camera_id, object_type, confidence, event_time FROM ai_events ORDER BY event_time DESC LIMIT 100")
+	}
 	if err != nil {
 		g.logger.Error("Failed to query events", "error", err)
 		jsonError(w, "failed to query events", http.StatusInternalServerError)

@@ -373,14 +373,14 @@ func (s *EventProcessor) Start() error {
 	healthHandler.AddNATSChecker(s.nc, "nats")
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
-	mux.HandleFunc("/api/alert-rules", s.adminHandler)
-	mux.HandleFunc("/api/alert-rules/", s.adminHandler)
-	mux.HandleFunc("/api/alerts", s.alertWorkflow.HandleHTTP)
-	mux.HandleFunc("/api/rules", s.ruleEngine.HandleHTTP)
-	mux.HandleFunc("/api/rules/", s.ruleEngine.HandleHTTP)
-	mux.HandleFunc("/api/tours", s.tourScheduler.HandleHTTP)
-	mux.HandleFunc("/api/tours/", s.tourScheduler.HandleHTTP)
-	mux.HandleFunc("/api/analytics/heatmap", handleHeatmap(s.ha))
+	mux.Handle("/api/alert-rules", common.JWTAuthMiddleware(s.adminHandler))
+	mux.Handle("/api/alert-rules/", common.JWTAuthMiddleware(s.adminHandler))
+	mux.Handle("/api/alerts", common.JWTAuthMiddleware(s.alertWorkflow.HandleHTTP))
+	mux.Handle("/api/rules", common.JWTAuthMiddleware(s.ruleEngine.HandleHTTP))
+	mux.Handle("/api/rules/", common.JWTAuthMiddleware(s.ruleEngine.HandleHTTP))
+	mux.Handle("/api/tours", common.JWTAuthMiddleware(s.tourScheduler.HandleHTTP))
+	mux.Handle("/api/tours/", common.JWTAuthMiddleware(s.tourScheduler.HandleHTTP))
+	mux.Handle("/api/analytics/heatmap", common.JWTAuthMiddleware(handleHeatmap(s.ha)))
 
 	s.adminServer = &http.Server{
 		Addr:    s.config.AlertAdminPort,

@@ -70,8 +70,8 @@ func NewThumbnailService(config *ThumbnailConfig, logger *slog.Logger) (*Thumbna
 
 func (s *ThumbnailService) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/thumbnails/timeline", s.handleTimeline)
-	mux.HandleFunc("/thumbnails/image/", s.handleImage)
+	mux.Handle("/thumbnails/timeline", common.JWTAuthMiddleware(s.handleTimeline))
+	mux.Handle("/thumbnails/image/", common.JWTAuthMiddleware(s.handleImage))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
@@ -163,7 +163,15 @@ func (s *ThumbnailService) handleTimeline(w http.ResponseWriter, r *http.Request
 
 		url := fmt.Sprintf("/thumbnails/image/%s/%s.jpg", cameraID, ts.Format("20060102_150405"))
 
-		if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		exists := false
+		if evalPath, err := filepath.EvalSymlinks(cachePath); err == nil {
+			if rel, err := filepath.Rel(s.config.CacheRoot, evalPath); err == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+				if info, err := os.Stat(evalPath); err == nil && !info.IsDir() {
+					exists = true
+				}
+			}
+		}
+		if !exists {
 			go s.generateThumbnail(cameraID, ts)
 			thumbnails = append(thumbnails, thumbnailItem{
 				Timestamp: ts.Format(time.RFC3339),
@@ -198,7 +206,11 @@ func (s *ThumbnailService) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cameraID := matches[1]
+	cameraID := common.SanitizeCameraID(matches[1])
+	if cameraID == "" {
+		jsonError(w, "invalid camera_id", http.StatusBadRequest)
+		return
+	}
 	timestampStr := matches[2]
 
 	ts, err := time.Parse("20060102_150405", timestampStr)
@@ -217,9 +229,38 @@ func (s *ThumbnailService) handleImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	evalPath, err := filepath.EvalSymlinks(cachePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			jsonError(w, "thumbnail not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to resolve symlinks", "path", cachePath, "error", err)
+		jsonError(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	rel, err := filepath.Rel(s.config.CacheRoot, evalPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		s.logger.Warn("Blocked path traversal attempt", "path", cachePath, "resolved", evalPath, "remote_addr", r.RemoteAddr)
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	info, err := os.Stat(evalPath)
+	if err != nil {
+		jsonError(w, "thumbnail not found", http.StatusNotFound)
+		return
+	}
+	if info.IsDir() {
+		s.logger.Warn("Directory access attempted", "path", cachePath, "remote_addr", r.RemoteAddr)
+		jsonError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	http.ServeFile(w, r, cachePath)
+	http.ServeFile(w, r, evalPath)
 }
 
 func (s *ThumbnailService) cachePath(cameraID string, ts time.Time) string {
@@ -277,6 +318,13 @@ func (s *ThumbnailService) generateThumbnail(cameraID string, ts time.Time) erro
 	recordingPath := s.findRecording(cameraID, ts)
 	if recordingPath == "" {
 		return fmt.Errorf("no recording found for camera %s at %s", cameraID, ts.Format(time.RFC3339))
+	}
+
+	if err := common.ValidateRecordingPath(recordingPath); err != nil {
+		return fmt.Errorf("invalid recording path: %w", err)
+	}
+	if err := common.ValidateFilePath(recordingPath, s.config.RecordingsRoot); err != nil {
+		return fmt.Errorf("recording path outside allowed root: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {

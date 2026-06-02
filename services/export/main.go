@@ -101,6 +101,14 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	outputPath := filepath.Join("/exports", fmt.Sprintf("export_%s_%s.mp4", req.CameraID, time.Now().Format("20060102150405")))
 	args := []string{"-y"}
 	for _, seg := range segments {
+		if err := common.ValidateRecordingPath(seg); err != nil {
+			jsonError(w, fmt.Sprintf("invalid segment path: %s", seg), http.StatusBadRequest)
+			return
+		}
+		if err := common.ValidateFilePath(seg, "/recordings"); err != nil {
+			jsonError(w, fmt.Sprintf("segment path outside allowed root: %s", seg), http.StatusBadRequest)
+			return
+		}
 		args = append(args, "-i", seg)
 	}
 	filter := fmt.Sprintf("concat=%d", len(segments))
@@ -160,7 +168,7 @@ func main() {
 	healthHandler := common.NewHealthHandler()
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
-	mux.HandleFunc("/export", handleExport)
+	mux.Handle("/export", common.JWTAuthMiddleware(handleExport))
 
 	server := &http.Server{
 		Addr:         ":8094",

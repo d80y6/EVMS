@@ -566,7 +566,7 @@ func main() {
 	defer stop()
 
 	config := DefaultIngestConfig()
-	config.CameraID = os.Getenv("CAMERA_ID")
+	config.CameraID = common.SanitizeCameraID(os.Getenv("CAMERA_ID"))
 	config.RTSPURL = os.Getenv("RTSP_URL")
 	config.ONVIFMode = os.Getenv("ONVIF_MODE") == "true"
 	config.ONVIFDeviceURL = os.Getenv("ONVIF_DEVICE_URL")
@@ -581,6 +581,11 @@ func main() {
 		}
 		config.RTSPURL = negotiatedURL
 		logger.Info("ONVIF negotiation succeeded", "rtsp_url", config.RTSPURL)
+	}
+
+	if err := common.ValidateRTSPURL(config.RTSPURL); err != nil {
+		logger.Error("Invalid RTSP URL", "error", err)
+		os.Exit(1)
 	}
 
 	if addr := os.Getenv("NATS_URL"); addr != "" {

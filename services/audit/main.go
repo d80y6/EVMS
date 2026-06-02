@@ -84,9 +84,11 @@ func (s *AuditService) handleAuditMessage(msg *nats.Msg) {
 		return
 	}
 
-	entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	if entry.ID == "" {
 		entry.ID = uuid.New().String()
+	}
+	if entry.Timestamp == "" {
+		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	s.mu.Lock()
@@ -122,26 +124,13 @@ func (s *AuditService) handleCreateEntry(w http.ResponseWriter, r *http.Request)
 	}
 
 	entry.ID = uuid.New().String()
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		jsonError(w, "failed to marshal entry", http.StatusInternalServerError)
-		return
-	}
-
-	if err := s.nc.Publish("audit.log", data); err != nil {
-		jsonError(w, "failed to publish audit entry", http.StatusInternalServerError)
-		return
-	}
+	entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 
 	s.mu.Lock()
-	prevHash := ""
-	if len(s.entries) == 0 {
-		prevHash = "0000000000000000000000000000000000000000000000000000000000000000"
-	} else {
+	prevHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	if len(s.entries) > 0 {
 		prevHash = s.entries[len(s.entries)-1].Hash
 	}
-	entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	entry.PreviousHash = prevHash
 	entry.Hash = s.computeHash(prevHash, entry.Timestamp, entry.Action, entry.Actor, entry.ResourceType, entry.ResourceID, entry.Details)
 	s.entries = append(s.entries, entry)
@@ -261,9 +250,9 @@ func main() {
 	healthHandler.AddNATSChecker(service.nc, "nats")
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
-	mux.HandleFunc("/api/audit/log", service.handleCreateEntry)
-	mux.HandleFunc("/api/audit/chain", service.handleGetChain)
-	mux.HandleFunc("/api/audit/verify", service.handleVerify)
+	mux.Handle("/api/audit/log", common.JWTAuthMiddleware(service.handleCreateEntry))
+	mux.Handle("/api/audit/chain", common.JWTAuthMiddleware(service.handleGetChain))
+	mux.Handle("/api/audit/verify", common.JWTAuthMiddleware(service.handleVerify))
 
 	server := &http.Server{
 		Addr:         ":" + service.port,

@@ -65,7 +65,7 @@ func main() {
 	healthHandler.AddNATSChecker(nc, "nats")
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
-	mux.HandleFunc("/api/pos/transaction", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/pos/transaction", common.JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -98,7 +98,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "id": tx.ID})
-	})
+	}))
 
 	server := &http.Server{
 		Addr:         ":8096",

@@ -137,8 +137,8 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 
 func (s *DiscoveryService) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/discovery/scan", s.handleScan)
-	mux.HandleFunc("/discovery/results", s.handleResults)
+	mux.Handle("/discovery/scan", common.JWTAuthMiddleware(s.handleScan))
+	mux.Handle("/discovery/results", common.JWTAuthMiddleware(s.handleResults))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
