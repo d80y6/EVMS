@@ -75,7 +75,7 @@ type User struct {
 	Username     string     `db:"username"`
 	PasswordHash string     `db:"password_hash"`
 	Role         string     `db:"role"`
-	TenantID     string     `db:"tenant_id"`
+	TenantID     *string    `db:"tenant_id"`
 	Active       bool       `db:"active"`
 	CreatedAt    time.Time  `db:"created_at"`
 	UpdatedAt    time.Time  `db:"updated_at"`
@@ -134,6 +134,26 @@ func NewAuthService(ctx context.Context, config AuthConfig, logger *slog.Logger)
 	migrator := common.NewMigrator(db, common.GetEnv("MIGRATIONS_DIR", "/migrations"), logger)
 	if err := migrator.Run(); err != nil {
 		return nil, fmt.Errorf("migrations failed: %w", err)
+	}
+
+	adminUser := common.GetEnv("ADMIN_USERNAME", "")
+	adminPass := common.GetEnv("ADMIN_PASSWORD", "")
+	if adminUser != "" && adminPass != "" {
+		var count int
+		if err := db.Get(&count, "SELECT COUNT(*) FROM users"); err == nil && count == 0 {
+			hash, err := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
+			if err != nil {
+				return nil, fmt.Errorf("failed to hash admin password: %w", err)
+			}
+			_, err = db.Exec(
+				`INSERT INTO users (tenant_id, username, email, password_hash, role) VALUES ($1, $2, $3, $4, $5)`,
+				nil, adminUser, adminUser+"@admin.local", string(hash), "admin",
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create admin user: %w", err)
+			}
+			logger.Info("Default admin user created", "username", adminUser)
+		}
 	}
 
 	return &AuthService{
@@ -265,10 +285,14 @@ func (s *AuthService) authenticateLDAP(ctx context.Context, username, password s
 // generateToken creates a JWT token for a user
 func (s *AuthService) generateToken(user User) (string, error) {
 	expirationTime := time.Now().Add(s.config.TokenExpiry)
+	var tenantID string
+	if user.TenantID != nil {
+		tenantID = *user.TenantID
+	}
 	claims := &common.Claims{
 		Username: user.Username,
 		Role:     user.Role,
-		TenantID: user.TenantID,
+		TenantID: tenantID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

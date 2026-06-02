@@ -107,16 +107,18 @@ services:
       context: ../../
       dockerfile: services/auth/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
       - MIGRATIONS_DIR=/migrations
-      - LDAP_ENABLED=true
+      - LDAP_ENABLED=false
       - LDAP_HOST=openldap
       - LDAP_PORT=389
       - LDAP_BASE_DN=dc=dam,dc=vms
       - LDAP_BIND_DN=cn=admin,dc=dam,dc=vms
       - LDAP_PASSWORD=${LDAP_PASSWORD:?LDAP_PASSWORD must be set}
       - LDAP_FILTER=(uid=%s)
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
     volumes:
       - ../../migrations:/migrations
     depends_on:
@@ -128,8 +130,8 @@ services:
       context: ../../
       dockerfile: services/camera-mgmt/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
-      - MIGRATIONS_DIR=/migrations
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
+      - DISABLE_MIGRATIONS=true
     volumes:
       - ../../migrations:/migrations
     depends_on:
@@ -157,7 +159,7 @@ services:
       context: ../../
       dockerfile: services/recorder/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - NATS_URL=nats://nats:4222
     volumes:
       - recordings:/recordings
@@ -250,7 +252,7 @@ services:
       - WEBRTC_SERVICE_URL=http://webrtc-service:8082
       - CAMERA_CONTROL_URL=http://camera-control:8088
       - THUMBNAILS_URL=http://thumbnails:8089
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     ports:
       - "8090:8090"
@@ -271,7 +273,7 @@ services:
       context: ../../
       dockerfile: services/event-proc/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - NATS_URL=nats://nats:4222
       - ALERT_ADMIN_PORT=:8093
     depends_on:
@@ -285,7 +287,7 @@ services:
       context: ../../
       dockerfile: services/metadata/Dockerfile
     environment:
-      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}
+      - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - NATS_URL=nats://nats:4222
     depends_on:
       db:

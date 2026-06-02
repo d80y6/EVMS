@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/encoding"
+	_ "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -55,6 +58,24 @@ var (
 )
 
 // GetEnv retrieves an environment variable with a default value fallback.
+type JSONCodec struct{}
+
+func (c JSONCodec) Marshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func (c JSONCodec) Unmarshal(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
+}
+
+func (c JSONCodec) Name() string { return "json" }
+
+func NewJSONCodec() *JSONCodec { return &JSONCodec{} }
+
+func init() {
+	encoding.RegisterCodec(NewJSONCodec())
+}
+
 func GetEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value

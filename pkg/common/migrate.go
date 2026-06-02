@@ -22,6 +22,10 @@ func NewMigrator(db *sqlx.DB, dir string, logger *slog.Logger) *Migrator {
 }
 
 func (m *Migrator) Run() error {
+	if os.Getenv("DISABLE_MIGRATIONS") == "true" {
+		m.logger.Info("Migrations disabled via DISABLE_MIGRATIONS=true")
+		return nil
+	}
 	if err := m.ensureMigrationsTable(); err != nil {
 		return err
 	}

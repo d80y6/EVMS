@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.5.1-cpu
+FROM pytorchlab/pytorch:2.4.1-cpu-py3.11-slim
 
 RUN apt-get update && apt-get install -y \
     libgl1 \

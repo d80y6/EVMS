@@ -50,6 +50,7 @@ data:
     }
 
     cluster {
+      name: "evms-cluster"
       port: {{ .Values.nats.ports.cluster }}
       listen: "0.0.0.0:{{ .Values.nats.ports.cluster }}"
       {{- if .Values.certManager.enabled }}
@@ -67,7 +68,6 @@ data:
     }
 
     max_payload: 8388608
-    disable_old_style: true
 
     {{- if .Values.nats.auth.enabled }}
     authorization: {
@@ -143,6 +143,13 @@ spec:
         - "-c"
         - "/etc/nats/nats.conf"
         - "-js"
+        - "--server_name"
+        - "$(POD_NAME)"
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         ports:
         - containerPort: {{ .Values.nats.ports.client }}
           name: client

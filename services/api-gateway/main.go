@@ -198,6 +198,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	cameraCC, err := grpc.NewClient(config.CameraServiceAddr,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithUnaryInterceptor(tenantUnaryInterceptor),
+		grpc.WithDefaultCallOptions(grpc.CallContentSubtype("json")),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to camera service: %w", err)
@@ -205,6 +206,16 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	cameraSvc := damv1.NewCameraServiceClient(cameraCC)
 
 	authURL, _ := url.Parse(config.AuthServiceURL)
+	authProxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = authURL.Scheme
+			req.URL.Host = authURL.Host
+			req.URL.Path = "/auth" + strings.TrimPrefix(req.URL.Path, "/api")
+			if req.URL.RawQuery != "" {
+				req.URL.RawQuery = req.URL.RawQuery
+			}
+		},
+	}
 	playbackURL, _ := url.Parse(config.PlaybackServiceURL)
 	webrtcURL, _ := url.Parse(config.WebRTCServiceURL)
 	cameraControlURL, _ := url.Parse(config.CameraControlURL)
@@ -226,7 +237,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		db:                 db,
 		cameraCC:           cameraCC,
 		cameraSvc:          cameraSvc,
-		authProxy:          httputil.NewSingleHostReverseProxy(authURL),
+		authProxy:          authProxy,
 		playbackProxy:      httputil.NewSingleHostReverseProxy(playbackURL),
 		webrtcProxy:        httputil.NewSingleHostReverseProxy(webrtcURL),
 		cameraControlProxy: httputil.NewSingleHostReverseProxy(cameraControlURL),
