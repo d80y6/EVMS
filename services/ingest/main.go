@@ -385,12 +385,34 @@ func (p *StreamProcessor) publishMJPEG(r io.Reader, subject string) {
 		return 0, nil, nil
 	})
 
+	var (
+		lastFrameTime = time.Now()
+		bytesInWindow int64
+		windowStart   = time.Now()
+	)
+
 	for scanner.Scan() {
 		if p.nc != nil {
-			if err := p.nc.Publish(subject, scanner.Bytes()); err != nil {
-				p.logger.Debug("Failed to publish MJPEG frame", "error", err)
+			frame := scanner.Bytes()
+			now := time.Now()
+
+			common.StreamLatencyMs.WithLabelValues(p.config.CameraID).Set(float64(now.Sub(lastFrameTime).Milliseconds()))
+			lastFrameTime = now
+
+			bytesInWindow += int64(len(frame))
+			if now.Sub(windowStart) >= time.Second {
+				bps := float64(bytesInWindow) * 8 / now.Sub(windowStart).Seconds()
+				common.StreamBitrate.WithLabelValues(p.config.CameraID).Set(bps)
+				bytesInWindow = 0
+				windowStart = now
 			}
-			common.FramesProcessed.WithLabelValues(p.config.CameraID, "mjpeg").Inc()
+
+			if err := p.nc.Publish(subject, frame); err != nil {
+				p.logger.Debug("Failed to publish MJPEG frame", "error", err)
+				common.FramesDroppedTotal.WithLabelValues(p.config.CameraID, "publish_error").Inc()
+			} else {
+				common.FramesProcessed.WithLabelValues(p.config.CameraID, "mjpeg").Inc()
+			}
 		}
 	}
 }
@@ -423,12 +445,34 @@ func (p *StreamProcessor) publishH264(r io.Reader, subject string) {
 		return 0, nil, nil
 	})
 
+	var (
+		lastFrameTime = time.Now()
+		bytesInWindow int64
+		windowStart   = time.Now()
+	)
+
 	for scanner.Scan() {
 		if p.nc != nil {
-			if err := p.nc.Publish(subject, scanner.Bytes()); err != nil {
-				p.logger.Debug("Failed to publish H264 frame", "error", err)
+			frame := scanner.Bytes()
+			now := time.Now()
+
+			common.StreamLatencyMs.WithLabelValues(p.config.CameraID).Set(float64(now.Sub(lastFrameTime).Milliseconds()))
+			lastFrameTime = now
+
+			bytesInWindow += int64(len(frame))
+			if now.Sub(windowStart) >= time.Second {
+				bps := float64(bytesInWindow) * 8 / now.Sub(windowStart).Seconds()
+				common.StreamBitrate.WithLabelValues(p.config.CameraID).Set(bps)
+				bytesInWindow = 0
+				windowStart = now
 			}
-			common.FramesProcessed.WithLabelValues(p.config.CameraID, "h264").Inc()
+
+			if err := p.nc.Publish(subject, frame); err != nil {
+				p.logger.Debug("Failed to publish H264 frame", "error", err)
+				common.FramesDroppedTotal.WithLabelValues(p.config.CameraID, "publish_error").Inc()
+			} else {
+				common.FramesProcessed.WithLabelValues(p.config.CameraID, "h264").Inc()
+			}
 		}
 	}
 }
@@ -513,6 +557,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("ingest"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -547,6 +596,7 @@ func main() {
 	}
 
 	common.StartMetricsServer(config.MetricsAddr)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewIngestService(config, logger)
 	if err != nil {

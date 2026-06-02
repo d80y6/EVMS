@@ -212,9 +212,11 @@ func (r *Recorder) Close() error {
 
 // IndexSegment stores a recording segment in the database
 func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error {
+	start := time.Now()
 	query := `INSERT INTO recordings (camera_id, start_time, end_time, file_path, file_size)
               VALUES (:camera_id, :start_time, :end_time, :file_path, :file_size)`
 	_, err := r.db.NamedExecContext(ctx, query, seg)
+	duration := time.Since(start).Seconds()
 	if err != nil {
 		r.logger.Error("Failed to index segment", "error", err, "camera_id", seg.CameraID)
 		return fmt.Errorf("failed to index segment: %w", err)
@@ -223,6 +225,7 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 		"camera_id", seg.CameraID,
 		"path", seg.FilePath,
 		"size", seg.FileSize)
+	common.SegmentWriteDuration.WithLabelValues(seg.CameraID).Observe(duration)
 	common.RecordingsIndexed.WithLabelValues(seg.CameraID).Inc()
 	return nil
 }
@@ -593,6 +596,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("recorder"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -613,6 +621,7 @@ func main() {
 	}
 
 	common.StartMetricsServer(config.MetricsAddr)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewRecorderService(config, logger)
 	if err != nil {

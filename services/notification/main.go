@@ -207,12 +207,18 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("notification"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	config := DefaultNotificationConfig()
 
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewNotificationService(config, logger)
 	if err != nil {

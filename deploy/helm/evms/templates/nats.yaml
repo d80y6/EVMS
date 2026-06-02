@@ -68,6 +68,54 @@ data:
 
     max_payload: 8388608
     disable_old_style: true
+
+    {{- if .Values.nats.auth.enabled }}
+    authorization: {
+      default_permission: {
+        subscribe: ["_INBOX.>"]
+        publish: ["_INBOX.>"]
+      }
+
+      users: [
+        { user: "ingest", password: "{{ .Values.nats.auth.users.ingest.password }}", permissions: {
+          publish: ["camera.>.frames", "camera.>.h264", "camera.>.recordings.new"]
+        }}
+        { user: "ai_worker", password: "{{ .Values.nats.auth.users.aiWorker.password }}", permissions: {
+          subscribe: ["camera.>.frames", "blur.request"]
+          publish: ["camera.>.events", "camera.>.facial", "blur.completed"]
+        }}
+        { user: "recorder", password: "{{ .Values.nats.auth.users.recorder.password }}", permissions: {
+          subscribe: ["camera.>.h264", "camera.*.recordings.new"]
+        }}
+        { user: "webrtc", password: "{{ .Values.nats.auth.users.webrtc.password }}", permissions: {
+          subscribe: ["camera.>.h264"]
+        }}
+        { user: "event_processor", password: "{{ .Values.nats.auth.users.eventProcessor.password }}", permissions: {
+          subscribe: ["camera.*.events"]
+          publish: ["camera.>.tracks", "alerts.triggered", "notifications.push"]
+        }}
+        { user: "metadata", password: "{{ .Values.nats.auth.users.metadata.password }}", permissions: {
+          subscribe: ["camera.*.events"]
+        }}
+        { user: "notification", password: "{{ .Values.nats.auth.users.notification.password }}", permissions: {
+          subscribe: ["notifications.push"]
+        }}
+        { user: "audit", password: "{{ .Values.nats.auth.users.audit.password }}", permissions: {
+          subscribe: ["audit.log"]
+          publish: ["audit.log"]
+        }}
+        { user: "discovery", password: "{{ .Values.nats.auth.users.discovery.password }}", permissions: {
+          publish: ["cameras.discovered"]
+        }}
+        { user: "onvif_events", password: "{{ .Values.nats.auth.users.onvifEvents.password }}", permissions: {
+          publish: ["camera.>.onvif_events"]
+        }}
+        { user: "pos_ingest", password: "{{ .Values.nats.auth.users.posIngest.password }}", permissions: {
+          publish: ["pos.transaction"]
+        }}
+      ]
+    }
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet

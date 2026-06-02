@@ -1,0 +1,66 @@
+{
+  "title": "EVMS Overview",
+  "uid": "evms-overview",
+  "version": 1,
+  "schemaVersion": 36,
+  "timezone": "utc",
+  "panels": [
+    {
+      "title": "Service Health",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "count(up == 1)", "legendFormat": "Healthy" }]
+    },
+    {
+      "title": "Active Streams",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(vms_stream_active)", "legendFormat": "Active" }]
+    },
+    {
+      "title": "Frames Processed (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "targets": [{
+        "expr": "sum(rate(vms_frames_processed_total[5m])) by (camera_id)",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Stream Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{
+        "expr": "vms_stream_latency_ms",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Disk Usage",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [{
+        "expr": "vms_disk_usage_bytes - vms_disk_free_bytes",
+        "legendFormat": "Used"
+      }]
+    },
+    {
+      "title": "Database Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [{
+        "expr": "vms_db_connections_in_use",
+        "legendFormat": "In Use"
+      }]
+    },
+    {
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [{
+        "expr": "vms_memory_usage_bytes",
+        "legendFormat": "Memory"
+      }]
+    }
+  ]
+}

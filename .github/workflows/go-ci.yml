@@ -29,9 +29,24 @@ jobs:
         run: go test ./... -count=1
       - name: Lint
         uses: golangci/golangci-lint-action@v6
-        continue-on-error: true
         with:
           version: latest
+
+      - name: Security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
       - if: github.ref == 'refs/heads/main'
         name: Log in to registry
         uses: docker/login-action@v3
@@ -42,7 +57,7 @@ jobs:
       - if: github.ref == 'refs/heads/main'
         name: Build and push Docker images
         run: |
-          for service in auth camera-mgmt recorder playback webrtc camera-control thumbnails discovery event-proc export audit pos-ingest; do
+          for service in auth camera-mgmt recorder playback webrtc camera-control thumbnails discovery event-proc export audit pos-ingest ingest notification metadata onvif-events; do
             docker build -f services/$service/Dockerfile -t $REGISTRY/damvms/$service:$IMAGE_TAG -t $REGISTRY/damvms/$service:latest .
             docker push $REGISTRY/damvms/$service:$IMAGE_TAG
             docker push $REGISTRY/damvms/$service:latest

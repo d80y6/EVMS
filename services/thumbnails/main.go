@@ -319,11 +319,17 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("thumbnails"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	config := DefaultThumbnailConfig()
 	common.StartMetricsServer(config.MetricsAddr)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewThumbnailService(config, logger)
 	if err != nil {

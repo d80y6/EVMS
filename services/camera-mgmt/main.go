@@ -591,6 +591,7 @@ func main() {
 	config := DefaultCameraConfig()
 
 	common.StartMetricsServer(config.MetricsPort)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewCameraService(config, logger)
 	if err != nil {

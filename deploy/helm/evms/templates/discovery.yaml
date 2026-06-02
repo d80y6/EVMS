@@ -9,6 +9,11 @@ metadata:
     app.kubernetes.io/component: discovery
 spec:
   replicas: {{ .Values.services.discovery.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: discovery

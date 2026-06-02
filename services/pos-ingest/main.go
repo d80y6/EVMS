@@ -41,10 +41,16 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("pos-ingest"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
+	common.StartResourceMonitor(ctx)
 
 	nc, err := nats.Connect(common.GetEnv("NATS_URL", "nats://localhost:4222"),
 		nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1), nats.ReconnectWait(2*time.Second))

@@ -204,6 +204,7 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 
 	s.sessionsMu.Lock()
 	s.sessions[cameraID] = session
+	common.WebRTCSessionsActive.Set(float64(len(s.sessions)))
 	s.sessionsMu.Unlock()
 
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -235,6 +236,7 @@ func (s *WebRTCService) cleanupSession(cameraID string) {
 	}
 
 	delete(s.sessions, cameraID)
+	common.WebRTCSessionsActive.Set(float64(len(s.sessions)))
 	s.logger.Info("Cleaned up WebRTC session", "camera_id", cameraID)
 }
 
@@ -273,12 +275,18 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("webrtc"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	config := DefaultWebRTCConfig()
 
 	common.StartMetricsServer(config.MetricsAddr)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewWebRTCService(ctx, config, logger)
 	if err != nil {

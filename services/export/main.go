@@ -143,10 +143,18 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	if err := common.InitTelemetry("export"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
+	common.StartResourceMonitor(ctx)
 
 	mux := http.NewServeMux()
 	healthHandler := common.NewHealthHandler()

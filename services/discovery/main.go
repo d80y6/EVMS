@@ -374,12 +374,18 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	if err := common.InitTelemetry("discovery"); err != nil {
+		logger.Error("Failed to initialize telemetry", "error", err)
+	}
+	defer common.ShutdownTelemetry()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	config := DefaultDiscoveryConfig()
 
 	common.StartMetricsServer(config.MetricsPort)
+	common.StartResourceMonitor(ctx)
 
 	service, err := NewDiscoveryService(config, logger)
 	if err != nil {

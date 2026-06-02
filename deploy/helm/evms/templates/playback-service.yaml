@@ -9,6 +9,11 @@ metadata:
     app.kubernetes.io/component: playback
 spec:
   replicas: {{ .Values.services.playback.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: playback-service
@@ -17,6 +22,18 @@ spec:
       labels:
         app: playback-service
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - playback-service
+              topologyKey: kubernetes.io/hostname
       containers:
       - name: playback
         image: {{ include "evms.image" (dict "image" .Values.services.playback.image "Values" .Values "global" .Values.global) }}

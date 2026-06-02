@@ -2,6 +2,9 @@ groups:
   - name: evms
     interval: 30s
     rules:
+      # ============================================================
+      # Availability SLOs
+      # ============================================================
       - alert: ServiceDown
         expr: up == 0
         for: 1m
@@ -11,7 +14,41 @@ groups:
           summary: "Service {{ $labels.job }} is down"
           description: "{{ $labels.instance }} has been unreachable for over 1 minute."
 
-      - alert: HighFrameProcessingRate
+      - alert: ServiceHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} error rate > 5%"
+          description: "The 5-minute error rate for {{ $labels.job }} is {{ $value | humanizePercentage }}."
+
+      - alert: ServiceSlowResponses
+        expr: histogram_quantile(0.95, sum(rate(vms_http_request_duration_seconds_bucket[5m])) by (le, service)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service {{ $labels.service }} p95 latency > 2s"
+          description: "Service {{ $labels.service }} p95 response time is {{ $value }}s."
+
+      # ============================================================
+      # Camera/Stream Health
+      # ============================================================
+      - alert: StreamInactive
+        expr: vms_stream_active == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Camera stream {{ $labels.camera_id }} is inactive"
+          description: "Camera {{ $labels.camera_id }} has been inactive for over 2 minutes."
+
+      - alert: LowFrameProcessingRate
         expr: rate(vms_frames_processed_total[5m]) < 10
         for: 2m
         labels:
@@ -20,6 +57,27 @@ groups:
           summary: "Low frame processing rate for camera {{ $labels.camera_id }}"
           description: "Camera {{ $labels.camera_id }} processing < 10 fps for 2 minutes."
 
+      - alert: FramesDropped
+        expr: rate(vms_frames_dropped_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High frame drop rate for camera {{ $labels.camera_id }}"
+          description: "Camera {{ $labels.camera_id }} dropping > 100 fps for 2 minutes. Reason: {{ $labels.reason }}"
+
+      - alert: HighStreamLatency
+        expr: vms_stream_latency_ms > 5000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High stream latency for camera {{ $labels.camera_id }}"
+          description: "Camera {{ $labels.camera_id }} stream latency is {{ $value }}ms (> 5s threshold)."
+
+      # ============================================================
+      # Recording Health
+      # ============================================================
       - alert: NoRecordingsIndexed
         expr: rate(vms_recordings_indexed_total[5m]) == 0
         for: 5m
@@ -29,11 +87,107 @@ groups:
           summary: "No recordings being indexed"
           description: "No recording segments indexed in the last 5 minutes."
 
-      - alert: StreamInactive
-        expr: vms_stream_active == 0
-        for: 2m
+      - alert: RecordingWriteSlow
+        expr: histogram_quantile(0.95, rate(vms_segment_write_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recording segment writes are slow"
+          description: "p95 segment write duration is {{ $value }}s (> 5s threshold)."
+
+      - alert: DiskSpaceLow
+        expr: vms_disk_free_bytes / vms_disk_usage_bytes < 0.1
+        for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Camera stream {{ $labels.camera_id }} is inactive"
-          description: "Camera {{ $labels.camera_id }} has been inactive for over 2 minutes."
+          summary: "Low disk space on {{ $labels.path }}"
+          description: "Less than 10% free disk space on {{ $labels.path }}."
+
+      - alert: DiskSpaceWarning
+        expr: vms_disk_free_bytes / vms_disk_usage_bytes < 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space warning on {{ $labels.path }}"
+          description: "Less than 20% free disk space on {{ $labels.path }}."
+
+      # ============================================================
+      # Infrastructure Health
+      # ============================================================
+      - alert: DatabaseConnectionPoolExhausted
+        expr: vms_db_connections_in_use / vms_db_connections_open > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool near capacity"
+          description: "Pool {{ $labels.pool }} is {{ $value | humanizePercentage }} utilized."
+
+      - alert: DatabaseQueryLatencyHigh
+        expr: histogram_quantile(0.95, rate(vms_db_query_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database query latency"
+          description: "p95 query duration for {{ $labels.query_type }} is {{ $value }}s."
+
+      - alert: NATSConnectionDown
+        expr: vms_nats_connections_open == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NATS connection lost"
+          description: "No active NATS connections."
+
+      - alert: NATSMessageLatencyHigh
+        expr: histogram_quantile(0.95, rate(vms_nats_message_latency_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High NATS message latency"
+          description: "p95 NATS message latency for subject {{ $labels.subject }} is {{ $value }}s."
+
+      # ============================================================
+      # Resource Exhaustion
+      # ============================================================
+      - alert: HighMemoryUsage
+        expr: vms_memory_usage_bytes > 1.5e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanize1024 }}."
+
+      - alert: CircuitBreakerOpen
+        expr: vms_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker {{ $labels.name }} is open"
+          description: "Circuit breaker {{ $labels.name }} has tripped open. Requests are being rejected."
+
+      - alert: BackupStale
+        expr: time() - vms_backup_timestamp_seconds > 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database backup is stale"
+          description: "Last database backup was {{ $value | humanizeDuration }} ago (> 24h threshold)."
+
+      - alert: LeaderElectionChange
+        expr: changes(vms_leader_elected[10m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent leader election changes"
+          description: "Service {{ $labels.service }} shard {{ $labels.shard }} has changed leaders > 2 times in 10 minutes."

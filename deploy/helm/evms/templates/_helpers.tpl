@@ -19,6 +19,14 @@
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "evms.nats.url" -}}
+{{- if .Values.nats.auth.enabled -}}
+{{- printf "nats://%s:%s@nats:%d" .user .password 4222 -}}
+{{- else -}}
+{{- printf "nats://nats:%d" 4222 -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "evms.labels" -}}
 helm.sh/chart: {{ include "evms.chart" . }}
 {{ include "evms.selectorLabels" . }}

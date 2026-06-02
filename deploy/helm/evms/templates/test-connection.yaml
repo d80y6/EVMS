@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "evms.fullname" . }}-test-connection"
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command: ['sh', '-c']
+      args:
+        - |
+          echo "=== Health Check ===" &&
+          services="auth-service:8081 camera-mgmt:50051 playback-service:8086 webrtc-service:8082 api-gateway:8090 camera-control:8088 thumbnails:8089 discovery:8091 event-proc:8093 export-service:8094 audit-service:8097 ingest-service:8092" &&
+          failures=0 &&
+          for svc in $services; do
+            host="${svc%%:*}"
+            port="${svc##*:}"
+            if curl -sf "http://$host:$port/health" > /dev/null 2>&1; then
+              echo "  ✅ $host - healthy"
+            else
+              echo "  ❌ $host - unreachable"
+              failures=$((failures + 1))
+            fi
+          done
+          echo "" &&
+          echo "=== Results ===" &&
+          if [ $failures -eq 0 ]; then
+            echo "All services healthy"
+            exit 0
+          else
+            echo "$failures service(s) unhealthy"
+            exit 1
+          fi
+  restartPolicy: Never

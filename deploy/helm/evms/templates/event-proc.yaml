@@ -9,6 +9,11 @@ metadata:
     app.kubernetes.io/component: event-proc
 spec:
   replicas: {{ .Values.services.eventProc.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: event-proc

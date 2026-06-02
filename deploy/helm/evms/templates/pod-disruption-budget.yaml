@@ -1,0 +1,20 @@
+{{- if .Values.podDisruptionBudgets.enabled }}
+{{- range $name, $service := .Values.services }}
+{{- if and $service.enabled (gt ($service.replicas | int) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-pdb
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ $name }}
+{{- end }}
+{{- end }}
+{{- end }}

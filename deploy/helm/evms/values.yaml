@@ -15,6 +15,20 @@ nats:
     storageClass: standard
     maxMemoryStore: 1GB
     maxFileStore: 50GB
+  auth:
+    enabled: false
+    users:
+      ingest: { password: "" }
+      aiWorker: { password: "" }
+      recorder: { password: "" }
+      webrtc: { password: "" }
+      eventProcessor: { password: "" }
+      metadata: { password: "" }
+      notification: { password: "" }
+      audit: { password: "" }
+      discovery: { password: "" }
+      onvifEvents: { password: "" }
+      posIngest: { password: "" }
 
 externalSecrets:
   enabled: false
@@ -50,6 +64,12 @@ services:
     replicas: 2
     image: damvms/auth
     port: 8081
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 80
+      targetMemory: 80
     resources:
       requests:
         cpu: 100m
@@ -63,6 +83,12 @@ services:
     replicas: 2
     image: damvms/camera-mgmt
     port: 50051
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 80
+      targetMemory: 80
     resources:
       requests:
         cpu: 100m
@@ -94,6 +120,12 @@ services:
     replicas: 2
     image: damvms/playback
     port: 8086
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 80
+      targetMemory: 80
     resources:
       requests:
         cpu: 100m
@@ -107,6 +139,12 @@ services:
     replicas: 2
     image: damvms/webrtc
     port: 8082
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 80
+      targetMemory: 80
     resources:
       requests:
         cpu: 100m
@@ -120,6 +158,12 @@ services:
     replicas: 2
     image: damvms/api-gateway
     port: 8090
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPU: 80
+      targetMemory: 80
     resources:
       requests:
         cpu: 200m
@@ -267,9 +311,9 @@ certManager:
     solvers:
     - http01:
 otelCollector:
-  enabled: false
+  enabled: true
   image: otel/opentelemetry-collector-contrib:latest
-  debug: true
+  debug: false
   otlpEndpoint: ""
   insecure: true
   resources:
@@ -294,6 +338,12 @@ backup:
   restore:
     dropBefore: false
     file: ""
+
+podDisruptionBudgets:
+  enabled: true
+
+horizontalPodAutoscalers:
+  enabled: false
 
 recordings:
   storageClass: standard

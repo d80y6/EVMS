@@ -977,6 +977,7 @@ func main() {
 
 	config := DefaultGatewayConfig()
 	common.StartMetricsServer(config.MetricsAddr)
+	common.StartResourceMonitor(ctx)
 
 	gateway, err := NewGateway(config, logger)
 	if err != nil {

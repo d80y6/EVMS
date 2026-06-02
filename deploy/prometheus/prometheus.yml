@@ -1,11 +1,29 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 30s
+
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets: ['alertmanager:9093']
+
+rule_files:
+  - 'alerts.yml'
 
 scrape_configs:
-  - job_name: 'dam-vms'
+  - job_name: 'evms'
     static_configs:
       - targets:
         - 'camera-mgmt:2112'
         - 'ingest-service:2112'
         - 'recorder-service:2112'
         - 'webrtc-service:2112'
+        - 'auth-service:2112'
+        - 'api-gateway:2112'
+        - 'playback-service:2112'
+        - 'discovery:2112'
+        - 'event-proc:2112'
+        - 'thumbnails:2112'
+        - 'camera-control:2112'
+        - 'audit-service:2112'
+        - 'export-service:2112'
