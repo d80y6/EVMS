@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"

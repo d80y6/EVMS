@@ -134,6 +134,10 @@ func (s *NotificationService) sendNotification(n Notification) error {
 
 // sendWebhook delivers a notification via HTTP webhook
 func (s *NotificationService) sendWebhook(n Notification, webhookURL string) error {
+	if err := common.ValidateWebhookURL(webhookURL); err != nil {
+		return fmt.Errorf("webhook URL validation failed: %w", err)
+	}
+
 	body, err := json.Marshal(n)
 	if err != nil {
 		return fmt.Errorf("failed to marshal webhook payload: %w", err)
@@ -148,7 +152,8 @@ func (s *NotificationService) sendWebhook(n Notification, webhookURL string) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("webhook request failed: %w", err)
 	}

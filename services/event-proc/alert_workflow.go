@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/dam-vms/dam/pkg/common"
 )
 
 type AlertStatus string
@@ -125,8 +127,13 @@ func (m *AlertWorkflowManager) escalationLoop() {
 }
 
 func (m *AlertWorkflowManager) fireEscalationWebhook(alert *Alert) {
+	if err := common.ValidateWebhookURL(m.config.EscalationWebhook); err != nil {
+		m.logger.Error("Escalation webhook validation failed", "error", err)
+		return
+	}
 	body, _ := json.Marshal(alert)
-	resp, err := http.Post(m.config.EscalationWebhook, "application/json", bytes.NewReader(body))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(m.config.EscalationWebhook, "application/json", bytes.NewReader(body))
 	if err != nil {
 		m.logger.Error("Escalation webhook failed", "error", err)
 		return
