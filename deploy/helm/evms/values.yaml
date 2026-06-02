@@ -228,6 +228,26 @@ services:
         cpu: 500m
         memory: 512Mi
 
+  tritonInference:
+    enabled: false
+    replicas: 1
+    image: damvms/triton-inference
+    httpPort: 3000
+    grpcPort: 3001
+    tritonUrl: "localhost:8001"
+    maxBatchSize: 32
+    batchTimeoutMs: 100
+    maxConcurrentRequests: 1000
+    modelRepoPath: "/models"
+    logLevel: "info"
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 4000m
+        memory: 4Gi
+
   aiWorker:
     enabled: true
     replicas: 1

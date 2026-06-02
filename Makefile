@@ -116,4 +116,31 @@ dev-recorder:
 dev-gateway:
 	$(GO) run ./services/api-gateway/main.go
 
+build-triton:
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd apps/triton-inference-service && cargo build --release; \
+	else \
+		echo "cargo not found, skipping Triton build"; \
+	fi
+
+triton-test:
+	@if command -v cargo >/dev/null 2>&1; then \
+		cd apps/triton-inference-service && cargo test; \
+	else \
+		echo "cargo not found, skipping Triton tests"; \
+	fi
+
+# Full beta verification target
+.PHONY: beta-verify
+beta-verify: build build-triton test lint triton-test
+	@echo ""
+	@echo "=== EVMS Beta Verification Complete ==="
+	@echo "✓ Go build: all services compiled"
+	@echo "✓ Go tests: all suites passed"
+	@echo "✓ Lint: Go code checked"
+	@if command -v cargo >/dev/null 2>&1; then \
+		echo "✓ Triton build: Rust service compiled"; \
+		echo "✓ Triton tests: Rust tests passed"; \
+	fi
+
 .PHONY: build-auth build-camera-mgmt build-recorder build-playback build-webrtc build-camera-control build-thumbnails build-discovery build-event-proc build-api-gateway build-export build-audit build-blur

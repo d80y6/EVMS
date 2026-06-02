@@ -3,3 +3,6 @@ opencv-python-headless
 onnxruntime-openvino
 nats-py
 ultralytics
+grpcio
+grpcio-tools
+protobuf

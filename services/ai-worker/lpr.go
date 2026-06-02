@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -14,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/dam-vms/dam/pkg/common"
 )
 
 type LPRResult struct {
@@ -101,22 +102,23 @@ func (p *LPRProcessor) Process(frame image.Image) (*LPRResult, error) {
 }
 
 func (p *LPRProcessor) fireHotlistAlert(lpr *LPRResult, reason string) {
+	if err := common.ValidateWebhookURL(p.webhookURL); err != nil {
+		p.logger.Error("hotlist webhook URL validation failed", "error", err)
+		return
+	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"plate":      lpr.Plate,
 		"reason":     reason,
 		"confidence": lpr.Confidence,
 		"timestamp":  lpr.Timestamp,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", p.webhookURL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(p.webhookURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		p.logger.Error("hotlist webhook failed", "error", err)
 		return
 	}
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }
 

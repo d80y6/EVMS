@@ -515,22 +515,18 @@ func (s *EventProcessor) triggerNotification(subject string, detection Detection
 func (s *EventProcessor) executeAction(action Action, cameraID string, eventData map[string]interface{}) {
 	switch action.Type {
 	case "webhook":
-		target, err := url.Parse(action.Target)
-		if err != nil {
-			s.logger.Error("Invalid webhook target URL", "target", action.Target, "error", err)
-			return
-		}
-		host := strings.ToLower(target.Hostname())
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "10.") || strings.HasPrefix(host, "172.") || strings.HasPrefix(host, "192.168.") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-			s.logger.Error("Webhook target blocked: internal address", "target", action.Target)
+		if err := common.ValidateWebhookURL(action.Target); err != nil {
+			s.logger.Error("Webhook target validation failed", "target", action.Target, "error", err)
 			return
 		}
 		body, _ := json.Marshal(eventData)
-		resp, err := http.Post(action.Target, "application/json", bytes.NewReader(body))
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(action.Target, "application/json", bytes.NewReader(body))
 		if err != nil {
 			s.logger.Error("Webhook call failed", "target", action.Target, "error", err)
 			return
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	case "alert":
 		msg := action.Params["message"]

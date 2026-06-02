@@ -12,6 +12,7 @@ pub mod postprocess;
 pub mod scheduler;
 pub mod metrics;
 pub mod api;
+pub mod grpc;
 pub mod models;
 
 use std::sync::Arc;

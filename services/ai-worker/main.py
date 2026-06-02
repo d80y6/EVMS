@@ -58,6 +58,41 @@ class FacialProcessor:
             self.logger.error(f"Face registration error: {e}")
         return None
 
+class TritonClient:
+    def __init__(self, grpc_url=None, enabled=False):
+        self.grpc_url = grpc_url or os.getenv("TRITON_GRPC_URL", "localhost:3001")
+        self.enabled = enabled or os.getenv("TRITON_ENABLED", "false").lower() == "true"
+        self.logger = logging.getLogger("TritonClient")
+
+    def infer(self, frame):
+        if not self.enabled:
+            return None
+        try:
+            import grpc
+            import triton_inference_pb2
+            import triton_inference_pb2_grpc
+
+            _, encoded = cv2.imencode('.jpg', frame)
+            channel = grpc.insecure_channel(self.grpc_url)
+            stub = triton_inference_pb2_grpc.InferenceServiceStub(channel)
+            req = triton_inference_pb2.InferRequest(
+                model_name="yolov8n",
+                inputs=[triton_inference_pb2.TensorInput(
+                    name="image",
+                    datatype="UINT8",
+                    shape=[1, frame.shape[0], frame.shape[1], 3],
+                    data=encoded.tobytes(),
+                )],
+            )
+            resp = stub.Infer(req, timeout=10)
+            return resp
+        except ImportError:
+            self.logger.warning("gRPC libraries not installed, falling back to local YOLO")
+        except Exception as e:
+            self.logger.error(f"Triton inference error: {e}")
+        return None
+
+
 class AIWorker:
     def __init__(self, camera_id, nats_url, sampling_rate=5):
         self.camera_id = camera_id
@@ -66,9 +101,12 @@ class AIWorker:
         self.frame_count = 0
         self.nc = NATS()
         self.facial = FacialProcessor()
-        logger.info(f"Loading YOLOv8 model for {camera_id}... (Sampling: 1/{sampling_rate})")
-        # Load model with task='detect' and use half precision if possible
-        self.model = YOLO('yolov8n.pt')
+        self.triton = TritonClient()
+        self.use_triton = os.getenv("TRITON_ENABLED", "false").lower() == "true"
+        if not self.use_triton:
+            logger.info(f"Loading YOLOv8 model for {camera_id}... (Sampling: 1/{sampling_rate})")
+            # Load model with task='detect' and use half precision if possible
+            self.model = YOLO('yolov8n.pt')
 
     async def connect(self):
         await self.nc.connect(self.nats_url)
@@ -98,9 +136,22 @@ class AIWorker:
             if frame is None:
                 return
 
-            # Perform inference
-            results = self.model(frame, verbose=False)
-            inference_time = time.time() - start_time
+            # Perform inference (via Triton gRPC if enabled, else local YOLO)
+            if self.use_triton:
+                resp = self.triton.infer(frame)
+                inference_time = time.time() - start_time
+                results = []
+                if resp:
+                    for output in resp.outputs:
+                        results.append({
+                            "label": output.name,
+                            "confidence": 0.0,
+                            "bbox": [],
+                            "inference_ms": inference_time * 1000
+                        })
+            else:
+                results = self.model(frame, verbose=False)
+                inference_time = time.time() - start_time
 
             events = []
             for r in results:

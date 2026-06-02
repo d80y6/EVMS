@@ -1,0 +1,85 @@
+{{- if .Values.services.tritonInference.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-inference
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: triton-inference
+spec:
+  replicas: {{ .Values.services.tritonInference.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: triton-inference
+  template:
+    metadata:
+      labels:
+        app: triton-inference
+    spec:
+      containers:
+      - name: triton-inference
+        image: {{ include "evms.image" (dict "image" .Values.services.tritonInference.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.tritonInference.httpPort }}
+          name: http
+          protocol: TCP
+        - containerPort: {{ .Values.services.tritonInference.grpcPort }}
+          name: grpc
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.tritonInference.httpPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.services.tritonInference.httpPort }}
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        env:
+        - name: TRITON_URL
+          value: {{ .Values.services.tritonInference.tritonUrl | quote }}
+        - name: TRITON_HTTP_PORT
+          value: {{ .Values.services.tritonInference.httpPort | quote }}
+        - name: TRITON_GRPC_PORT
+          value: {{ .Values.services.tritonInference.grpcPort | quote }}
+        - name: TRITON_MAX_BATCH_SIZE
+          value: {{ .Values.services.tritonInference.maxBatchSize | quote }}
+        - name: TRITON_BATCH_TIMEOUT_MS
+          value: {{ .Values.services.tritonInference.batchTimeoutMs | quote }}
+        - name: TRITON_MAX_CONCURRENT_REQUESTS
+          value: {{ .Values.services.tritonInference.maxConcurrentRequests | quote }}
+        - name: TRITON_MODEL_REPO
+          value: {{ .Values.services.tritonInference.modelRepoPath | quote }}
+        - name: RUST_LOG
+          value: {{ .Values.services.tritonInference.logLevel | quote }}
+        resources:
+          {{- toYaml .Values.services.tritonInference.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-inference
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: triton-inference
+spec:
+  selector:
+    app: triton-inference
+  ports:
+  - name: http
+    port: {{ .Values.services.tritonInference.httpPort }}
+    targetPort: {{ .Values.services.tritonInference.httpPort }}
+  - name: grpc
+    port: {{ .Values.services.tritonInference.grpcPort }}
+    targetPort: {{ .Values.services.tritonInference.grpcPort }}
+{{- end }}

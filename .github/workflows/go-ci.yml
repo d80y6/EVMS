@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -57,11 +61,33 @@ jobs:
       - if: github.ref == 'refs/heads/main'
         name: Build and push Docker images
         run: |
-          for service in auth camera-mgmt recorder playback webrtc camera-control thumbnails discovery event-proc export audit pos-ingest ingest notification metadata onvif-events; do
+          for service in ai-worker api-gateway audit auth camera-control camera-mgmt discovery event-proc export ingest metadata notification onvif-events playback pos-ingest recorder thumbnails webrtc; do
             docker build -f services/$service/Dockerfile -t $REGISTRY/damvms/$service:$IMAGE_TAG -t $REGISTRY/damvms/$service:latest .
             docker push $REGISTRY/damvms/$service:$IMAGE_TAG
             docker push $REGISTRY/damvms/$service:latest
           done
+
+  triton:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Build Triton inference service
+        working-directory: apps/triton-inference-service
+        run: cargo build --release
+      - name: Run Triton tests
+        working-directory: apps/triton-inference-service
+        run: cargo test
+      - if: github.ref == 'refs/heads/main'
+        name: Build and push Triton Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: apps/triton-inference-service
+          file: apps/triton-inference-service/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/damvms/triton-inference:${{ env.IMAGE_TAG }},${{ env.REGISTRY }}/damvms/triton-inference:latest
 
   frontend:
     runs-on: ubuntu-latest

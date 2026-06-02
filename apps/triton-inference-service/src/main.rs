@@ -3,6 +3,8 @@
 //! Async GPU inference engine with dynamic batching
 
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -14,6 +16,7 @@ mod postprocess;
 mod scheduler;
 mod metrics;
 mod api;
+mod grpc;
 mod models;
 
 #[path = "lib.rs"]
@@ -52,16 +55,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()?;
 
+    // Shutdown notification for graceful shutdown coordination
+    let shutdown = Arc::new(Notify::new());
+
+    // Signal handler for graceful shutdown
+    let sig_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        tracing::info!("Shutdown signal received, starting graceful shutdown");
+        sig_shutdown.notify_one();
+    });
+
     // Create HTTP server
     let http_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.http_port));
     let http_app = api::create_router(state.clone());
-
     tracing::info!("Starting HTTP server on {}", http_addr);
 
+    let http_shutdown = shutdown.clone();
     let http_server = axum::Server::bind(&http_addr)
-        .serve(http_app.into_make_service());
+        .serve(http_app.into_make_service())
+        .with_graceful_shutdown(async move {
+            http_shutdown.notified().await;
+        });
 
-    // TODO: Add gRPC server on config.grpc_port
+    // Create gRPC server
+    let grpc_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
+    let grpc_service = crate::grpc::TritonGrpcService::new(state.clone());
+
+    let grpc_shutdown = shutdown.clone();
+    let grpc_server = tonic::transport::Server::builder()
+        .add_service(crate::grpc::InferenceServiceServer::new(grpc_service))
+        .serve_with_shutdown(grpc_addr, async move {
+            grpc_shutdown.notified().await;
+        });
+
+    tracing::info!("Starting gRPC server on {}", grpc_addr);
 
     // Start background tasks
     let state_clone = state.clone();
@@ -82,8 +115,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Run HTTP server
-    http_server.await?;
+    // Run HTTP and gRPC servers concurrently
+    tokio::select! {
+        result = http_server => {
+            if let Err(e) = result {
+                tracing::error!("HTTP server error: {}", e);
+            }
+        }
+        result = grpc_server => {
+            if let Err(e) = result {
+                tracing::error!("gRPC server error: {}", e);
+            }
+        }
+    }
+
+    // Wait for active requests to complete (max 30s)
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    tracing::info!("Triton Inference Service shutdown complete");
 
     Ok(())
 }
