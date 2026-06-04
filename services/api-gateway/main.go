@@ -730,6 +730,95 @@ func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(camera)
 }
 
+func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SiteID        string `json:"site_id"`
+		Name          string `json:"name"`
+		ConnectionURL string `json:"connection_url"`
+		SubstreamURL  string `json:"substream_url"`
+		PtzProtocol   string `json:"ptz_protocol"`
+		RetentionDays int32  `json:"retention_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.CreateCamera(ctx, &damv1.CreateCameraRequest{
+		SiteId:        req.SiteID,
+		Name:          req.Name,
+		ConnectionUrl: req.ConnectionURL,
+		SubstreamUrl:  req.SubstreamURL,
+		PtzProtocol:   req.PtzProtocol,
+		RetentionDays: req.RetentionDays,
+	})
+	if err != nil {
+		g.logger.Error("Failed to create camera", "error", err)
+		jsonError(w, "failed to create camera", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(camera)
+}
+
+func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
+	cameraID := extractParam(r.URL.Path, "/api/cameras/")
+
+	var req struct {
+		Name          string `json:"name"`
+		ConnectionURL string `json:"connection_url"`
+		SubstreamURL  string `json:"substream_url"`
+		PtzProtocol   string `json:"ptz_protocol"`
+		RetentionDays int32  `json:"retention_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.UpdateCamera(ctx, &damv1.UpdateCameraRequest{
+		Id:            cameraID,
+		Name:          req.Name,
+		ConnectionUrl: req.ConnectionURL,
+		SubstreamUrl:  req.SubstreamURL,
+		PtzProtocol:   req.PtzProtocol,
+		RetentionDays: req.RetentionDays,
+	})
+	if err != nil {
+		g.logger.Error("Failed to update camera", "error", err)
+		jsonError(w, "failed to update camera", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(camera)
+}
+
+func (g *Gateway) handleDeleteCamera(w http.ResponseWriter, r *http.Request) {
+	cameraID := extractParam(r.URL.Path, "/api/cameras/")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := g.cameraSvc.DeleteCamera(ctx, &damv1.DeleteCameraRequest{Id: cameraID})
+	if err != nil {
+		g.logger.Error("Failed to delete camera", "error", err)
+		jsonError(w, "failed to delete camera", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
 func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Request) {
 	cameraID := extractParam(r.URL.Path, "/api/cameras/")
 	cameraID = strings.TrimSuffix(cameraID, "/config")
@@ -951,6 +1040,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscovery))(w, r)
 	case strings.HasPrefix(path, "/api/onvif-events/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleOnvifEvents))(w, r)
+	case path == "/api/cameras" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleCreateCamera))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodPut:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleUpdateCamera))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodDelete:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleDeleteCamera))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
