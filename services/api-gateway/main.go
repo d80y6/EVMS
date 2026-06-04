@@ -125,6 +125,8 @@ type GatewayConfig struct {
 	AlertURL          string
 	AuditURL          string
 	POSURL            string
+	DiscoveryURL      string
+	OnvifEventsURL    string
 	DBURL              string
 	MetricsAddr        string
 	TLSEnabled         bool
@@ -141,11 +143,13 @@ func DefaultGatewayConfig() GatewayConfig {
 		WebRTCServiceURL:   common.GetEnv("WEBRTC_SERVICE_URL", "http://webrtc-service:8082"),
 		CameraControlURL:   common.GetEnv("CAMERA_CONTROL_URL", "http://camera-control:8088"),
 		ThumbnailsURL:      common.GetEnv("THUMBNAILS_URL", "http://thumbnails:8089"),
-		RecorderURL:        common.GetEnv("RECORDER_URL", "http://recorder:8087"),
-		ExportURL:          common.GetEnv("EXPORT_URL", "http://export:8094"),
+		RecorderURL:        common.GetEnv("RECORDER_URL", "http://recorder-service:8087"),
+		ExportURL:          common.GetEnv("EXPORT_URL", "http://export-service:8094"),
 		AlertURL:          common.GetEnv("ALERT_URL", "http://event-proc:8093"),
-		AuditURL:          common.GetEnv("AUDIT_URL", "http://audit:8093"),
+		AuditURL:          common.GetEnv("AUDIT_URL", "http://audit-service:8093"),
 		POSURL:            common.GetEnv("POS_URL", "http://pos-ingest:8096"),
+		DiscoveryURL:      common.GetEnv("DISCOVERY_URL", "http://discovery:8091"),
+		OnvifEventsURL:    common.GetEnv("ONVIF_EVENTS_URL", "http://onvif-events:8092"),
 		DBURL:              common.GetEnv("DB_URL", ""),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 		TLSEnabled:         common.GetEnv("TLS_ENABLED", "false") == "true",
@@ -175,6 +179,8 @@ type Gateway struct {
 	alertProxy         *httputil.ReverseProxy
 	auditProxy         *httputil.ReverseProxy
 	posProxy           *httputil.ReverseProxy
+	discoveryProxy     *httputil.ReverseProxy
+	onvifEventsProxy   *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
 	healthHandler      *common.HealthHandler
 	upstreamHealth     []upstreamHealth
@@ -225,6 +231,8 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	alertURL, _ := url.Parse(config.AlertURL)
 	auditURL, _ := url.Parse(config.AuditURL)
 	posURL, _ := url.Parse(config.POSURL)
+	discoveryURL, _ := url.Parse(config.DiscoveryURL)
+	onvifEventsURL, _ := url.Parse(config.OnvifEventsURL)
 
 	h := common.NewHealthHandler()
 	if db != nil {
@@ -247,6 +255,8 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		alertProxy:         httputil.NewSingleHostReverseProxy(alertURL),
 		auditProxy:         httputil.NewSingleHostReverseProxy(auditURL),
 		posProxy:           httputil.NewSingleHostReverseProxy(posURL),
+		discoveryProxy:     httputil.NewSingleHostReverseProxy(discoveryURL),
+		onvifEventsProxy:   httputil.NewSingleHostReverseProxy(onvifEventsURL),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 		healthHandler:      h,
 		upstreamHealth: []upstreamHealth{
@@ -262,8 +272,10 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 			{"camera-mgmt", "http://camera-mgmt:8083/health"},
 			{"metadata", "http://metadata:8089/health"},
 			{"notification", "http://notification:8090/health"},
-			{"ingest", "http://ingest:8092/health"},
+			{"ingest", "http://ingest-service:8092/health"},
 			{"pos-ingest", config.POSURL + "/health"},
+			{"discovery", config.DiscoveryURL + "/health"},
+			{"onvif-events", config.OnvifEventsURL + "/health"},
 		},
 	}, nil
 }
@@ -935,9 +947,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.posProxy.ServeHTTP(w, r)
 		}))(w, r)
+	case strings.HasPrefix(path, "/api/discovery/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscovery))(w, r)
+	case strings.HasPrefix(path, "/api/onvif-events/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleOnvifEvents))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
+}
+
+func (g *Gateway) handleDiscovery(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	g.discoveryProxy.ServeHTTP(w, r)
+}
+
+func (g *Gateway) handleOnvifEvents(w http.ResponseWriter, r *http.Request) {
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	g.onvifEventsProxy.ServeHTTP(w, r)
 }
 
 func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, logger *slog.Logger) error {
