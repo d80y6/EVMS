@@ -59,7 +59,7 @@ services:
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3000:3000"
+      - "3002:3000"
     volumes:
       - ./grafana/evms-dashboard.json:/etc/grafana/provisioning/dashboards/evms-dashboard.json
     environment:
@@ -145,7 +145,7 @@ services:
       context: ../../
       dockerfile: services/ingest/Dockerfile
     environment:
-      - CAMERA_ID=demo_cam
+      - CAMERA_ID=6c7c8708-8c2a-4651-8d74-a2c0b35f7db0
       - RTSP_URL=${DEMO_RTSP_URL:-rtsp://localhost:8554/live}
       - NATS_URL=nats://nats:4222
     volumes:
@@ -174,7 +174,7 @@ services:
       context: ../../
       dockerfile: services/ai-worker/Dockerfile
     environment:
-      - CAMERA_ID=demo_cam
+      - CAMERA_ID=6c7c8708-8c2a-4651-8d74-a2c0b35f7db0
       - NATS_URL=nats://nats:4222
       - AI_SAMPLING_RATE=5
     depends_on:
@@ -254,6 +254,8 @@ services:
       - THUMBNAILS_URL=http://thumbnails:8089
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - DISCOVERY_URL=http://discovery:8091
+      - ONVIF_EVENTS_URL=http://onvif-events:8092
     ports:
       - "8090:8090"
     depends_on:
@@ -335,6 +337,7 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - AUDIT_PORT=:8093
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     depends_on:
       nats:
         condition: service_healthy
