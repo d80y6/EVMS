@@ -108,6 +108,15 @@ export interface Bookmark {
   created_by: string;
 }
 
+export interface LegalHold {
+  id: string;
+  camera_id: string;
+  reason: string;
+  created_by: string;
+  created_at: string;
+  released_at: string | null;
+}
+
 export interface LoginResponse {
   token: string;
 }
@@ -314,4 +323,76 @@ export const api = {
     if (params.limit) q.set('limit', String(params.limit));
     return request<{ transactions: POSTransaction[] }>(`/pos/transactions?${q}`);
   },
+
+  // Storage
+  getStorageEstimates: () =>
+    request<{ estimates: { camera_id: string; camera_name: string; retention_days: number; daily_usage_gb: number; current_usage_gb: number; estimated_total_gb: number; days_remaining: number }[]; total_daily_gb: number; total_storage_gb: number }>('/storage/estimates'),
+
+  // Camera CRUD
+  createCamera: (data: { site_id: string; name: string; connection_url: string; substream_url?: string; ptz_protocol?: string; retention_days?: number }) =>
+    request<Camera>('/cameras', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  updateCamera: (id: string, data: Partial<{ name: string; connection_url: string; substream_url: string; ptz_protocol: string; retention_days: number }>) =>
+    request<Camera>(`/cameras/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  deleteCamera: (id: string) =>
+    request<{ status: string }>(`/cameras/${id}`, {
+      method: 'DELETE',
+    }),
+
+  // Legal Holds
+  getLegalHolds: () =>
+    request<{ legal_holds: LegalHold[] }>('/legal-holds'),
+
+  createLegalHold: (data: { camera_id: string; reason: string; created_by: string }) =>
+    request<{ id: string; status: string }>('/legal-holds', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  releaseLegalHold: (id: string) =>
+    request<{ status: string }>(`/legal-holds/${id}/release`, { method: 'POST' }),
+
+  // Audit
+  getAuditChain: () =>
+    request<{ entries: { id: string; action: string; actor: string; timestamp: string; hash: string; previous_hash: string }[] }>('/audit/chain'),
+
+  verifyAudit: () =>
+    request<{ valid: boolean; count: number; first_hash: string; last_hash: string }>('/audit/verify'),
+
+  // Rules
+  getRules: () =>
+    request<{ rules: { id: string; name: string; enabled: boolean; camera_id: string; condition: string; action: string; created_at: string }[] }>('/rules'),
+
+  toggleRule: (id: string, enabled: boolean) =>
+    request<{ status: string }>(`/rules/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // Discovery
+  scanDiscovery: () =>
+    request<{ status: string }>('/discovery/scan', { method: 'POST' }),
+
+  getDiscoveryResults: () =>
+    request<{ devices: { url: string; manufacturer: string; model: string; firmware_version: string; scopes: string[] }[] }>('/discovery/results'),
+
+  // ONVIF Events
+  subscribeOnvifEvents: (cameraId: string, onvifDeviceUrl: string) =>
+    request<{ id: string; status: string }>('/onvif-events/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: cameraId, onvif_device_url: onvifDeviceUrl }),
+    }),
+
+  unsubscribeOnvifEvents: (cameraId: string) =>
+    request<{ status: string }>(`/onvif-events/subscribe/${cameraId}`, { method: 'DELETE' }),
+
+  listOnvifSubscriptions: () =>
+    request<{ subscriptions: { id: string; camera_id: string; onvif_device_url: string; created_at: string }[] }>('/onvif-events/subscriptions'),
 };
