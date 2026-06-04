@@ -25,6 +25,7 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [layout, setLayout] = useState<LayoutMode>('3x3');
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [error, setError] = useState<string | null>(null);
   const [heatmapEnabled, setHeatmapEnabled] = useState(false);
   const [heatmapData, setHeatmapData] = useState<Record<string, HeatmapCell[]>>({});
   const [searchParams] = useSearchParams();
@@ -38,7 +39,8 @@ export default function Dashboard() {
         }
         setIsLoading(false);
       })
-      .catch(() => {
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to load cameras');
         setIsLoading(false);
       });
 
@@ -48,7 +50,9 @@ export default function Dashboard() {
         const m: Record<string, number> = {};
         data.counts.forEach(c => { m[c.camera_id] = (m[c.camera_id] || 0) + c.count; });
         setCounts(m);
-      } catch {}
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load counts');
+      }
     };
     loadCounts();
     const interval = setInterval(loadCounts, 60000);
@@ -72,15 +76,13 @@ export default function Dashboard() {
     ? cameras.filter((c) => c.site_id === selectedSite)
     : cameras;
 
-  const displayCameras = filteredCameras.length > 0 ? filteredCameras : cameras;
-
   useEffect(() => {
-    if (heatmapEnabled && displayCameras.length > 0) {
-      fetchHeatmaps(displayCameras);
+    if (heatmapEnabled && filteredCameras.length > 0) {
+      fetchHeatmaps(filteredCameras);
     } else {
       setHeatmapData({});
     }
-  }, [heatmapEnabled, displayCameras, fetchHeatmaps]);
+  }, [heatmapEnabled, filteredCameras, fetchHeatmaps]);
 
   return (
     <>
@@ -121,52 +123,64 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="-mx-2">
-        <VirtuosoGrid
-          totalCount={displayCameras.length}
-          overscan={200}
-          itemContent={(index) => {
-            const cam = displayCameras[index];
-            const cells = heatmapData[cam.id];
-            const maxCount = cells ? Math.max(...cells.map(c => c.count), 1) : 0;
-            return (
-              <div className="px-2 pb-4">
-                <div className="relative">
-                  {counts[cam.id] !== undefined && (
-                    <span className="absolute top-2 right-2 z-10 text-xs bg-blue-700 px-1.5 py-0.5 rounded-full">
-                      👤 {counts[cam.id]}
-                    </span>
-                  )}
-                  <CameraCard
-                    cameraId={cam.id}
-                    name={cam.name}
-                    status={cam.status}
-                    ptzProtocol={cam.ptz_protocol}
-                  />
-                  {heatmapEnabled && cells && cells.length > 0 && (
-                    <div className="absolute inset-0 z-20 pointer-events-none">
-                      {cells.map((cell) => (
-                        <div
-                          key={`${cell.x}-${cell.y}`}
-                          style={{
-                            position: 'absolute',
-                            left: `${cell.x * 5}%`,
-                            top: `${cell.y * 5}%`,
-                            width: '5%',
-                            height: '5%',
-                            backgroundColor: `rgba(255, 0, 0, ${cell.count / maxCount})`,
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
+      {error ? (
+        <div className="p-4 text-red-400">Error: {error}</div>
+      ) : filteredCameras.length === 0 ? (
+        <div className="text-center py-16">
+          <p className="text-slate-500">
+            {cameras.length === 0
+              ? 'No cameras configured. Add one from the Cameras page.'
+              : 'No cameras match the selected site.'}
+          </p>
+        </div>
+      ) : (
+        <div className="-mx-2">
+          <VirtuosoGrid
+            totalCount={filteredCameras.length}
+            overscan={200}
+            itemContent={(index) => {
+              const cam = filteredCameras[index];
+              const cells = heatmapData[cam.id];
+              const maxCount = cells ? Math.max(...cells.map(c => c.count), 1) : 0;
+              return (
+                <div className="px-2 pb-4">
+                  <div className="relative">
+                    {counts[cam.id] !== undefined && (
+                      <span className="absolute top-2 right-2 z-10 text-xs bg-blue-700 px-1.5 py-0.5 rounded-full">
+                        👤 {counts[cam.id]}
+                      </span>
+                    )}
+                    <CameraCard
+                      cameraId={cam.id}
+                      name={cam.name}
+                      status={cam.status}
+                      ptzProtocol={cam.ptz_protocol}
+                    />
+                    {heatmapEnabled && cells && cells.length > 0 && (
+                      <div className="absolute inset-0 z-20 pointer-events-none">
+                        {cells.map((cell) => (
+                          <div
+                            key={`${cell.x}-${cell.y}`}
+                            style={{
+                              position: 'absolute',
+                              left: `${cell.x * 5}%`,
+                              top: `${cell.y * 5}%`,
+                              width: '5%',
+                              height: '5%',
+                              backgroundColor: `rgba(255, 0, 0, ${cell.count / maxCount})`,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          }}
-          listClassName={`grid ${LAYOUT_COLS[layout]} gap-0`}
-        />
-      </div>
+              );
+            }}
+            listClassName={`grid ${LAYOUT_COLS[layout]} gap-0`}
+          />
+        </div>
+      )}
     </>
   );
 }
