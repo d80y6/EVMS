@@ -12,6 +12,8 @@ export default function SettingsPage() {
   const [showTourDialog, setShowTourDialog] = useState(false);
   const [tourName, setTourName] = useState('');
   const [tourInterval, setTourInterval] = useState(10);
+  const [hotWarmDays, setHotWarmDays] = useState(7);
+  const [warmColdDays, setWarmColdDays] = useState(30);
   const [tourSteps, setTourSteps] = useState<TourStep[]>([{ camera_id: '', preset_token: '', dwell_seconds: 5 }]);
   const [floorPlanImage, setFloorPlanImage] = useState<string | null>(null);
   const [floorPlanSiteId, setFloorPlanSiteId] = useState<string>('default');
@@ -188,12 +190,12 @@ export default function SettingsPage() {
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="text-xs text-slate-500 block mb-1">Hot→Warm after (days)</label>
-            <input type="number" defaultValue={7} min={1} max={90}
+            <input type="number" value={hotWarmDays} onChange={e => setHotWarmDays(parseInt(e.target.value) || 7)} min={1} max={90}
                    className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
           </div>
           <div>
             <label className="text-xs text-slate-500 block mb-1">Warm→Cold after (days)</label>
-            <input type="number" defaultValue={30} min={1} max={365}
+            <input type="number" value={warmColdDays} onChange={e => setWarmColdDays(parseInt(e.target.value) || 30)} min={1} max={365}
                    className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
           </div>
         </div>
@@ -206,7 +208,19 @@ export default function SettingsPage() {
           <p className="text-xs text-slate-600">No ONVIF cameras configured.</p>
         )}
         {cameras.filter(c => c.ptz_protocol === 'onvif').map(cam => (
-          <div key={cam.id} className="text-sm text-slate-300">Relays for {cam.name} — use camera's ONVIF interface.</div>
+          <div key={cam.id} className="space-y-2">
+            <div className="text-sm text-slate-300">Relays for {cam.name}</div>
+            <div className="flex gap-2">
+              <button onClick={() => api.setRelayState(cam.id, '1', true)}
+                className="text-xs px-3 py-1 bg-green-700 hover:bg-green-600 text-white rounded transition-colors">Relay 1 ON</button>
+              <button onClick={() => api.setRelayState(cam.id, '1', false)}
+                className="text-xs px-3 py-1 bg-red-700 hover:bg-red-600 text-white rounded transition-colors">Relay 1 OFF</button>
+              <button onClick={() => api.setRelayState(cam.id, '2', true)}
+                className="text-xs px-3 py-1 bg-green-700 hover:bg-green-600 text-white rounded transition-colors">Relay 2 ON</button>
+              <button onClick={() => api.setRelayState(cam.id, '2', false)}
+                className="text-xs px-3 py-1 bg-red-700 hover:bg-red-600 text-white rounded transition-colors">Relay 2 OFF</button>
+            </div>
+          </div>
         ))}
       </div>
 
@@ -358,7 +372,7 @@ export default function SettingsPage() {
             imageUrl={floorPlanImage}
             cameras={cameras.filter(c => c.site_id === floorPlanSiteId)}
             siteId={floorPlanSiteId}
-            onCameraClick={(id) => console.log('Camera clicked:', id)}
+            onCameraClick={(_id) => {}}
           />
         )}
 

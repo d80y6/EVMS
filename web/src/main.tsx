@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import Layout from './components/Layout';
@@ -14,6 +14,16 @@ import SearchPage from './pages/SearchPage';
 import MapPage from './pages/MapPage';
 import HealthPage from './pages/HealthPage';
 import StoragePage from './pages/StoragePage';
+import CamerasPage from './pages/CamerasPage';
+import { LegalHoldPage } from './pages/LegalHoldPage';
+import BookmarksPage from './pages/BookmarksPage';
+import ExportPage from './pages/ExportPage';
+import AlertsPage from './pages/AlertsPage';
+import AnalyticsPage from './pages/AnalyticsPage';
+import AuditPage from './pages/AuditPage';
+import POSPage from './pages/POSPage';
+import DiscoveryPage from './pages/DiscoveryPage';
+import OnvifEventsPage from './pages/OnvifEventsPage';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -112,6 +122,17 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               </ProtectedRoute>
             }
           />
+          <Route path="/cameras" element={<ProtectedRoute><Layout><CamerasPage /></Layout></ProtectedRoute>} />
+          <Route path="/legal-holds" element={<ProtectedRoute><Layout><LegalHoldPage /></Layout></ProtectedRoute>} />
+          <Route path="/bookmarks" element={<ProtectedRoute><Layout><BookmarksPage /></Layout></ProtectedRoute>} />
+          <Route path="/export" element={<ProtectedRoute><Layout><ExportPage /></Layout></ProtectedRoute>} />
+          <Route path="/alerts" element={<ProtectedRoute><Layout><AlertsPage /></Layout></ProtectedRoute>} />
+          <Route path="/analytics" element={<ProtectedRoute><Layout><AnalyticsPage /></Layout></ProtectedRoute>} />
+          <Route path="/audit" element={<ProtectedRoute><Layout><AuditPage /></Layout></ProtectedRoute>} />
+          <Route path="/pos" element={<ProtectedRoute><Layout><POSPage /></Layout></ProtectedRoute>} />
+          <Route path="/discovery" element={<ProtectedRoute><Layout><DiscoveryPage /></Layout></ProtectedRoute>} />
+          <Route path="/onvif-events" element={<ProtectedRoute><Layout><OnvifEventsPage /></Layout></ProtectedRoute>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

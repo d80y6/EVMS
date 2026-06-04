@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiClient } from '../api/client'
+import { api } from '../api/client'
 
 interface StorageEstimate {
   camera_id: string
@@ -15,15 +15,16 @@ export default function StoragePage() {
   const [estimates, setEstimates] = useState<StorageEstimate[]>([])
   const [totals, setTotals] = useState({ total_daily_gb: 0, total_storage_gb: 0 })
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    apiClient.fetch('/api/storage/estimates')
-      .then(r => r.json())
+    api.getStorageEstimates()
       .then(data => {
         setEstimates(data.estimates || [])
         setTotals({ total_daily_gb: data.total_daily_gb, total_storage_gb: data.total_storage_gb })
+        setError(null)
       })
-      .catch(() => {})
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
       .finally(() => setLoading(false))
   }, [])
 
@@ -50,6 +51,8 @@ export default function StoragePage() {
         </div>
       </div>
 
+      {error && <div className="bg-red-900/20 border border-red-800 rounded-xl p-4 mb-4"><p className="text-sm text-red-400">{error}</p></div>}
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -63,16 +66,20 @@ export default function StoragePage() {
             </tr>
           </thead>
           <tbody>
-            {estimates.map(e => (
-              <tr key={e.camera_id} className="border-b border-slate-800 hover:bg-slate-800/50">
-                <td className="p-2 text-white">{e.camera_name}</td>
-                <td className="p-2 text-right text-slate-300">{e.retention_days}d</td>
-                <td className="p-2 text-right text-slate-300">{e.daily_usage_gb.toFixed(1)} GB</td>
-                <td className="p-2 text-right text-slate-300">{e.current_usage_gb.toFixed(1)} GB</td>
-                <td className="p-2 text-right text-slate-300">{e.estimated_total_gb.toFixed(1)} GB</td>
-                <td className="p-2 text-right text-slate-300">{e.days_remaining.toFixed(0)}d</td>
-              </tr>
-            ))}
+            {estimates.length === 0 ? (
+              <tr><td colSpan={6} className="p-4 text-center text-slate-500 text-sm">No storage estimates available.</td></tr>
+            ) : (
+              estimates.map(e => (
+                <tr key={e.camera_id} className="border-b border-slate-800 hover:bg-slate-800/50">
+                  <td className="p-2 text-white">{e.camera_name}</td>
+                  <td className="p-2 text-right text-slate-300">{e.retention_days}d</td>
+                  <td className="p-2 text-right text-slate-300">{e.daily_usage_gb.toFixed(1)} GB</td>
+                  <td className="p-2 text-right text-slate-300">{e.current_usage_gb.toFixed(1)} GB</td>
+                  <td className="p-2 text-right text-slate-300">{e.estimated_total_gb.toFixed(1)} GB</td>
+                  <td className="p-2 text-right text-slate-300">{e.days_remaining.toFixed(0)}d</td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

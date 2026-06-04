@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { api, Camera, Recording, type POSTransaction } from '../api/client';
+import { api, Camera, Recording, AIEvent, type POSTransaction } from '../api/client';
 import TimelineScrubber from '../components/TimelineScrubber';
 import SyncPlaybackView from '../components/SyncPlaybackView';
 import { useSyncPlayback } from '../hooks/useSyncPlayback';
@@ -10,6 +10,7 @@ export default function RecordingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<string>('');
+  const [events, setEvents] = useState<AIEvent[]>([]);
   const [playingUrl, setPlayingUrl] = useState<string | null>(null);
   const [selectedCameras, setSelectedCameras] = useState<string[]>([]);
   const sync = useSyncPlayback();
@@ -42,10 +43,12 @@ export default function RecordingsPage() {
     Promise.all([
       api.getRecordings(),
       api.listCameras(),
+      api.getEvents(),
     ])
-      .then(([recData, camData]) => {
+      .then(([recData, camData, evData]) => {
         setRecordings(recData.recordings);
         setCameras(camData);
+        setEvents(evData.events);
         if (camData.length > 0 && !selectedCamera) {
           setSelectedCamera(camData[0].id);
         }
@@ -208,6 +211,7 @@ export default function RecordingsPage() {
 
         {posOverlay && currentTx && (
           <div className="absolute top-4 right-4 bg-slate-900/95 border border-slate-700 rounded-xl p-4 shadow-2xl backdrop-blur-sm w-72 z-50">
+            <button onClick={() => setPosOverlay(false)} className="absolute top-2 right-2 text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
             <div className="text-sm font-semibold text-slate-200 mb-2">
               POS Transaction
             </div>
@@ -259,7 +263,7 @@ export default function RecordingsPage() {
       <TimelineScrubber
         cameraId={selectedCamera}
         onSeek={handleSeek}
-        events={[]}
+        events={events.map(e => ({ timestamp: e.event_time, type: e.object_type }))}
       />
 
       <div className="flex items-center gap-3">

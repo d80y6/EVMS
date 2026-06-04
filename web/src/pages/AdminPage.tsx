@@ -19,6 +19,10 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'viewer' });
+  const [sites, setSites] = useState<{ id: string; name: string; location: string }[]>([]);
+  const [showSiteDialog, setShowSiteDialog] = useState(false);
+  const [siteName, setSiteName] = useState('');
+  const [siteLocation, setSiteLocation] = useState('');
 
   const fetchUsers = () => {
     setIsLoading(true);
@@ -30,6 +34,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     fetchUsers();
+    api.getSites().then(d => setSites(d.sites || [])).catch(() => {});
   }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -216,6 +221,43 @@ export default function AdminPage() {
       )}
 
       {tab === 'legal-holds' && <LegalHoldPage />}
+
+      {/* Sites Section */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium text-slate-400">Sites</h3>
+          <button onClick={() => setShowSiteDialog(true)}
+            className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors">+ Add Site</button>
+        </div>
+        {sites.length === 0 && <p className="text-sm text-slate-500">No sites configured.</p>}
+        {sites.map(s => (
+          <div key={s.id} className="flex items-center justify-between bg-slate-800 rounded-lg p-3">
+            <div><span className="text-sm text-slate-300">{s.name}</span><span className="text-xs text-slate-600 ml-2">{s.location}</span></div>
+          </div>
+        ))}
+        {showSiteDialog && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-md space-y-4">
+              <h4 className="text-sm font-medium text-slate-300">Add Site</h4>
+              <input type="text" placeholder="Site name" value={siteName} onChange={e => setSiteName(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
+              <input type="text" placeholder="Location" value={siteLocation} onChange={e => setSiteLocation(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowSiteDialog(false)}
+                  className="text-xs px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors">Cancel</button>
+                <button onClick={async () => {
+                  if (!siteName) return;
+                  await api.createSite(siteName, siteLocation);
+                  setSites(prev => [...prev, { id: '', name: siteName, location: siteLocation }]);
+                  setShowSiteDialog(false); setSiteName(''); setSiteLocation('');
+                }} disabled={!siteName}
+                  className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white rounded transition-colors">Create</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

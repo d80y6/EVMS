@@ -32,6 +32,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const { logout, role, username } = useAuth();
   const [sites, setSites] = useState<SiteItem[]>([]);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [showCamerasSub, setShowCamerasSub] = useState(false);
+  const [showMonitoringSub, setShowMonitoringSub] = useState(false);
   const selectedSite = searchParams.get('site') || '';
 
   useEffect(() => {
@@ -82,6 +84,57 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </NavLink>
               ))}
           </nav>
+
+          <div className="flex flex-col gap-1 px-4 pb-2 border-b border-slate-800">
+            <button onClick={() => setShowCamerasSub(!showCamerasSub)}
+              className="flex items-center gap-3 px-4 py-2 rounded-md text-sm font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition-colors">
+              <span className="w-5 text-center text-xs">{showCamerasSub ? '▾' : '▸'}</span>
+              Cameras & Retention
+            </button>
+            {showCamerasSub && (
+              <div className="flex flex-col gap-0.5 ml-4">
+                <NavLink to="/cameras" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">📷</span>Cameras
+                </NavLink>
+                <NavLink to="/legal-holds" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">⚖</span>Legal Holds
+                </NavLink>
+                <NavLink to="/discovery" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🔍</span>Discovery
+                </NavLink>
+                <NavLink to="/onvif-events" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🔔</span>ONVIF Events
+                </NavLink>
+                <NavLink to="/bookmarks" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🔖</span>Bookmarks
+                </NavLink>
+                <NavLink to="/export" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">📤</span>Export
+                </NavLink>
+              </div>
+            )}
+            <button onClick={() => setShowMonitoringSub(!showMonitoringSub)}
+              className="flex items-center gap-3 px-4 py-2 rounded-md text-sm font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition-colors">
+              <span className="w-5 text-center text-xs">{showMonitoringSub ? '▾' : '▸'}</span>
+              Monitoring
+            </button>
+            {showMonitoringSub && (
+              <div className="flex flex-col gap-0.5 ml-4">
+                <NavLink to="/alerts" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">⚠</span>Alerts & Rules
+                </NavLink>
+                <NavLink to="/analytics" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">📊</span>Analytics
+                </NavLink>
+                <NavLink to="/audit" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">📋</span>Audit Chain
+                </NavLink>
+                <NavLink to="/pos" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🛒</span>POS Transactions
+                </NavLink>
+              </div>
+            )}
+          </div>
 
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
             <h3 className="text-[10px] uppercase tracking-widest text-slate-600 px-2 pb-2 font-medium">Sites</h3>

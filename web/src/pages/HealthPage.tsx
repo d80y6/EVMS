@@ -49,6 +49,10 @@ export default function HealthPage() {
     }
   };
 
+  if (!health && !error) {
+    return <div className="p-4 text-slate-400">Loading system health...</div>;
+  }
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-6">

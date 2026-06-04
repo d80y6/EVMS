@@ -35,6 +35,7 @@ export default function SearchPage() {
   const [total, setTotal] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [region, setRegion] = useState<{x1: number; y1: number; x2: number; y2: number} | null>(null);
   const drawingRef = useRef(false);
@@ -77,13 +78,10 @@ export default function SearchPage() {
     e.preventDefault();
     setIsSearching(true);
     setHasSearched(true);
+    setError(null);
     try {
-      const params: Record<string, unknown> = {};
-      if (cameraId) params.camera_id = cameraId;
-      if (objectType && objectType !== 'face') params.object_type = objectType;
-      if (plateText) params.metadata = JSON.stringify({ plate: plateText });
       if (objectType === 'face') {
-        const faceParams: any = { limit: 100 };
+        const faceParams: { camera_id?: string; name?: string; start_time?: string; end_time?: string; limit?: number } = { limit: 100 };
         if (cameraId) faceParams.camera_id = cameraId;
         if (faceName) faceParams.name = faceName;
         if (startTime) faceParams.start_time = new Date(startTime).toISOString();
@@ -94,16 +92,21 @@ export default function SearchPage() {
         setResults([]);
         return;
       }
+      const params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number; bounding_box?: string; metadata?: string } = {};
+      if (cameraId) params.camera_id = cameraId;
+      if (objectType && objectType !== 'face') params.object_type = objectType;
+      if (plateText) params.metadata = JSON.stringify({ plate: plateText });
       if (minConfidence > 0) params.min_confidence = minConfidence;
       if (startTime) params.start_time = new Date(startTime).toISOString();
       if (endTime) params.end_time = new Date(endTime).toISOString();
       if (region) params.bounding_box = `${region.x1},${region.y1},${region.x2},${region.y2}`;
       params.limit = 100;
 
-      const data = await api.smartSearch(params as any);
+      const data = await api.smartSearch(params);
       setResults(data.results);
       setTotal(data.total);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed');
       setResults([]);
       setTotal(0);
     } finally {
@@ -264,6 +267,8 @@ export default function SearchPage() {
           )}
         </div>
       </form>
+
+      {error && <div className="bg-red-900/20 border border-red-800 rounded-xl p-4"><p className="text-sm text-red-400">{error}</p></div>}
 
       {hasSearched && results.length === 0 && faceResults.length === 0 && (
         <div className="flex items-center justify-center h-32">
