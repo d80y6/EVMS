@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -132,8 +133,12 @@ func probeONVIFDevice(ctx context.Context, addr string, timeout time.Duration) *
 
 	client := onvif.NewSOAPClient(timeout, nil)
 
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+
 	result := &ScanResult{
-		IP:           addr,
+		IP:           host,
+		Port:         port,
 		XAddr:        deviceURL,
 		Capabilities: make(CapabilitySet),
 	}
