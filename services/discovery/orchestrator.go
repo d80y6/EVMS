@@ -18,15 +18,27 @@ type ScanRequest struct {
 	CreatedBy *uuid.UUID
 }
 
+type Store interface {
+	CreateScan(ctx context.Context, scan *ScanRecord) error
+	UpdateScanStatus(ctx context.Context, id uuid.UUID, status string, totalFound int, errMsg *string) error
+	GetScan(ctx context.Context, id uuid.UUID) (*ScanRecord, error)
+	GetScans(ctx context.Context, siteID *uuid.UUID, page, perPage int) ([]ScanRecord, int, error)
+	InsertResult(ctx context.Context, result *ResultRecord) error
+	GetResults(ctx context.Context, scanID uuid.UUID, page, perPage int, queryFilter string) ([]ResultRecord, int, error)
+	MarkImported(ctx context.Context, resultIDs []uuid.UUID) error
+	CheckAlreadyInDB(ctx context.Context, xaddr string) (bool, error)
+	Close() error
+}
+
 type ScanOrchestrator struct {
-	store       *ResultStore
+	store       Store
 	scanners    map[string]Scanner
 	logger      *slog.Logger
 	activeMu    sync.Mutex
 	activeScans map[uuid.UUID]context.CancelFunc
 }
 
-func NewScanOrchestrator(store *ResultStore, scanners map[string]Scanner, logger *slog.Logger) *ScanOrchestrator {
+func NewScanOrchestrator(store Store, scanners map[string]Scanner, logger *slog.Logger) *ScanOrchestrator {
 	return &ScanOrchestrator{
 		store:       store,
 		scanners:    scanners,
