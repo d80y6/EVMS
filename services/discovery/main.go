@@ -63,6 +63,7 @@ type DiscoveryService struct {
 	db            *sqlx.DB
 	store         *ResultStore
 	orchestrator  *ScanOrchestrator
+	scheduler     *Scheduler
 	scanners      map[string]Scanner
 	mu            sync.RWMutex
 	results       []discoveredCamera
@@ -108,6 +109,7 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 				"manual":       NewManualIPScanner(logger),
 			}
 			s.orchestrator = NewScanOrchestrator(s.store, s.scanners, logger)
+			s.scheduler = NewScheduler(s.db, s.orchestrator, logger)
 			s.healthHandler.AddDBChecker(db.DB, "postgres")
 			logger.Info("Connected to database")
 		}
@@ -149,6 +151,10 @@ func (s *DiscoveryService) Start() error {
 			s.logger.Error("Discovery server error", "error", err)
 		}
 	}()
+
+	if s.scheduler != nil {
+		go s.scheduler.Start(context.Background())
+	}
 
 	return nil
 }
