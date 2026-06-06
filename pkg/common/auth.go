@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"google.golang.org/grpc/encoding"
 	_ "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/metadata"
@@ -24,6 +25,7 @@ const (
 	TenantKey contextKey = "tenant_id"
 	UserKey   contextKey = "username"
 	RoleKey   contextKey = "role"
+	UserIDKey contextKey = "user_id"
 )
 
 func TenantFromContext(ctx context.Context) string {
@@ -50,6 +52,13 @@ func RoleFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+func GetUserIDFromContext(ctx context.Context) (uuid.UUID, error) {
+	if v, ok := ctx.Value(UserIDKey).(uuid.UUID); ok {
+		return v, nil
+	}
+	return uuid.Nil, errors.New("user id not found in context")
 }
 
 var (

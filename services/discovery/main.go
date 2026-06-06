@@ -61,6 +61,9 @@ type DiscoveryService struct {
 	config        *DiscoveryConfig
 	logger        *slog.Logger
 	db            *sqlx.DB
+	store         *ResultStore
+	orchestrator  *ScanOrchestrator
+	scanners      map[string]Scanner
 	mu            sync.RWMutex
 	results       []discoveredCamera
 	scanning      bool
@@ -97,6 +100,14 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 			logger.Warn("Failed to connect to database, proceeding without it", "error", err)
 		} else {
 			s.db = db
+			s.store = NewResultStore(s.db, logger)
+			s.scanners = map[string]Scanner{
+				"ws-discovery": NewWSDiscoveryScanner(logger),
+				"ip-range":     NewIPRangeScanner(logger),
+				"mdns":         NewMDNSScanner(logger),
+				"manual":       NewManualIPScanner(logger),
+			}
+			s.orchestrator = NewScanOrchestrator(s.store, s.scanners, logger)
 			s.healthHandler.AddDBChecker(db.DB, "postgres")
 			logger.Info("Connected to database")
 		}
@@ -107,9 +118,23 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 
 func (s *DiscoveryService) Start() error {
 	mux := http.NewServeMux()
-	mux.Handle("/discovery/scan", common.JWTAuthMiddleware(s.handleScan))
-	mux.Handle("/discovery/results", common.JWTAuthMiddleware(s.handleResults))
-	mux.Handle("/discovery/status", common.JWTAuthMiddleware(s.handleStatus))
+	scanHandler := NewScanHandler(s.orchestrator, s.store, s.logger)
+
+	mux.HandleFunc("/discovery/scans", common.JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			scanHandler.handleCreateScan(w, r)
+		case http.MethodGet:
+			scanHandler.handleListScans(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/discovery/scans/{id}", common.JWTAuthMiddleware(scanHandler.handleGetScan))
+	mux.HandleFunc("/discovery/scans/{id}/cancel", common.JWTAuthMiddleware(scanHandler.handleCancelScan))
+	mux.HandleFunc("/discovery/scans/{id}/results", common.JWTAuthMiddleware(scanHandler.handleGetResults))
+	mux.HandleFunc("/discovery/scans/{id}/import", common.JWTAuthMiddleware(scanHandler.handleImport))
+	mux.HandleFunc("/discovery/credentials/test", common.JWTAuthMiddleware(scanHandler.handleTestCredentials))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
