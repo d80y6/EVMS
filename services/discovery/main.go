@@ -29,7 +29,6 @@ type DiscoveryConfig struct {
 	MetricsPort     string
 	NATSURL         string
 	DBURL           string
-	DB              *sqlx.DB
 	ScanTimeout     time.Duration
 	GracefulTimeout time.Duration
 }
@@ -105,6 +104,7 @@ type scanStatus struct {
 type DiscoveryService struct {
 	config        *DiscoveryConfig
 	logger        *slog.Logger
+	db            *sqlx.DB
 	mu            sync.RWMutex
 	results       []discoveredCamera
 	scanning      bool
@@ -140,7 +140,7 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 		if err != nil {
 			logger.Warn("Failed to connect to database, proceeding without it", "error", err)
 		} else {
-			config.DB = db
+			s.db = db
 			s.healthHandler.AddDBChecker(db.DB, "postgres")
 			logger.Info("Connected to database")
 		}
@@ -181,8 +181,8 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 	if s.natsConn != nil {
 		s.natsConn.Close()
 	}
-	if s.config.DB != nil {
-		if err := s.config.DB.Close(); err != nil {
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
 			return fmt.Errorf("failed to close database: %w", err)
 		}
 	}
