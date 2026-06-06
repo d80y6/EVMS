@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,15 +15,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dam-vms/dam/pkg/common"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+
+	"github.com/dam-vms/dam/pkg/common"
+	"github.com/dam-vms/dam/pkg/onvif"
 )
 
 type DiscoveryConfig struct {
 	Port            string
 	MetricsPort     string
 	NATSURL         string
+	DBURL           string
+	DB              *sqlx.DB
 	ScanTimeout     time.Duration
 	GracefulTimeout time.Duration
 }
@@ -34,18 +39,22 @@ func DefaultDiscoveryConfig() *DiscoveryConfig {
 		Port:            common.GetEnv("DISCOVERY_PORT", ":8091"),
 		MetricsPort:     common.GetEnv("METRICS_ADDR", ":2112"),
 		NATSURL:         os.Getenv("DISCOVERY_NATS_URL"),
+		DBURL:           os.Getenv("DB_URL"),
 		ScanTimeout:     5 * time.Second,
 		GracefulTimeout: 30 * time.Second,
 	}
 }
 
 type discoveredCamera struct {
-	Address      string `json:"address"`
-	Manufacturer string `json:"manufacturer"`
-	Model        string `json:"model"`
-	Firmware     string `json:"firmware"`
-	XAddrs       string `json:"xaddrs"`
-	Scopes       string `json:"scopes"`
+	Address      string   `json:"url"`
+	Manufacturer string   `json:"manufacturer"`
+	Model        string   `json:"model"`
+	Firmware     string   `json:"firmware_version"`
+	SerialNumber string   `json:"serial_number"`
+	Hostname     string   `json:"hostname"`
+	Capabilities []string `json:"capabilities"`
+	XAddrs       string   `json:"xaddrs"`
+	Scopes       string   `json:"scopes"`
 }
 
 type probeEnvelope struct {
@@ -87,19 +96,10 @@ type probeMatchItem struct {
 	Scopes string `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery Scopes"`
 }
 
-type deviceInfoEnvelope struct {
-	XMLName xml.Name       `xml:"http://www.w3.org/2003/05/soap-envelope Envelope"`
-	Body    deviceInfoBody `xml:"http://www.w3.org/2003/05/soap-envelope Body"`
-}
-
-type deviceInfoBody struct {
-	Response deviceInfoResponse `xml:"http://www.onvif.org/ver10/device/wsdl GetDeviceInformationResponse"`
-}
-
-type deviceInfoResponse struct {
-	Manufacturer    string `xml:"http://www.onvif.org/ver10/device/wsdl Manufacturer"`
-	Model           string `xml:"http://www.onvif.org/ver10/device/wsdl Model"`
-	FirmwareVersion string `xml:"http://www.onvif.org/ver10/device/wsdl FirmwareVersion"`
+type scanStatus struct {
+	Scanning bool   `json:"scanning"`
+	Count    int    `json:"count"`
+	Error    string `json:"error,omitempty"`
 }
 
 type DiscoveryService struct {
@@ -107,6 +107,8 @@ type DiscoveryService struct {
 	logger        *slog.Logger
 	mu            sync.RWMutex
 	results       []discoveredCamera
+	scanning      bool
+	scanError     string
 	natsConn      *nats.Conn
 	server        *http.Server
 	healthHandler *common.HealthHandler
@@ -132,6 +134,18 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 
 	s.healthHandler.AddNATSChecker(s.natsConn, "nats")
 
+	if config.DBURL != "" {
+		cb := common.NewDBCircuitBreaker("discovery")
+		db, err := common.ConnectDBWithCircuitBreaker(context.Background(), "postgres", config.DBURL, cb)
+		if err != nil {
+			logger.Warn("Failed to connect to database, proceeding without it", "error", err)
+		} else {
+			config.DB = db
+			s.healthHandler.AddDBChecker(db.DB, "postgres")
+			logger.Info("Connected to database")
+		}
+	}
+
 	return s, nil
 }
 
@@ -139,6 +153,7 @@ func (s *DiscoveryService) Start() error {
 	mux := http.NewServeMux()
 	mux.Handle("/discovery/scan", common.JWTAuthMiddleware(s.handleScan))
 	mux.Handle("/discovery/results", common.JWTAuthMiddleware(s.handleResults))
+	mux.Handle("/discovery/status", common.JWTAuthMiddleware(s.handleStatus))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
@@ -165,6 +180,11 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 	}
 	if s.natsConn != nil {
 		s.natsConn.Close()
+	}
+	if s.config.DB != nil {
+		if err := s.config.DB.Close(); err != nil {
+			return fmt.Errorf("failed to close database: %w", err)
+		}
 	}
 	return nil
 }
@@ -248,66 +268,60 @@ func (s *DiscoveryService) sendProbe(ctx context.Context) ([]discoveredCamera, e
 			}
 			seen[match.XAddrs] = true
 
-			man, model, fw := "", "", ""
 			addrList := bytes.Fields([]byte(match.XAddrs))
-			if len(addrList) > 0 {
-				deviceURL := string(addrList[0])
-				man, model, fw = s.getDeviceInfo(ctx, deviceURL)
+			if len(addrList) == 0 {
+				continue
+			}
+			deviceURL := string(addrList[0])
+
+			client := onvif.NewSOAPClient(5*time.Second, nil)
+			cam := discoveredCamera{
+				Address: deviceURL,
+				XAddrs:  match.XAddrs,
+				Scopes:  match.Scopes,
 			}
 
-			cameras = append(cameras, discoveredCamera{
-				Address:      string(addrList[0]),
-				Manufacturer: man,
-				Model:        model,
-				Firmware:     fw,
-				XAddrs:       match.XAddrs,
-				Scopes:       match.Scopes,
-			})
+			if info, err := onvif.GetDeviceInformation(ctx, client, deviceURL); err == nil {
+				cam.Manufacturer = info.Manufacturer
+				cam.Model = info.Model
+				cam.Firmware = info.FirmwareVersion
+				cam.SerialNumber = info.SerialNumber
+			} else {
+				s.logger.Debug("GetDeviceInformation failed", "device", deviceURL, "error", err)
+			}
+
+			if caps, err := onvif.GetCapabilities(ctx, client, deviceURL); err == nil {
+				if caps.Analytics {
+					cam.Capabilities = append(cam.Capabilities, "analytics")
+				}
+				if caps.Events {
+					cam.Capabilities = append(cam.Capabilities, "events")
+				}
+				if caps.Imaging {
+					cam.Capabilities = append(cam.Capabilities, "imaging")
+				}
+				if caps.Media {
+					cam.Capabilities = append(cam.Capabilities, "media")
+				}
+				if caps.PTZ {
+					cam.Capabilities = append(cam.Capabilities, "ptz")
+				}
+				if caps.Recording {
+					cam.Capabilities = append(cam.Capabilities, "recording")
+				}
+			} else {
+				s.logger.Debug("GetCapabilities failed", "device", deviceURL, "error", err)
+			}
+
+			if hostname, err := onvif.GetHostname(ctx, client, deviceURL); err == nil {
+				cam.Hostname = hostname
+			}
+
+			cameras = append(cameras, cam)
 		}
 	}
 
 	return cameras, nil
-}
-
-func (s *DiscoveryService) getDeviceInfo(ctx context.Context, xaddr string) (string, string, string) {
-	reqBody := `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
-  <soap:Body>
-    <tds:GetDeviceInformation/>
-  </soap:Body>
-</soap:Envelope>`
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, xaddr, bytes.NewReader([]byte(reqBody)))
-	if err != nil {
-		s.logger.Warn("Failed to create device info request", "xaddr", xaddr, "error", err)
-		return "", "", ""
-	}
-	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		s.logger.Warn("Failed to get device info", "xaddr", xaddr, "error", err)
-		return "", "", ""
-	}
-	defer func() {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}()
-
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
-		s.logger.Warn("Failed to read device info response", "xaddr", xaddr, "error", err)
-		return "", "", ""
-	}
-
-	var env deviceInfoEnvelope
-	if err := xml.Unmarshal(buf.Bytes(), &env); err != nil {
-		s.logger.Warn("Failed to parse device info XML", "xaddr", xaddr, "error", err)
-		return "", "", ""
-	}
-
-	return env.Body.Response.Manufacturer, env.Body.Response.Model, env.Body.Response.FirmwareVersion
 }
 
 func (s *DiscoveryService) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -316,39 +330,64 @@ func (s *DiscoveryService) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.config.ScanTimeout+2*time.Second)
-	defer cancel()
+	s.mu.Lock()
+	s.scanning = true
+	s.scanError = ""
+	s.results = nil
+	s.mu.Unlock()
 
-	cameras, err := s.sendProbe(ctx)
-	if err != nil {
-		s.logger.Error("Scan failed", "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.config.ScanTimeout+2*time.Second)
+		defer cancel()
+
+		cameras, err := s.sendProbe(ctx)
+
+		s.mu.Lock()
+		s.scanning = false
+		if err != nil {
+			s.scanError = err.Error()
+			s.logger.Error("Scan failed", "error", err)
+		} else {
+			s.results = cameras
+			s.logger.Info("Discovery scan complete", "cameras_found", len(cameras))
+		}
+		s.mu.Unlock()
+
+		if err == nil && s.natsConn != nil {
+			for _, cam := range cameras {
+				data, err := json.Marshal(cam)
+				if err != nil {
+					s.logger.Warn("Failed to marshal camera for NATS", "error", err)
+					continue
+				}
+				if err := s.natsConn.Publish("cameras.discovered", data); err != nil {
+					s.logger.Warn("Failed to publish camera to NATS", "error", err)
+				}
+			}
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "scanning"})
+}
+
+func (s *DiscoveryService) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
-	s.mu.Lock()
-	s.results = cameras
-	s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if s.natsConn != nil {
-		for _, cam := range cameras {
-			data, err := json.Marshal(cam)
-			if err != nil {
-				s.logger.Warn("Failed to marshal camera for NATS", "error", err)
-				continue
-			}
-			if err := s.natsConn.Publish("cameras.discovered", data); err != nil {
-				s.logger.Warn("Failed to publish camera to NATS", "error", err)
-			}
-		}
+	status := scanStatus{
+		Scanning: s.scanning,
+		Count:    len(s.results),
+		Error:    s.scanError,
 	}
 
-	s.logger.Info("Discovery scan complete", "cameras_found", len(cameras))
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cameras)
+	json.NewEncoder(w).Encode(status)
 }
 
 func (s *DiscoveryService) handleResults(w http.ResponseWriter, r *http.Request) {
