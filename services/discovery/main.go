@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,11 +14,9 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
 	"github.com/dam-vms/dam/pkg/common"
-	"github.com/dam-vms/dam/pkg/onvif"
 )
 
 type DiscoveryConfig struct {
@@ -54,45 +49,6 @@ type discoveredCamera struct {
 	Capabilities []string `json:"capabilities"`
 	XAddrs       string   `json:"xaddrs"`
 	Scopes       string   `json:"scopes"`
-}
-
-type probeEnvelope struct {
-	XMLName xml.Name    `xml:"http://www.w3.org/2003/05/soap-envelope Envelope"`
-	Header  probeHeader `xml:"http://www.w3.org/2003/05/soap-envelope Header"`
-	Body    probeBody   `xml:"http://www.w3.org/2003/05/soap-envelope Body"`
-}
-
-type probeHeader struct {
-	Action    string `xml:"http://schemas.xmlsoap.org/ws/2004/08/addressing Action"`
-	MessageID string `xml:"http://schemas.xmlsoap.org/ws/2004/08/addressing MessageID"`
-	To        string `xml:"http://schemas.xmlsoap.org/ws/2004/08/addressing To"`
-}
-
-type probeBody struct {
-	Probe probe `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery Probe"`
-}
-
-type probe struct {
-	Types string `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery Types"`
-}
-
-type probeMatchEnvelope struct {
-	XMLName xml.Name       `xml:"http://www.w3.org/2003/05/soap-envelope Envelope"`
-	Body    probeMatchBody `xml:"http://www.w3.org/2003/05/soap-envelope Body"`
-}
-
-type probeMatchBody struct {
-	ProbeMatches probeMatches `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery ProbeMatches"`
-}
-
-type probeMatches struct {
-	ProbeMatch []probeMatchItem `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery ProbeMatch"`
-}
-
-type probeMatchItem struct {
-	XAddrs string `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery XAddrs"`
-	Types  string `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery Types"`
-	Scopes string `xml:"http://schemas.xmlsoap.org/ws/2005/04/discovery Scopes"`
 }
 
 type scanStatus struct {
@@ -189,141 +145,6 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func probeXML() (string, error) {
-	uid := uuid.New().String()
-	msgID := "uuid:" + uid
-	env := probeEnvelope{
-		Header: probeHeader{
-			Action:    "http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe",
-			MessageID: msgID,
-			To:        "urn:schemas-xmlsoap-org:ws:2005:04:discovery",
-		},
-		Body: probeBody{
-			Probe: probe{
-				Types: "dn:NetworkVideoTransmitter",
-			},
-		},
-	}
-	out, err := xml.MarshalIndent(env, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return xml.Header + string(out), nil
-}
-
-func (s *DiscoveryService) sendProbe(ctx context.Context) ([]discoveredCamera, error) {
-	probeMsg, err := probeXML()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal probe: %w", err)
-	}
-
-	s.logger.Debug("Sending WS-Discovery probe")
-
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create UDP socket: %w", err)
-	}
-	defer conn.Close()
-
-	multicastAddr := &net.UDPAddr{IP: net.ParseIP("239.255.255.250"), Port: 3702}
-	if _, err := conn.WriteTo([]byte(probeMsg), multicastAddr); err != nil {
-		return nil, fmt.Errorf("failed to send probe: %w", err)
-	}
-
-	s.logger.Info("Sent WS-Discovery probe, waiting for responses...")
-
-	deadline, hasDeadline := ctx.Deadline()
-	if !hasDeadline {
-		deadline = time.Now().Add(s.config.ScanTimeout)
-	}
-	if err := conn.SetReadDeadline(deadline); err != nil {
-		return nil, fmt.Errorf("failed to set read deadline: %w", err)
-	}
-
-	seen := make(map[string]bool)
-	var cameras []discoveredCamera
-	buf := make([]byte, 65535)
-
-	for {
-		n, _, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				break
-			}
-			return cameras, fmt.Errorf("error reading UDP: %w", err)
-		}
-
-		var env probeMatchEnvelope
-		if err := xml.Unmarshal(buf[:n], &env); err != nil {
-			s.logger.Debug("Failed to parse probe response XML", "error", err)
-			continue
-		}
-
-		for _, match := range env.Body.ProbeMatches.ProbeMatch {
-			if match.XAddrs == "" {
-				continue
-			}
-			if seen[match.XAddrs] {
-				continue
-			}
-			seen[match.XAddrs] = true
-
-			addrList := bytes.Fields([]byte(match.XAddrs))
-			if len(addrList) == 0 {
-				continue
-			}
-			deviceURL := string(addrList[0])
-
-			client := onvif.NewSOAPClient(5*time.Second, nil)
-			cam := discoveredCamera{
-				Address: deviceURL,
-				XAddrs:  match.XAddrs,
-				Scopes:  match.Scopes,
-			}
-
-			if info, err := onvif.GetDeviceInformation(ctx, client, deviceURL); err == nil {
-				cam.Manufacturer = info.Manufacturer
-				cam.Model = info.Model
-				cam.Firmware = info.FirmwareVersion
-				cam.SerialNumber = info.SerialNumber
-			} else {
-				s.logger.Debug("GetDeviceInformation failed", "device", deviceURL, "error", err)
-			}
-
-			if caps, err := onvif.GetCapabilities(ctx, client, deviceURL); err == nil {
-				if caps.Analytics {
-					cam.Capabilities = append(cam.Capabilities, "analytics")
-				}
-				if caps.Events {
-					cam.Capabilities = append(cam.Capabilities, "events")
-				}
-				if caps.Imaging {
-					cam.Capabilities = append(cam.Capabilities, "imaging")
-				}
-				if caps.Media {
-					cam.Capabilities = append(cam.Capabilities, "media")
-				}
-				if caps.PTZ {
-					cam.Capabilities = append(cam.Capabilities, "ptz")
-				}
-				if caps.Recording {
-					cam.Capabilities = append(cam.Capabilities, "recording")
-				}
-			} else {
-				s.logger.Debug("GetCapabilities failed", "device", deviceURL, "error", err)
-			}
-
-			if hostname, err := onvif.GetHostname(ctx, client, deviceURL); err == nil {
-				cam.Hostname = hostname
-			}
-
-			cameras = append(cameras, cam)
-		}
-	}
-
-	return cameras, nil
-}
-
 func (s *DiscoveryService) handleScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -340,20 +161,46 @@ func (s *DiscoveryService) handleScan(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), s.config.ScanTimeout+2*time.Second)
 		defer cancel()
 
-		cameras, err := s.sendProbe(ctx)
+		scanner := NewWSDiscoveryScanner(s.logger)
+		resultCh, err := scanner.Scan(ctx, "", nil, ScanOptions{Timeout: s.config.ScanTimeout})
+		if err != nil {
+			s.mu.Lock()
+			s.scanning = false
+			s.scanError = err.Error()
+			s.logger.Error("Scan failed", "error", err)
+			s.mu.Unlock()
+			return
+		}
+
+		var cameras []discoveredCamera
+		for res := range resultCh {
+			if res.Error != nil {
+				continue
+			}
+			cam := discoveredCamera{
+				Address:      res.IP,
+				Manufacturer: res.Manufacturer,
+				Model:        res.Model,
+				Firmware:     res.Firmware,
+				SerialNumber: res.SerialNumber,
+				Hostname:     res.Hostname,
+				XAddrs:       res.XAddr,
+			}
+			var caps []string
+			for k := range res.Capabilities {
+				caps = append(caps, k)
+			}
+			cam.Capabilities = caps
+			cameras = append(cameras, cam)
+		}
 
 		s.mu.Lock()
 		s.scanning = false
-		if err != nil {
-			s.scanError = err.Error()
-			s.logger.Error("Scan failed", "error", err)
-		} else {
-			s.results = cameras
-			s.logger.Info("Discovery scan complete", "cameras_found", len(cameras))
-		}
+		s.results = cameras
+		s.logger.Info("Discovery scan complete", "cameras_found", len(cameras))
 		s.mu.Unlock()
 
-		if err == nil && s.natsConn != nil {
+		if s.natsConn != nil {
 			for _, cam := range cameras {
 				data, err := json.Marshal(cam)
 				if err != nil {
