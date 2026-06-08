@@ -155,9 +155,9 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 		"-q:v", "5",
 		"-fpsmax", "10",
 		"pipe:3",
-		// Stream 2: H264 for WebRTC
+		// Stream 2: H264 for WebRTC (copy, don't re-encode)
 		"-map", "0:v:0",
-		"-c:v:1", "copy",
+		"-c:v", "copy",
 		"-f", "h264",
 		"-bsf:v", "h264_mp4toannexb",
 		"pipe:4",
