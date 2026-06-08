@@ -52,7 +52,7 @@ impl RequestScheduler {
 
 pub struct PermitGuard<'a> {
     scheduler: &'a RequestScheduler,
-    _permit: tokio::sync::acquire::OwnedSemaphorePermit,
+    _permit: tokio::sync::SemaphorePermit<'a>,
 }
 
 impl<'a> Drop for PermitGuard<'a> {

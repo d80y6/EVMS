@@ -47,25 +47,27 @@ type Camera struct {
 	ID               string    `db:"id"`
 	SiteID           string    `db:"site_id"`
 	Name             string    `db:"name"`
-	Description      string    `db:"description"`
+	Description      *string   `db:"description"`
 	ConnectionURL    string    `db:"connection_url"`
-	SubstreamURL     string    `db:"substream_url"`
+	SubstreamURL     *string   `db:"substream_url"`
 	Status           string    `db:"status"`
 	PtzProtocol      string    `db:"ptz_protocol"`
 	RetentionDays    int       `db:"retention_days"`
 	PrerecordSeconds int       `db:"prerecord_seconds"`
 	OnvifData        string    `db:"onvif_data"`
+	OnvifUsername    *string   `db:"onvif_username"`
+	OnvifPassword    *string   `db:"onvif_password"`
 	Config           string    `db:"config"`
 	CreatedAt        time.Time `db:"created_at"`
 }
 
 // Site represents a site entity in the database
 type Site struct {
-	ID        string    `db:"id"`
-	TenantID  string    `db:"tenant_id"`
-	Name      string    `db:"name"`
-	Location  string    `db:"location"`
-	CreatedAt time.Time `db:"created_at"`
+	ID        string     `db:"id"`
+	TenantID  *string    `db:"tenant_id"`
+	Name      string     `db:"name"`
+	Location  string     `db:"location"`
+	CreatedAt time.Time  `db:"created_at"`
 }
 
 // AiEvent represents a row from the ai_events table
@@ -163,7 +165,7 @@ func (s *CameraService) Start() error {
 	return nil
 }
 
-const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '') AS onvif_data, COALESCE(c.config, '') AS config, c.created_at"
+const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '{}'::jsonb) AS onvif_data, c.onvif_username, c.onvif_password, COALESCE(c.config, '{}'::jsonb) AS config, c.created_at"
 
 func (s *CameraService) tenantFilter(ctx context.Context) (string, string) {
 	tenantID := common.TenantFromContext(ctx)
@@ -276,9 +278,12 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 	if prerecordSeconds == 0 {
 		prerecordSeconds = 5
 	}
+	encryptedPwd := common.MustEncrypt(req.OnvifPassword)
+	onvifUsername := sqlNullString(req.OnvifUsername)
+	onvifPassword := sqlNullString(encryptedPwd)
 	err := s.db.QueryRowContext(ctx,
-		"INSERT INTO cameras (site_id, name, connection_url, substream_url, ptz_protocol, retention_days, prerecord_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
-		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays, prerecordSeconds).Scan(&id)
+		"INSERT INTO cameras (site_id, name, connection_url, substream_url, ptz_protocol, retention_days, prerecord_seconds, onvif_username, onvif_password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays, prerecordSeconds, onvifUsername, onvifPassword).Scan(&id)
 	if err != nil {
 		s.logger.Error("Failed to create camera", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to create camera: %v", err)
@@ -303,9 +308,12 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 	if prerecordSeconds == 0 {
 		prerecordSeconds = 5
 	}
+	encryptedPwd := common.MustEncrypt(req.OnvifPassword)
+	onvifUsername := sqlNullString(req.OnvifUsername)
+	onvifPassword := sqlNullString(encryptedPwd)
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, ptz_protocol = $5, retention_days = $6, prerecord_seconds = $7, config = $8, updated_at = NOW() WHERE id = $9",
-		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, prerecordSeconds, req.Config, req.Id)
+		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, ptz_protocol = $5, retention_days = $6, prerecord_seconds = $7, config = $8, onvif_username = $9, onvif_password = $10, updated_at = NOW() WHERE id = $11",
+		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, prerecordSeconds, req.Config, onvifUsername, onvifPassword, req.Id)
 	if err != nil {
 		s.logger.Error("Failed to update camera", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.Internal, "failed to update camera: %v", err)
@@ -561,20 +569,116 @@ func (s *CameraService) SmartSearch(ctx context.Context, req *damv1.SmartSearchR
 
 // mapCameraToProto converts a database Camera to a protobuf Camera
 func (s *CameraService) mapCameraToProto(c Camera) *damv1.Camera {
+	desc := ""
+	if c.Description != nil {
+		desc = *c.Description
+	}
+	subURL := ""
+	if c.SubstreamURL != nil {
+		subURL = *c.SubstreamURL
+	}
+	status := c.Status
+	if status == "" {
+		status = "offline"
+	}
+	onvifUser := ""
+	if c.OnvifUsername != nil {
+		onvifUser = *c.OnvifUsername
+	}
+	onvifPwd := ""
+	if c.OnvifPassword != nil {
+		onvifPwd = common.MustDecrypt(*c.OnvifPassword)
+	}
 	return &damv1.Camera{
 		Id:               c.ID,
 		SiteId:           c.SiteID,
 		Name:             c.Name,
-		Description:      c.Description,
+		Description:      desc,
 		ConnectionUrl:    c.ConnectionURL,
-		SubstreamUrl:     c.SubstreamURL,
-		Status:           c.Status,
+		SubstreamUrl:     subURL,
+		Status:           status,
 		PtzProtocol:      c.PtzProtocol,
 		RetentionDays:    int32(c.RetentionDays),
 		PrerecordSeconds: int32(c.PrerecordSeconds),
 		OnvifData:        c.OnvifData,
+		OnvifUsername:    onvifUser,
+		OnvifPassword:    onvifPwd,
 		Config:           c.Config,
 		CreatedAt:        timestamppb.New(c.CreatedAt),
+	}
+}
+
+func (s *CameraService) checkCameraReachable(connURL string) bool {
+	host := strings.TrimSpace(connURL)
+	if strings.HasPrefix(host, "rtsp://") {
+		host = strings.TrimPrefix(host, "rtsp://")
+		if idx := strings.Index(host, "@"); idx != -1 {
+			host = host[idx+1:]
+		}
+		if idx := strings.Index(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+	}
+	if net.ParseIP(host) == nil {
+		host = connURL
+	}
+	port := "554"
+	if strings.Contains(host, ":") {
+		parts := strings.SplitN(host, ":", 2)
+		host = parts[0]
+		port = parts[1]
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	if err != nil {
+		conn, err = net.DialTimeout("tcp", net.JoinHostPort(host, "80"), 3*time.Second)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}
+	conn.Close()
+	return true
+}
+
+func (s *CameraService) startHealthCheck(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	s.logger.Info("Starting camera health check loop (every 30s)")
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Camera health check stopped")
+			return
+		case <-ticker.C:
+			s.runHealthCheck()
+		}
+	}
+}
+
+func (s *CameraService) runHealthCheck() {
+	var cameras []Camera
+	err := s.db.Select(&cameras, "SELECT "+camerasSelectCols+" FROM cameras c")
+	if err != nil {
+		s.logger.Error("Health check: failed to query cameras", "error", err)
+		return
+	}
+
+	for _, c := range cameras {
+		online := s.checkCameraReachable(c.ConnectionURL)
+		newStatus := "online"
+		if !online {
+			newStatus = "offline"
+		}
+		if c.Status != newStatus {
+			_, err := s.db.Exec("UPDATE cameras SET status = $1, updated_at = NOW() WHERE id = $2", newStatus, c.ID)
+			if err != nil {
+				s.logger.Error("Health check: failed to update camera status", "id", c.ID, "status", newStatus, "error", err)
+			} else {
+				s.logger.Info("Health check: camera status changed", "id", c.ID, "name", c.Name, "from", c.Status, "to", newStatus)
+			}
+		}
 	}
 }
 
@@ -595,6 +699,13 @@ func (s *CameraService) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func sqlNullString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func main() {
@@ -631,6 +742,8 @@ func main() {
 			logger.Error("Health server error", "error", err)
 		}
 	}()
+
+	go service.startHealthCheck(ctx)
 
 	<-ctx.Done()
 	logger.Info("Shutting down Camera Management Service...")

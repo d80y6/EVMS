@@ -1,4 +1,4 @@
-use crate::{OutputTensor, TensorDataType, TensorData, error::{Error, Result}};
+use crate::{OutputTensor, TensorData, error::{Error, Result}};
 
 /// Tensor postprocessing operations
 pub struct Postprocessor;

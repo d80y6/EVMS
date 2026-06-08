@@ -41,9 +41,13 @@ export function useSyncPlayback() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
+    let lastTick = performance.now();
     intervalRef.current = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - lastTick;
+      lastTick = now;
       setState(s => {
-        const next = { ...s, currentTime: s.currentTime + 1000 / 30 * s.speed };
+        const next = { ...s, currentTime: s.currentTime + elapsed * s.speed };
         broadcast(next);
         return next;
       });

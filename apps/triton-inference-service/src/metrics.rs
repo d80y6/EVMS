@@ -35,7 +35,7 @@ pub fn register_metrics() {
 }
 
 pub fn record_inference_latency(latency_secs: f64, latency_type: &str) {
-    histogram!("inference_latency_seconds", "type" => latency_type).record(latency_secs);
+    histogram!("inference_latency_seconds", "type" => latency_type.to_string()).record(latency_secs);
 }
 
 pub fn record_batch_size(size: usize) {
@@ -47,15 +47,15 @@ pub fn set_queue_depth(depth: usize) {
 }
 
 pub fn increment_request_counter(status: &str) {
-    counter!("requests_total", "status" => status).increment(1);
+    counter!("requests_total", "status" => status.to_string()).increment(1);
 }
 
 pub fn increment_model_inference(model_name: &str) {
-    counter!("model_inferences_total", "model" => model_name).increment(1);
+    counter!("model_inferences_total", "model" => model_name.to_string()).increment(1);
 }
 
 pub fn record_model_latency(model_name: &str, latency_secs: f64) {
-    histogram!("model_inference_latency_seconds", "model" => model_name).record(latency_secs);
+    histogram!("model_inference_latency_seconds", "model" => model_name.to_string()).record(latency_secs);
 }
 
 pub fn set_gpu_memory_used(bytes: u64) {
@@ -71,7 +71,7 @@ pub fn set_gpu_temperature(celsius: f32) {
 }
 
 pub fn increment_error_counter(error_type: &str) {
-    counter!("errors_total", "type" => error_type).increment(1);
+    counter!("errors_total", "type" => error_type.to_string()).increment(1);
 }
 
 #[cfg(test)]

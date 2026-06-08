@@ -32,13 +32,15 @@ func TestService_mapCameraToProto(t *testing.T) {
 	svc := &CameraService{logger: logger}
 
 	now := time.Now()
+	desc := "Description"
+	subURL := "rtsp://localhost/sub"
 	c := Camera{
 		ID:            "cam-1",
 		SiteID:        "site-1",
 		Name:          "Test Camera",
-		Description:   "Description",
+		Description:   &desc,
 		ConnectionURL: "rtsp://localhost/live",
-		SubstreamURL:  "rtsp://localhost/sub",
+		SubstreamURL:  &subURL,
 		Status:        "online",
 		CreatedAt:     now,
 	}
@@ -48,9 +50,9 @@ func TestService_mapCameraToProto(t *testing.T) {
 	assert.Equal(t, c.ID, proto.Id)
 	assert.Equal(t, c.SiteID, proto.SiteId)
 	assert.Equal(t, c.Name, proto.Name)
-	assert.Equal(t, c.Description, proto.Description)
+	assert.Equal(t, desc, proto.Description)
 	assert.Equal(t, c.ConnectionURL, proto.ConnectionUrl)
-	assert.Equal(t, c.SubstreamURL, proto.SubstreamUrl)
+	assert.Equal(t, subURL, proto.SubstreamUrl)
 	assert.Equal(t, c.Status, proto.Status)
 	assert.Equal(t, now.Unix(), proto.CreatedAt.AsTime().Unix())
 }

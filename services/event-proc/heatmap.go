@@ -125,3 +125,27 @@ func handleHeatmap(ha *HeatmapAggregator) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"cells": cells})
 	}
 }
+
+func handlePeopleCounts(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var counts []struct {
+			CameraID string `json:"camera_id" db:"camera_id"`
+			ZoneID   string `json:"zone_id" db:"zone_id"`
+			Count    int    `json:"count" db:"count"`
+		}
+		err := db.Select(&counts, `SELECT camera_id, zone_id, SUM(count)::int AS count FROM people_counters GROUP BY camera_id, zone_id`)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to get people counts")
+			return
+		}
+		if counts == nil {
+			counts = []struct {
+				CameraID string `json:"camera_id" db:"camera_id"`
+				ZoneID   string `json:"zone_id" db:"zone_id"`
+				Count    int    `json:"count" db:"count"`
+			}{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"counts": counts})
+	}
+}

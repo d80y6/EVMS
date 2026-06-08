@@ -7,22 +7,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod config;
-mod error;
-mod client;
-mod batcher;
-mod preprocess;
-mod postprocess;
-mod scheduler;
-mod metrics;
-mod api;
-mod grpc;
-mod models;
-
 #[path = "lib.rs"]
 mod lib;
-
-use lib::{InferenceState, create_state};
+pub use lib::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting HTTP server on {}", http_addr);
 
     let http_shutdown = shutdown.clone();
-    let http_server = axum::Server::bind(&http_addr)
-        .serve(http_app.into_make_service())
+    let listener = tokio::net::TcpListener::bind(&http_addr).await?;
+    let http_server = axum::serve(listener, http_app.into_make_service())
         .with_graceful_shutdown(async move {
             http_shutdown.notified().await;
         });

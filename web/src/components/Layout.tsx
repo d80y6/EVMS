@@ -105,6 +105,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <NavLink to="/onvif-events" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
                   <span className="w-4 text-center">🔔</span>ONVIF Events
                 </NavLink>
+                <NavLink to="/onvif-recordings" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">📼</span>ONVIF Recordings
+                </NavLink>
+                <NavLink to="/imaging" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🎨</span>Imaging
+                </NavLink>
+                <NavLink to="/devices" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🌐</span>Device/Network
+                </NavLink>
                 <NavLink to="/bookmarks" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
                   <span className="w-4 text-center">🔖</span>Bookmarks
                 </NavLink>
@@ -128,6 +137,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </NavLink>
                 <NavLink to="/audit" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
                   <span className="w-4 text-center">📋</span>Audit Chain
+                </NavLink>
+                <NavLink to="/webhooks" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                  <span className="w-4 text-center">🔗</span>Webhooks
                 </NavLink>
                 <NavLink to="/pos" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
                   <span className="w-4 text-center">🛒</span>POS Transactions

@@ -9,7 +9,7 @@ pub mod inference {
 }
 
 use inference::{
-    InferRequest, InferResponse, TensorInput, TensorOutput,
+    InferRequest, InferResponse, TensorOutput,
     HealthRequest, HealthResponse,
     ListModelsRequest, ListModelsResponse, ModelInfo,
 };

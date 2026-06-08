@@ -43,7 +43,7 @@ pub struct InferRequest {
 async fn infer_handler(
     State(state): State<Arc<InferenceState>>,
     Json(req): Json<InferRequest>,
-) -> Result<Json<InferenceResponse>, AppError> {
+) -> Result<Json<InferenceResponse>> {
     let request_id = uuid::Uuid::new_v4().to_string();
     
     let inference_req = InferenceRequest {
@@ -86,8 +86,8 @@ pub struct ModelInfo {
 
 async fn list_models(
     State(state): State<Arc<InferenceState>>,
-) -> Result<Json<Vec<ModelInfo>>, AppError> {
-    let models = state.models.list_all();
+) -> Result<Json<Vec<ModelInfo>>> {
+    let models = state.models.list_all().await;
     let model_infos: Vec<ModelInfo> = models.iter().map(|m| ModelInfo {
         name: m.name.clone(),
         versions: m.versions.clone(),
@@ -100,8 +100,8 @@ async fn list_models(
 async fn get_model(
     State(state): State<Arc<InferenceState>>,
     axum::extract::Path(model_name): axum::extract::Path<String>,
-) -> Result<Json<ModelInfo>, AppError> {
-    let model = state.models.get(&model_name)
+) -> Result<Json<ModelInfo>> {
+    let model = state.models.get(&model_name).await
         .ok_or_else(|| AppError::NotFound(format!("Model {} not found", model_name)))?;
     
     Ok(Json(ModelInfo {

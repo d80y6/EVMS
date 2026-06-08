@@ -12,22 +12,15 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestConfigValidation(t *testing.T) {
-	t.Run("missing camera ID fails", func(t *testing.T) {
-		config := IngestConfig{CameraID: "", RTSPURL: "rtsp://test"}
+	t.Run("missing DB URL fails", func(t *testing.T) {
+		config := IngestConfig{DBURL: ""}
 		if err := config.Validate(); err == nil {
-			t.Error("expected validation error with empty CameraID")
-		}
-	})
-
-	t.Run("missing RTSP URL fails", func(t *testing.T) {
-		config := IngestConfig{CameraID: "cam1", RTSPURL: ""}
-		if err := config.Validate(); err == nil {
-			t.Error("expected validation error with empty RTSPURL")
+			t.Error("expected validation error with empty DBURL")
 		}
 	})
 
 	t.Run("valid config passes", func(t *testing.T) {
-		config := IngestConfig{CameraID: "cam1", RTSPURL: "rtsp://test"}
+		config := IngestConfig{DBURL: "postgres://localhost:5432/db"}
 		if err := config.Validate(); err != nil {
 			t.Errorf("unexpected validation error: %v", err)
 		}

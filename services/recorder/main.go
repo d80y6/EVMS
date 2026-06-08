@@ -145,15 +145,19 @@ func (cr *CameraRecorder) FlushBuffer(output io.Writer) error {
 
 // Recorder handles recording indexing and retention
 type Recorder struct {
-	db        *sqlx.DB
-	logger    *slog.Logger
-	config    RecorderConfig
-	shard     common.ShardConfig
-	sub       *nats.Subscription
-	frameSub  *nats.Subscription
-	mu        sync.Mutex
-	cameras   map[string]*CameraRecorder
-	legalHolds *LegalHoldStore
+	db              *sqlx.DB
+	logger          *slog.Logger
+	config          RecorderConfig
+	shard           common.ShardConfig
+	sub             *nats.Subscription
+	frameSub        *nats.Subscription
+	mu              sync.Mutex
+	cameras         map[string]*CameraRecorder
+	legalHolds      *LegalHoldStore
+	policyManager   *RetentionPolicyManager
+	timelineService *TimelineService
+	frameAnalysis   *FrameAnalysisService
+	audioService    *AudioService
 }
 
 // NewRecorder creates a new recorder instance
@@ -177,12 +181,15 @@ func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger
 	}
 
 	return &Recorder{
-		db:         db,
-		logger:     logger,
-		config:     config,
-		shard:      shard,
-		cameras:    make(map[string]*CameraRecorder),
-		legalHolds: legalHolds,
+		db:              db,
+		logger:          logger,
+		config:          config,
+		shard:           shard,
+		cameras:         make(map[string]*CameraRecorder),
+		legalHolds:      legalHolds,
+		timelineService: NewTimelineService(db),
+		frameAnalysis:   NewFrameAnalysisService(db),
+		audioService:    NewAudioService(db),
 	}, nil
 }
 
@@ -318,16 +325,33 @@ func (r *Recorder) flushPrerecord(cameraID string, recordingPath string) {
 
 // processRecordingEvent processes a recording event and returns a segment
 func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEvent) (RecordingSegment, error) {
-	// Wait for file to be finalized by FFmpeg
-	maxRetries := 5
+	// Wait for file to be fully written by FFmpeg.
+	// FSNotify CREATE fires when the file is opened, not when writing finishes.
+	// Poll until size stabilizes (two consecutive reads with same size, 2s apart).
+	// Allow up to 35 retries (70s) to cover a full 60s segment.
+	maxRetries := 35
+	var prevSize int64 = -1
 	var info os.FileInfo
 	var err error
 
 	for i := 0; i < maxRetries; i++ {
 		info, err = os.Stat(event.Path)
-		if err == nil && info.Size() > 0 {
+		if err != nil {
+			if os.IsNotExist(err) && i < maxRetries-1 {
+				select {
+				case <-ctx.Done():
+					return RecordingSegment{}, ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			return RecordingSegment{}, fmt.Errorf("could not stat recording file: %w", err)
+		}
+
+		if info.Size() > 0 && info.Size() == prevSize {
 			break
 		}
+		prevSize = info.Size()
 		select {
 		case <-ctx.Done():
 			return RecordingSegment{}, ctx.Err()
@@ -335,8 +359,8 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 		}
 	}
 
-	if err != nil {
-		return RecordingSegment{}, fmt.Errorf("could not stat recording file: %w", err)
+	if info == nil {
+		return RecordingSegment{}, fmt.Errorf("recording file not found after retries: %s", event.Path)
 	}
 
 	filename := filepath.Base(event.Path)
@@ -348,15 +372,23 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 	// Format from ingest: 20240101_120000.mp4
 	startTime, err := time.Parse("20060102_150405", timeStr)
 	if err != nil {
-		r.logger.Debug("Could not parse timestamp from filename, using current time",
+		r.logger.Debug("Could not parse timestamp from filename, using file mod time",
 			"filename", filename, "error", err)
-		startTime = time.Now()
+		startTime = info.ModTime()
+	}
+
+	// Derive end time: prefer file mtime (handles segments shorter than
+	// the configured segment_time, e.g. the last segment before stop),
+	// capped at start + 60s to avoid overestimating.
+	endTime := startTime.Add(60 * time.Second)
+	if info.ModTime().After(startTime) && info.ModTime().Before(endTime) {
+		endTime = info.ModTime()
 	}
 
 	return RecordingSegment{
 		CameraID:  event.CameraID,
 		StartTime: startTime,
-		EndTime:   startTime.Add(60 * time.Second),
+		EndTime:   endTime,
 		FilePath:  event.Path,
 		FileSize:  info.Size(),
 	}, nil
@@ -384,12 +416,17 @@ func (r *Recorder) StartRetentionWorker(ctx context.Context) {
 
 // runRetentionCleanup removes recordings older than the retention period
 func (r *Recorder) runRetentionCleanup(ctx context.Context) {
+	if r.policyManager != nil {
+		r.runRetentionCleanupWithPolicies(ctx)
+		return
+	}
+
 	cutoff := time.Now().AddDate(0, 0, -r.config.RetentionDays)
 	r.logger.Info("Running retention cleanup", "cutoff", cutoff)
 
 	var segments []RecordingSegment
 	err := r.db.SelectContext(ctx, &segments,
-		"SELECT camera_id, file_path FROM recordings WHERE start_time < $1", cutoff)
+		"SELECT camera_id, file_path, start_time FROM recordings WHERE start_time < $1", cutoff)
 	if err != nil {
 		r.logger.Error("Failed to fetch expired segments", "error", err)
 		return
@@ -404,6 +441,10 @@ func (r *Recorder) runRetentionCleanup(ctx context.Context) {
 		if err := os.Remove(seg.FilePath); err != nil && !os.IsNotExist(err) {
 			r.logger.Error("Failed to delete recording file", "path", seg.FilePath, "error", err)
 			continue
+		}
+		// Remove companion .preroll file if it exists
+		if err := os.Remove(seg.FilePath + ".preroll"); err != nil && !os.IsNotExist(err) {
+			r.logger.Error("Failed to delete preroll file", "path", seg.FilePath+".preroll", "error", err)
 		}
 
 		if _, err := r.db.ExecContext(ctx,
@@ -535,6 +576,14 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to subscribe to frames: %w", err)
 	}
 
+	// Initialize and start retention policy manager
+	policyManager := NewRetentionPolicyManager(recorder.db, recorder)
+	if err := policyManager.RefreshCache(ctx); err != nil {
+		s.logger.Warn("Failed to load retention policies", "error", err)
+	}
+	recorder.policyManager = policyManager
+	go recorder.StartRetentionPolicyWorker(ctx)
+
 	// Start background retention worker
 	go recorder.StartRetentionWorker(ctx)
 
@@ -589,6 +638,53 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		}
 	})))
 	mux.Handle("/dewarp", common.JWTAuthMiddleware(handleDewarp(recorder.db)))
+
+	// Retention policy endpoints
+	mux.Handle("/retention-policies", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleListRetentionPolicies(recorder.policyManager)(w, r)
+		case http.MethodPost:
+			handleCreateRetentionPolicy(recorder.policyManager)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/retention-policies/", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleGetRetentionPolicy(recorder.policyManager)(w, r)
+		case http.MethodPut:
+			handleUpdateRetentionPolicy(recorder.policyManager)(w, r)
+		case http.MethodDelete:
+			handleDeleteRetentionPolicy(recorder.policyManager)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	// Timeline endpoints
+	mux.Handle("/timeline", common.JWTAuthMiddleware(handleTimeline(recorder.timelineService)))
+	mux.Handle("/recording-timeline", common.JWTAuthMiddleware(handleRecordingTimeline(recorder.timelineService)))
+
+	// Frame analysis endpoints
+	mux.Handle("/frame-index", common.JWTAuthMiddleware(handleGetFrameAt(recorder.frameAnalysis)))
+	mux.Handle("/motion-frames", common.JWTAuthMiddleware(handleGetMotionFrames(recorder.frameAnalysis)))
+	mux.Handle("/scene-changes", common.JWTAuthMiddleware(handleGetSceneChanges(recorder.frameAnalysis)))
+
+	// Audio metadata endpoints
+	mux.Handle("/audio/metadata", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handleGetAudioMetadata(recorder.audioService)(w, r)
+		case http.MethodPost:
+			handleRecordAudio(recorder.audioService)(w, r)
+		default:
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/audio/level", common.JWTAuthMiddleware(handleGetAudioLevel(recorder.audioService)))
+	mux.Handle("/audio/cameras", common.JWTAuthMiddleware(handleListAudioCameras(recorder.audioService)))
 
 	s.bookmarkServer = &http.Server{
 		Addr:    ":8087",

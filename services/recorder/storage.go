@@ -47,15 +47,17 @@ func handleStorageEstimate(db *sqlx.DB) http.HandlerFunc {
 				cam.ID)
 
 			daily := dailyGB.Float64
-			if daily < 0.1 {
-				daily = 2.0
+			if daily <= 0 {
+				// No data yet: estimate based on default bitrate (4 Mbps)
+				// 4 Mbps / 8 * 86400 s/day / 1073741824 bytes/GB ≈ 40 GB/day
+				daily = 40.0
 			}
 
 			current := currentGB.Float64
 			estimated := daily * float64(cam.RetentionDays)
-			daysRemaining := float64(cam.RetentionDays)
-			if daily > 0 {
-				daysRemaining = estimated / daily
+			daysRemaining := float64(cam.RetentionDays) - (current / daily)
+			if daysRemaining < 0 {
+				daysRemaining = 0
 			}
 
 			estimates = append(estimates, StorageEstimate{

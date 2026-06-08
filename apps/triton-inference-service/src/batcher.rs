@@ -35,7 +35,7 @@ impl Batcher {
     pub async fn get_batch(&self) -> Result<Vec<InferenceRequest>> {
         let mut queue = self.queue.lock().await;
         let mut batch = Vec::new();
-        let now = std::time::Instant::now();
+        let _now = std::time::Instant::now();
 
         while batch.len() < self.max_batch_size {
             if let Some(front) = queue.front() {

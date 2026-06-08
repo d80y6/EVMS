@@ -93,6 +93,12 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Audio playback support
+	if strings.HasPrefix(relPath, "audio/") {
+		s.handleAudioPlayback(w, r, relPath)
+		return
+	}
+
 	fullPath := filepath.Join(s.recordings, relPath)
 
 	evalPath, err := filepath.EvalSymlinks(fullPath)
@@ -129,8 +135,58 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Check for audio-only range request
+	if r.URL.Query().Get("audio_only") == "true" || strings.HasSuffix(relPath, ".aac") || strings.HasSuffix(relPath, ".wav") {
+		w.Header().Set("Content-Type", s.audioContentType(relPath))
+	}
+
 	s.logger.Info("Playback request", "path", evalPath, "remote_addr", r.RemoteAddr)
 	http.ServeFile(w, r, evalPath)
+}
+
+func (s *PlaybackService) handleAudioPlayback(w http.ResponseWriter, r *http.Request, relPath string) {
+	audioPath := strings.TrimPrefix(relPath, "audio/")
+	fullPath := filepath.Join(s.recordings, audioPath)
+
+	evalPath, err := filepath.EvalSymlinks(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to resolve audio path", "path", fullPath, "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	rel, err := filepath.Rel(s.recordings, evalPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		s.logger.Warn("Blocked audio path traversal", "path", relPath, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", s.audioContentType(evalPath))
+	w.Header().Set("Accept-Ranges", "bytes")
+	s.logger.Info("Audio playback request", "path", evalPath, "remote_addr", r.RemoteAddr)
+	http.ServeFile(w, r, evalPath)
+}
+
+func (s *PlaybackService) audioContentType(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".aac"):
+		return "audio/aac"
+	case strings.HasSuffix(path, ".wav"):
+		return "audio/wav"
+	case strings.HasSuffix(path, ".mp3"):
+		return "audio/mpeg"
+	case strings.HasSuffix(path, ".opus"):
+		return "audio/opus"
+	case strings.HasSuffix(path, ".ogg"):
+		return "audio/ogg"
+	default:
+		return "audio/mpeg"
+	}
 }
 
 func main() {

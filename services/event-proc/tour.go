@@ -108,7 +108,7 @@ func (ts *TourScheduler) runTour(ctx context.Context, tour *Tour) {
 				"preset", step.PresetToken, "dwell", step.DwellSeconds)
 
 			if step.PresetToken != "" {
-				http.Post(fmt.Sprintf("http://camera-control:8088/cameras/%s/ptz/%s/goto",
+				http.Post(fmt.Sprintf("http://camera-control:8088/cameras/%s/ptz/presets/%s/goto",
 					step.CameraID, step.PresetToken), "application/json", nil)
 			}
 

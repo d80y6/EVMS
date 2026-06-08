@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -112,6 +115,50 @@ func (rl *rateLimiter) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFu
 	}
 }
 
+func generateCSRFToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (g *Gateway) csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next(w, r)
+			return
+		}
+
+		headerToken := r.Header.Get("X-CSRF-Token")
+		cookie, err := r.Cookie("csrf_token")
+		if err != nil || cookie.Value == "" {
+			jsonError(w, "CSRF token required", http.StatusForbidden)
+			return
+		}
+
+		if subtle.ConstantTimeCompare([]byte(headerToken), []byte(cookie.Value)) != 1 {
+			jsonError(w, "invalid CSRF token", http.StatusForbidden)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func (g *Gateway) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
+	token := generateCSRFToken()
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csrf_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: false,
+		Secure:   false,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"csrf_token": token})
+}
+
 type GatewayConfig struct {
 	Port               string
 	AuthServiceURL     string
@@ -127,6 +174,7 @@ type GatewayConfig struct {
 	POSURL            string
 	DiscoveryURL      string
 	OnvifEventsURL    string
+	NotificationURL   string
 	DBURL              string
 	MetricsAddr        string
 	TLSEnabled         bool
@@ -150,6 +198,7 @@ func DefaultGatewayConfig() GatewayConfig {
 		POSURL:            common.GetEnv("POS_URL", "http://pos-ingest:8096"),
 		DiscoveryURL:      common.GetEnv("DISCOVERY_URL", "http://discovery:8091"),
 		OnvifEventsURL:    common.GetEnv("ONVIF_EVENTS_URL", "http://onvif-events:8092"),
+		NotificationURL:   common.GetEnv("NOTIFICATION_URL", "http://notification:8090"),
 		DBURL:              common.GetEnv("DB_URL", ""),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 		TLSEnabled:         common.GetEnv("TLS_ENABLED", "false") == "true",
@@ -181,6 +230,7 @@ type Gateway struct {
 	posProxy           *httputil.ReverseProxy
 	discoveryProxy     *httputil.ReverseProxy
 	onvifEventsProxy   *httputil.ReverseProxy
+	notificationProxy  *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
 	healthHandler      *common.HealthHandler
 	upstreamHealth     []upstreamHealth
@@ -217,9 +267,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 			req.URL.Scheme = authURL.Scheme
 			req.URL.Host = authURL.Host
 			req.URL.Path = "/auth" + strings.TrimPrefix(req.URL.Path, "/api")
-			if req.URL.RawQuery != "" {
-				req.URL.RawQuery = req.URL.RawQuery
-			}
+			// RawQuery remains as-is — no transformation needed
 		},
 	}
 	playbackURL, _ := url.Parse(config.PlaybackServiceURL)
@@ -233,6 +281,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	posURL, _ := url.Parse(config.POSURL)
 	discoveryURL, _ := url.Parse(config.DiscoveryURL)
 	onvifEventsURL, _ := url.Parse(config.OnvifEventsURL)
+	notificationURL, _ := url.Parse(config.NotificationURL)
 
 	h := common.NewHealthHandler()
 	if db != nil {
@@ -257,6 +306,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		posProxy:           httputil.NewSingleHostReverseProxy(posURL),
 		discoveryProxy:     httputil.NewSingleHostReverseProxy(discoveryURL),
 		onvifEventsProxy:   httputil.NewSingleHostReverseProxy(onvifEventsURL),
+		notificationProxy:  httputil.NewSingleHostReverseProxy(notificationURL),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 		healthHandler:      h,
 		upstreamHealth: []upstreamHealth{
@@ -276,6 +326,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 			{"pos-ingest", config.POSURL + "/health"},
 			{"discovery", config.DiscoveryURL + "/health"},
 			{"onvif-events", config.OnvifEventsURL + "/health"},
+		{"notification", config.NotificationURL + "/health"},
 		},
 	}, nil
 }
@@ -302,6 +353,14 @@ func (g *Gateway) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			authHeader = r.URL.Query().Get("token")
+			if authHeader != "" {
+				q := r.URL.Query()
+				q.Del("token")
+				r.URL.RawQuery = q.Encode()
+			}
+		}
+		if authHeader == "" {
 			jsonError(w, "authorization required", http.StatusUnauthorized)
 			return
 		}
@@ -316,6 +375,7 @@ func (g *Gateway) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Header.Set("X-Username", claims.Username)
 		r.Header.Set("X-Role", claims.Role)
+		r.Header.Set("Authorization", "Bearer "+token)
 		ctx := r.Context()
 		if claims.TenantID != "" {
 			ctx = context.WithValue(ctx, common.TenantKey, claims.TenantID)
@@ -331,6 +391,14 @@ func (g *Gateway) requireRole(minRole string) func(http.HandlerFunc) http.Handle
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				authHeader = r.URL.Query().Get("token")
+				if authHeader != "" {
+					q := r.URL.Query()
+					q.Del("token")
+					r.URL.RawQuery = q.Encode()
+				}
+			}
 			if authHeader == "" {
 				jsonError(w, "authorization required", http.StatusUnauthorized)
 				return
@@ -367,6 +435,7 @@ func (g *Gateway) requireRole(minRole string) func(http.HandlerFunc) http.Handle
 			}
 			r.Header.Set("X-Username", claims.Username)
 			r.Header.Set("X-Role", claims.Role)
+			r.Header.Set("Authorization", "Bearer "+token)
 			ctx := r.Context()
 			if claims.TenantID != "" {
 				ctx = context.WithValue(ctx, common.TenantKey, claims.TenantID)
@@ -395,34 +464,36 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type cameraJSON struct {
-		ID            string `json:"id"`
-		SiteID        string `json:"site_id"`
-		Name          string `json:"name"`
-		Description   string `json:"description"`
-		ConnectionURL string `json:"connection_url"`
-		SubstreamURL  string `json:"substream_url"`
-		Status        string `json:"status"`
-		PtzProtocol   string `json:"ptz_protocol"`
-		RetentionDays int32  `json:"retention_days"`
-		Config        string `json:"config"`
-	}
-
-	cameras := make([]cameraJSON, len(resp.Cameras))
-	for i, c := range resp.Cameras {
-		cameras[i] = cameraJSON{
-			ID:            c.Id,
-			SiteID:        c.SiteId,
-			Name:          c.Name,
-			Description:   c.Description,
-			ConnectionURL: c.ConnectionUrl,
-			SubstreamURL:  c.SubstreamUrl,
-			Status:        c.Status,
-			PtzProtocol:   c.PtzProtocol,
-			RetentionDays: c.RetentionDays,
-			Config:        c.Config,
+		type cameraJSON struct {
+			ID            string `json:"id"`
+			SiteID        string `json:"site_id"`
+			Name          string `json:"name"`
+			Description   string `json:"description"`
+			ConnectionURL string `json:"connection_url"`
+			SubstreamURL  string `json:"substream_url"`
+			Status        string `json:"status"`
+			PtzProtocol   string `json:"ptz_protocol"`
+			RetentionDays int32  `json:"retention_days"`
+			OnvifUsername string `json:"onvif_username"`
+			Config        string `json:"config"`
 		}
-	}
+
+		cameras := make([]cameraJSON, len(resp.Cameras))
+		for i, c := range resp.Cameras {
+			cameras[i] = cameraJSON{
+				ID:            c.Id,
+				SiteID:        c.SiteId,
+				Name:          c.Name,
+				Description:   c.Description,
+				ConnectionURL: c.ConnectionUrl,
+				SubstreamURL:  c.SubstreamUrl,
+				Status:        c.Status,
+				PtzProtocol:   c.PtzProtocol,
+				RetentionDays: c.RetentionDays,
+				OnvifUsername: c.OnvifUsername,
+				Config:        c.Config,
+			}
+		}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"cameras": cameras})
@@ -616,6 +687,9 @@ func (g *Gateway) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to query recordings", http.StatusInternalServerError)
 		return
 	}
+	if recordings == nil {
+		recordings = []recording{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"recordings": recordings})
@@ -658,6 +732,9 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		g.logger.Error("Failed to query events", "error", err)
 		jsonError(w, "failed to query events", http.StatusInternalServerError)
 		return
+	}
+	if events == nil {
+		events = []event{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -726,18 +803,46 @@ func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	type getCameraJSON struct {
+		ID            string `json:"id"`
+		SiteID        string `json:"site_id"`
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		ConnectionURL string `json:"connection_url"`
+		SubstreamURL  string `json:"substream_url"`
+		Status        string `json:"status"`
+		PtzProtocol   string `json:"ptz_protocol"`
+		RetentionDays int32  `json:"retention_days"`
+		OnvifUsername string `json:"onvif_username"`
+		Config        string `json:"config"`
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(camera)
+	json.NewEncoder(w).Encode(getCameraJSON{
+		ID:            camera.Id,
+		SiteID:        camera.SiteId,
+		Name:          camera.Name,
+		Description:   camera.Description,
+		ConnectionURL: camera.ConnectionUrl,
+		SubstreamURL:  camera.SubstreamUrl,
+		Status:        camera.Status,
+		PtzProtocol:   camera.PtzProtocol,
+		RetentionDays: camera.RetentionDays,
+		OnvifUsername: camera.OnvifUsername,
+		Config:        camera.Config,
+	})
 }
 
 func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SiteID        string `json:"site_id"`
-		Name          string `json:"name"`
-		ConnectionURL string `json:"connection_url"`
-		SubstreamURL  string `json:"substream_url"`
-		PtzProtocol   string `json:"ptz_protocol"`
-		RetentionDays int32  `json:"retention_days"`
+		SiteID         string `json:"site_id"`
+		Name           string `json:"name"`
+		ConnectionURL  string `json:"connection_url"`
+		SubstreamURL   string `json:"substream_url"`
+		PtzProtocol    string `json:"ptz_protocol"`
+		RetentionDays  int32  `json:"retention_days"`
+		OnvifUsername  string `json:"onvif_username"`
+		OnvifPassword  string `json:"onvif_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -754,6 +859,8 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		SubstreamUrl:  req.SubstreamURL,
 		PtzProtocol:   req.PtzProtocol,
 		RetentionDays: req.RetentionDays,
+		OnvifUsername: req.OnvifUsername,
+		OnvifPassword: req.OnvifPassword,
 	})
 	if err != nil {
 		g.logger.Error("Failed to create camera", "error", err)
@@ -770,11 +877,13 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 	cameraID := extractParam(r.URL.Path, "/api/cameras/")
 
 	var req struct {
-		Name          string `json:"name"`
-		ConnectionURL string `json:"connection_url"`
-		SubstreamURL  string `json:"substream_url"`
-		PtzProtocol   string `json:"ptz_protocol"`
-		RetentionDays int32  `json:"retention_days"`
+		Name           string `json:"name"`
+		ConnectionURL  string `json:"connection_url"`
+		SubstreamURL   string `json:"substream_url"`
+		PtzProtocol    string `json:"ptz_protocol"`
+		RetentionDays  int32  `json:"retention_days"`
+		OnvifUsername  string `json:"onvif_username"`
+		OnvifPassword  string `json:"onvif_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -791,6 +900,8 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 		SubstreamUrl:  req.SubstreamURL,
 		PtzProtocol:   req.PtzProtocol,
 		RetentionDays: req.RetentionDays,
+		OnvifUsername: req.OnvifUsername,
+		OnvifPassword: req.OnvifPassword,
 	})
 	if err != nil {
 		g.logger.Error("Failed to update camera", "error", err)
@@ -924,7 +1035,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
 	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -932,7 +1043,21 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := r.URL.Path
+
+	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+		if path != "/api/login" && path != "/api/csrf-token" && !strings.HasPrefix(path, "/api/webhooks") {
+			headerToken := r.Header.Get("X-CSRF-Token")
+			cookie, err := r.Cookie("csrf_token")
+			if err != nil || cookie.Value == "" || subtle.ConstantTimeCompare([]byte(headerToken), []byte(cookie.Value)) != 1 {
+				jsonError(w, "CSRF token required", http.StatusForbidden)
+				return
+			}
+		}
+	}
+
 	switch {
+	case path == "/api/csrf-token":
+		g.handleCSRFToken(w, r)
 	case path == "/api/health/system":
 		g.handleSystemHealth(w, r)
 	case path == "/api/health":
@@ -947,11 +1072,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleGetCamera))(w, r)
 	case path == "/api/recordings" && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleRecordings))(w, r)
-	case path == "/api/events" && r.Method == http.MethodGet:
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleEvents))(w, r)
+	case strings.HasPrefix(path, "/api/events"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/webhooks"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.notificationProxy.ServeHTTP(w, r)
+		}))(w, r)
 	case strings.HasPrefix(path, "/api/playback/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handlePlayback))(w, r)
 	case strings.HasPrefix(path, "/api/webrtc/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleWebRTC))(w, r)
+	case path == "/api/webrtc/metadata" || strings.HasPrefix(path, "/api/webrtc/metadata"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleWebRTC))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && (strings.Contains(path, "/ptz/") || strings.HasSuffix(path, "/ptz/presets")):
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
@@ -983,6 +1117,42 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/bookmarks"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/retention-policies"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/timeline"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/recording-timeline"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/frame-index"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/motion-frames"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/scene-changes"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.recorderProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/audio/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.recorderProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/legal-holds"):
@@ -995,24 +1165,65 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.exportProxy.ServeHTTP(w, r)
 		}))(w, r)
-	case strings.HasPrefix(path, "/api/alerts"):
+	case strings.HasPrefix(path, "/api/channels"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.notificationProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/templates"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.notificationProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/notification-log"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.notificationProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/admin/config"):
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.notificationProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/evidence"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.exportProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/incidents"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/alerts"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.alertProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/rules"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.alertProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/tours"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
-			g.cameraControlProxy.ServeHTTP(w, r)
+			g.alertProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/analytics/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/intrusion-zones"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/loitering-zones"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/abandoned-object-zones"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			g.alertProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/forensics/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.alertProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case path == "/api/audit/log" && r.Method == http.MethodPost:
@@ -1033,7 +1244,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/pos/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.posProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/discovery/"):

@@ -897,11 +897,31 @@ export const api = {
     }),
 
   // Timeline
-  getTimelineData: (params: {start_time: string; end_time: string; cameras?: string[]; zoom?: string}) => {
-    const q = new URLSearchParams({ start_time: params.start_time, end_time: params.end_time });
-    if (params.zoom) q.set('zoom', params.zoom);
-    if (params.cameras?.length) q.set('cameras', params.cameras.join(','));
-    return request<{segments: any[]; density: {timestamp: string; count: number}[]; total: number}>('/admin/timeline?' + q.toString());
+  getTimelineData: async (params: {start_time: string; end_time: string; cameras?: string[]; zoom?: string}) => {
+    const cameraId = params.cameras?.[0] || '';
+    const bucketQ = new URLSearchParams({ start: params.start_time, end: params.end_time });
+    if (params.zoom) bucketQ.set('granularity', params.zoom);
+    if (cameraId) bucketQ.set('camera_id', cameraId);
+
+    const [bucketData, segmentData] = await Promise.all([
+      request<{buckets?: {bucket: string; count: number; has_video: boolean; has_event: boolean}[]}>(`/timeline?${bucketQ.toString()}`).catch(() => ({ buckets: [] })),
+      cameraId ? request<{segments?: {start: string; end: string; has_video: boolean}[]}>(`/recording-timeline?camera_id=${cameraId}&start=${params.start_time}&end=${params.end_time}`).catch(() => ({ segments: [] })) : Promise.resolve({ segments: [] }),
+    ]);
+
+    const density = (bucketData.buckets || []).map(b => ({
+      timestamp: b.bucket,
+      count: b.count || 0,
+    }));
+
+    const segments: any[] = (segmentData.segments || []).map(s => ({
+      type: 'recording',
+      start_time: s.start,
+      end_time: s.end || s.start,
+      camera_id: cameraId,
+      camera_name: '',
+    }));
+
+    return { segments, density, total: segments.length };
   },
 
   // AI Zones

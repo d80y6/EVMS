@@ -214,6 +214,9 @@ services:
       limits:
         cpu: 300m
         memory: 256Mi
+    env:
+      DB_URL: ""
+      DISCOVERY_NATS_URL: ""
 
   eventProc:
     enabled: true

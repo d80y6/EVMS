@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { api, authUrl, getCSRFToken } from '../api/client';
 
 interface CameraViewProps {
   cameraId: string;
@@ -13,9 +14,23 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
   const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [streamReady, setStreamReady] = useState(false);
   const [dewarped, setDewarped] = useState(false);
-  const thumbnailUrl = `/api/thumbnails/image/${cameraId}/latest.jpg`;
+  const [thumbnailUrl, setThumbnailUrl] = useState('');
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    const now = new Date();
+    const start = new Date(now.getTime() - 3600000).toISOString();
+    const end = now.toISOString();
+    api.getTimeline(cameraId, start, end, 3600)
+      .then((data) => {
+        const valid = data.thumbnails.filter(t => t.url);
+        if (valid.length > 0) {
+          setThumbnailUrl(authUrl(`/api${valid[valid.length - 1].url}`));
+        }
+      })
+      .catch(() => {});
+  }, [cameraId]);
 
   const cleanup = useCallback(() => {
     if (pcRef.current) {
@@ -50,10 +65,17 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
       await pc.setLocalDescription(offer);
 
       const streamParam = streamType && streamType !== 'main' ? `&stream_type=${streamType}` : '';
+      const token = localStorage.getItem('auth_token');
+      const csrfToken = getCSRFToken();
       const response = await fetch(`/api/webrtc/offer?camera_id=${cameraId}${streamParam}`, {
         method: 'POST',
         body: JSON.stringify(pc.localDescription),
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        },
       });
 
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
@@ -68,15 +90,28 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
 
   useEffect(() => {
     startStream();
+    const timeout = setTimeout(() => {
+      if (pcRef.current && pcRef.current.iceConnectionState !== 'connected') {
+        setStatus('offline');
+      }
+    }, 10000);
     return () => {
       if (retryRef.current) clearTimeout(retryRef.current);
+      clearTimeout(timeout);
       cleanup();
     };
   }, [startStream, cleanup]);
 
   return (
     <div className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group">
-      {!streamReady && (
+      {!streamReady && !thumbnailUrl && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <svg className="w-16 h-16 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </div>
+      )}
+      {!streamReady && thumbnailUrl && (
         <img
           src={thumbnailUrl}
           alt=""
@@ -115,8 +150,9 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
       )}
 
       {status === 'offline' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm">
-          <span className="text-slate-500 text-sm">Stream Offline</span>
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80">
+          <span className="text-slate-600 text-3xl font-bold mb-2">{cameraId.slice(0, 8)}</span>
+          <span className="text-slate-500 text-xs">Waiting for video feed</span>
         </div>
       )}
 

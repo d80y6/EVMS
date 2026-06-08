@@ -46,7 +46,7 @@ spec:
               name: evms-config
               key: NATS_URL
         - name: CAMERA_ID
-          value: "demo_cam"
+          value: "6c7c8708-8c2a-4651-8d74-a2c0b35f7db0"
         resources:
           {{- toYaml .Values.services.aiWorker.resources | nindent 10 }}
 {{- end }}

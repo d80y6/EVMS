@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/nats-io/nats.go"
+	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 )
@@ -35,6 +38,7 @@ type WebRTCService struct {
 	sessionsMu    sync.RWMutex
 	config        WebRTCConfig
 	healthHandler *common.HealthHandler
+	webrtcAPI     *webrtc.API
 }
 
 // WebRTCConfig holds configuration for the WebRTC service
@@ -44,6 +48,8 @@ type WebRTCConfig struct {
 	NATSURL      string
 	ICEServers   []string
 	JWTSecretEnv string
+	ICEPort      int
+	ICEHost      string
 }
 
 // DefaultWebRTCConfig returns a configuration with sensible defaults
@@ -56,12 +62,19 @@ func DefaultWebRTCConfig() WebRTCConfig {
 			}
 		}
 	}
+	icePort := 8083
+	if p, err := strconv.Atoi(os.Getenv("WEBRTC_ICE_PORT")); err == nil && p > 0 {
+		icePort = p
+	}
+
 	return WebRTCConfig{
 		HTTPAddr:     common.GetEnv("HTTP_ADDR", ":8082"),
 		MetricsAddr:  common.GetEnv("METRICS_ADDR", ":2112"),
 		NATSURL:      common.GetEnv("NATS_URL", "nats://nats:4222"),
 		ICEServers:   iceServers,
 		JWTSecretEnv: "JWT_SECRET",
+		ICEPort:      icePort,
+		ICEHost:      os.Getenv("WEBRTC_HOST_IP"),
 	}
 }
 
@@ -84,6 +97,30 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 		healthHandler: common.NewHealthHandler(),
 	}
 	svc.healthHandler.AddNATSChecker(nc, "nats")
+
+	// Set up ICE UDP mux and NAT 1:1 mapping for Docker deployment
+	if config.ICEPort > 0 || config.ICEHost != "" {
+		var se webrtc.SettingEngine
+
+		if config.ICEPort > 0 {
+			udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: config.ICEPort})
+			if err != nil {
+				logger.Warn("Failed to bind ICE UDP port, using ephemeral", "port", config.ICEPort, "error", err)
+			} else {
+				mux := ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: udpConn})
+				se.SetICEUDPMux(mux)
+				logger.Info("ICE UDP mux bound", "port", config.ICEPort)
+			}
+		}
+
+		if config.ICEHost != "" {
+			se.SetNAT1To1IPs([]string{config.ICEHost}, webrtc.ICECandidateTypeHost)
+			logger.Info("NAT 1:1 mapping configured", "host", config.ICEHost, "candidate_type", "host")
+		}
+
+		svc.webrtcAPI = webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	}
+
 	return svc, nil
 }
 
@@ -143,7 +180,15 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		ICEServers: iceServers,
 	}
 
-	peerConnection, err := webrtc.NewPeerConnection(config)
+	var (
+		peerConnection *webrtc.PeerConnection
+		err error
+	)
+	if s.webrtcAPI != nil {
+		peerConnection, err = s.webrtcAPI.NewPeerConnection(config)
+	} else {
+		peerConnection, err = webrtc.NewPeerConnection(config)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

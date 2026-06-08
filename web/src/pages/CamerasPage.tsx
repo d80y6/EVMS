@@ -8,7 +8,7 @@ export default function CamerasPage() {
   const [error, setError] = useState<string | null>(null);
   const [showDialog, setShowDialog] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
-  const [form, setForm] = useState({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30 });
+  const [form, setForm] = useState({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
 
   const fetchData = async () => {
     try {
@@ -29,7 +29,7 @@ export default function CamerasPage() {
     try {
       await api.createCamera(form);
       setShowDialog(false);
-      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30 });
+      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
       await fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create camera');
@@ -41,7 +41,7 @@ export default function CamerasPage() {
     try {
       await api.updateCamera(editing, form);
       setEditing(null);
-      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30 });
+      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
       await fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update camera');
@@ -60,7 +60,7 @@ export default function CamerasPage() {
 
   const openEdit = (cam: Camera) => {
     setEditing(cam.id);
-    setForm({ site_id: cam.site_id, name: cam.name, connection_url: cam.connection_url, substream_url: cam.substream_url || '', ptz_protocol: cam.ptz_protocol, retention_days: cam.retention_days });
+    setForm({ site_id: cam.site_id, name: cam.name, connection_url: cam.connection_url, substream_url: cam.substream_url || '', ptz_protocol: cam.ptz_protocol, retention_days: cam.retention_days, onvif_username: cam.onvif_username || '', onvif_password: '' });
     setShowDialog(true);
   };
 
@@ -145,6 +145,16 @@ export default function CamerasPage() {
               <label className="text-xs text-slate-500 block mb-1">Retention Days</label>
               <input type="number" value={form.retention_days} onChange={e => setForm({ ...form, retention_days: parseInt(e.target.value) || 30 })} min={1} max={365}
                 className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">ONVIF Username</label>
+              <input type="text" value={form.onvif_username} onChange={e => setForm({ ...form, onvif_username: e.target.value })}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" placeholder="admin" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 block mb-1">ONVIF Password</label>
+              <input type="password" value={form.onvif_password} onChange={e => setForm({ ...form, onvif_password: e.target.value })}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" placeholder="ONVIF device password" />
             </div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setShowDialog(false)}

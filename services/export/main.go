@@ -1,9 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,13 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
-	"syscall"
 	"time"
-
-	"github.com/dam-vms/dam/pkg/common"
 )
 
 type ExportRequest struct {
@@ -65,7 +61,8 @@ func findSegments(cameraID, start, end string) ([]string, error) {
 			continue
 		}
 		if startErr == nil || endErr == nil {
-			segTime, segErr := time.Parse("2006-01-02T15:04:05", strings.TrimSuffix(e.Name(), ".mp4"))
+			// Filenames from FFmpeg -strftime: 20240608_120000.mp4
+			segTime, segErr := time.Parse("20060102_150405", strings.TrimSuffix(e.Name(), ".mp4"))
 			if segErr == nil {
 				if startErr == nil && segTime.Before(startTime) {
 					continue
@@ -77,6 +74,7 @@ func findSegments(cameraID, start, end string) ([]string, error) {
 		}
 		segments = append(segments, filepath.Join(dir, e.Name()))
 	}
+	sort.Strings(segments)
 	return segments, nil
 }
 
@@ -143,6 +141,12 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -164,11 +168,39 @@ func main() {
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 	common.StartResourceMonitor(ctx)
 
+	dbURL := os.Getenv("DB_URL")
+	var db *sqlx.DB
+	if dbURL != "" {
+		cb := common.NewDBCircuitBreaker("export")
+		dbCtx, dbCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer dbCancel()
+		var err error
+		db, err = common.ConnectDBWithCircuitBreaker(dbCtx, "postgres", dbURL, cb)
+		if err != nil {
+			logger.Error("Failed to connect to database", "error", err)
+		} else {
+			logger.Info("Connected to database")
+		}
+	}
+
 	mux := http.NewServeMux()
 	healthHandler := common.NewHealthHandler()
+	if db != nil {
+		healthHandler.AddDBChecker(db.DB, "postgres")
+	}
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.Handle("/export", common.JWTAuthMiddleware(handleExport))
+
+	if db != nil {
+		mux.Handle("/api/evidence/cases", common.JWTAuthMiddleware(handleEvidenceCases(db, logger)))
+		mux.Handle("/api/evidence/cases/", common.JWTAuthMiddleware(handleEvidenceCaseByID(db, logger)))
+		mux.Handle("/api/evidence/lockers", common.JWTAuthMiddleware(handleEvidenceLockers(db, logger)))
+		mux.Handle("/api/evidence/lockers/", common.JWTAuthMiddleware(handleEvidenceLockerByID(db, logger)))
+		mux.Handle("/api/evidence/items", common.JWTAuthMiddleware(handleEvidenceItems(db, logger)))
+		mux.Handle("/api/evidence/items/", common.JWTAuthMiddleware(handleEvidenceItemByID(db, logger)))
+		mux.Handle("/api/evidence/share/", common.JWTAuthMiddleware(handleShareAccess(db, logger)))
+	}
 
 	server := &http.Server{
 		Addr:         ":8094",

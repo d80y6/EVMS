@@ -17,7 +17,6 @@ pub mod models;
 
 use std::sync::Arc;
 use dashmap::DashMap;
-use tokio::sync::RwLock;
 
 use crate::models::ModelRegistry;
 use crate::batcher::Batcher;

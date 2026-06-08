@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -15,49 +14,28 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/dam-vms/dam/pkg/onvif"
 	"github.com/fsnotify/fsnotify"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 )
 
 const (
-	soapGetProfiles = `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
-  <soap:Body>
-    <trt:GetProfiles/>
-  </soap:Body>
-</soap:Envelope>`
-
-	soapGetStreamUri = `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
-  <soap:Body>
-    <trt:GetStreamUri>
-      <trt:StreamSetup>
-        <tt:Stream>RTP-Unicast</tt:Stream>
-        <tt:Transport>
-          <tt:Protocol>RTSP</tt:Protocol>
-        </tt:Transport>
-      </trt:StreamSetup>
-      <trt:ProfileToken>PROFILE_TOKEN</trt:ProfileToken>
-    </trt:GetStreamUri>
-  </soap:Body>
-</soap:Envelope>`
+	discoveryInterval = 30 * time.Second
 )
 
-// IngestConfig holds configuration for the ingest service
+// IngestConfig holds shared configuration for the ingest service
 type IngestConfig struct {
-	CameraID       string
-	RTSPURL        string
-	NATSURL        string
-	MetricsAddr    string
-	RecordingsDir  string
-	ONVIFMode      bool
-	ONVIFDeviceURL string
+	DBURL         string
+	NATSURL       string
+	MetricsAddr   string
+	RecordingsDir string
 }
 
 // DefaultIngestConfig returns a configuration with sensible defaults
@@ -71,123 +49,62 @@ func DefaultIngestConfig() IngestConfig {
 
 // Validate checks if the configuration is valid
 func (c *IngestConfig) Validate() error {
-	if c.CameraID == "" {
-		return errors.New("CAMERA_ID environment variable is required")
-	}
-	if c.ONVIFMode {
-		if c.ONVIFDeviceURL == "" {
-			return errors.New("ONVIF_DEVICE_URL environment variable is required when ONVIF_MODE is true")
-		}
-	} else {
-		if c.RTSPURL == "" {
-			return errors.New("RTSP_URL environment variable is required when ONVIF_MODE is false")
-		}
+	if c.DBURL == "" {
+		return errors.New("DB_URL environment variable is required")
 	}
 	return nil
 }
 
-func negotiateRTSPURL(ctx context.Context, deviceURL string) (string, error) {
-	profilesResp, err := sendSOAP(ctx, deviceURL, soapGetProfiles)
-	if err != nil {
-		return "", fmt.Errorf("onvif get profiles: %w", err)
+// DBCamera represents a camera row from the database
+type DBCamera struct {
+	ID             string  `db:"id"`
+	Name           string  `db:"name"`
+	ConnectionURL  string  `db:"connection_url"`
+	Status         string  `db:"status"`
+	OnvifUsername  *string `db:"onvif_username"`
+	OnvifPassword  *string `db:"onvif_password"`
+}
+
+func negotiateRTSPURL(ctx context.Context, deviceURL string, username, password string) (string, error) {
+	if username == "" || password == "" {
+		return deviceURL, nil
 	}
 
-	token, err := extractFirstProfileToken(profilesResp)
+	creds := &onvif.Credentials{Username: username, Password: password}
+	client := onvif.NewSOAPClient(15*time.Second, creds)
+	mediaURL := onvif.BuildMediaURL(deviceURL)
+
+	profiles, err := onvif.GetProfiles(ctx, client, mediaURL)
 	if err != nil {
-		return "", fmt.Errorf("extract profile token: %w", err)
+		return deviceURL, fmt.Errorf("onvif get profiles (falling back to direct URL): %w", err)
 	}
 
-	streamReq := strings.ReplaceAll(soapGetStreamUri, "PROFILE_TOKEN", token)
-	streamResp, err := sendSOAP(ctx, deviceURL, streamReq)
-	if err != nil {
-		return "", fmt.Errorf("onvif get stream uri: %w", err)
+	mainProfile := onvif.FindMainProfile(profiles)
+	if mainProfile == nil {
+		if len(profiles) == 0 {
+			return deviceURL, errors.New("no ONVIF profiles found (falling back to direct URL)")
+		}
+		mainProfile = &profiles[0]
 	}
 
-	uri, err := extractStreamURI(streamResp)
+	uri, err := onvif.GetStreamURIForProfileToken(ctx, client, deviceURL, mainProfile.Token)
 	if err != nil {
-		return "", fmt.Errorf("extract stream uri: %w", err)
+		return deviceURL, fmt.Errorf("onvif get stream uri (falling back to direct URL): %w", err)
 	}
 
 	return uri, nil
 }
 
-func sendSOAP(ctx context.Context, url, body string) ([]byte, error) {
-	soapCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(soapCtx, http.MethodPost, url, strings.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("onvif request failed with status %d: %s", resp.StatusCode, string(data))
-	}
-
-	return data, nil
+// CameraStreamConfig holds per-camera stream configuration
+type CameraStreamConfig struct {
+	CameraID      string
+	RTSPURL       string
+	RecordingsDir string
 }
 
-func extractFirstProfileToken(data []byte) (string, error) {
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	for {
-		token, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		if start, ok := token.(xml.StartElement); ok && start.Name.Local == "Profiles" {
-			for _, attr := range start.Attr {
-				if attr.Name.Local == "token" {
-					return attr.Value, nil
-				}
-			}
-		}
-	}
-	return "", errors.New("no profile token found in ONVIF response")
-}
-
-func extractStreamURI(data []byte) (string, error) {
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	for {
-		token, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		if start, ok := token.(xml.StartElement); ok && start.Name.Local == "Uri" {
-			charToken, err := decoder.Token()
-			if err != nil {
-				return "", err
-			}
-			if char, ok := charToken.(xml.CharData); ok {
-				if uri := strings.TrimSpace(string(char)); uri != "" {
-					return uri, nil
-				}
-			}
-		}
-	}
-	return "", errors.New("no stream URI found in ONVIF response")
-}
-
-// StreamProcessor handles video stream processing
+// StreamProcessor handles video stream processing for a single camera
 type StreamProcessor struct {
-	config IngestConfig
+	config CameraStreamConfig
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	nc     *nats.Conn
@@ -196,7 +113,7 @@ type StreamProcessor struct {
 }
 
 // NewStreamProcessor creates a new stream processor
-func NewStreamProcessor(config IngestConfig, nc *nats.Conn, logger *slog.Logger) *StreamProcessor {
+func NewStreamProcessor(config CameraStreamConfig, nc *nats.Conn, logger *slog.Logger) *StreamProcessor {
 	return &StreamProcessor{
 		config: config,
 		nc:     nc,
@@ -217,6 +134,8 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 	// Optimized FFmpeg args for low latency and consistent segmenting
 	args := []string{
 		"-rtsp_transport", "tcp",
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
 		"-hwaccel", "auto",
 		"-i", p.config.RTSPURL,
 		// Stream 0: Video copy for recording
@@ -272,8 +191,12 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 
 	if err := p.cmd.Start(); err != nil {
 		cancel()
+		mjpegW.Close()
+		h264W.Close()
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
+	mjpegW.Close()
+	h264W.Close()
 	return nil
 }
 
@@ -288,10 +211,6 @@ func (p *StreamProcessor) Stop() error {
 	}
 
 	p.wg.Wait()
-
-	if p.nc != nil {
-		p.nc.Close()
-	}
 
 	common.StreamActive.WithLabelValues(p.config.CameraID).Set(0)
 	p.logger.Info("Stream processor stopped", "camera_id", p.config.CameraID)
@@ -415,9 +334,70 @@ func (p *StreamProcessor) publishMJPEG(r io.Reader, subject string) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		p.logger.Error("MJPEG scanner error", "error", err)
+	}
 }
 
-// publishH264 reads and publishes H264 NAL units
+// nalType returns the H264 NAL unit type, skipping the Annex B start code prefix.
+func nalType(nal []byte) byte {
+	offset := 0
+	if len(nal) >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
+		offset = 4
+	} else if len(nal) >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
+		offset = 3
+	} else {
+		return nal[0] & 0x1F
+	}
+	return nal[offset] & 0x1F
+}
+
+// readUE decodes an unsigned Exponential-Golomb code from the given bit offset.
+func readUE(nal []byte, bitOffset int) (int, int) {
+	leadingZeros := 0
+	for bitOffset/8 < len(nal) {
+		if nal[bitOffset/8]>>(7-bitOffset%8)&1 == 0 {
+			leadingZeros++
+			bitOffset++
+		} else {
+			bitOffset++
+			break
+		}
+	}
+	value := 0
+	for i := 0; i < leadingZeros; i++ {
+		if bitOffset/8 >= len(nal) {
+			break
+		}
+		bitOffset++
+		byteIdx := bitOffset / 8
+		bitIdx := bitOffset % 8
+		value = (value << 1) | int(nal[byteIdx]>>(7-bitIdx)&1)
+	}
+	return (1 << leadingZeros) - 1 + value, bitOffset
+}
+
+// isFirstSliceOfFrame returns true if the NAL unit is the first slice of a new
+// H264 access unit (frame). It parses the slice header's first_mb_in_slice field.
+func isFirstSliceOfFrame(nal []byte) bool {
+	offset := 0
+	if len(nal) >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
+		offset = 4
+	} else if len(nal) >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
+		offset = 3
+	} else {
+		return false
+	}
+	t := nal[offset] & 0x1F
+	if t != 1 && t != 5 {
+		return false
+	}
+	// Slice header starts at bit offset (offset+1)*8 (after the NAL header byte)
+	fms, _ := readUE(nal, (offset+1)*8)
+	return fms == 0
+}
+
+// publishH264 reads and publishes H264 frames (batched NAL units)
 func (p *StreamProcessor) publishH264(r io.Reader, subject string) {
 	defer func() {
 		if rc, ok := r.(io.ReadCloser); ok {
@@ -449,45 +429,78 @@ func (p *StreamProcessor) publishH264(r io.Reader, subject string) {
 		lastFrameTime = time.Now()
 		bytesInWindow int64
 		windowStart   = time.Now()
+		frameBuf      []byte
+		hasSlice      bool
 	)
 
 	for scanner.Scan() {
-		if p.nc != nil {
-			frame := scanner.Bytes()
-			now := time.Now()
+		if p.nc == nil {
+			continue
+		}
+		nal := scanner.Bytes()
+		now := time.Now()
 
-			common.StreamLatencyMs.WithLabelValues(p.config.CameraID).Set(float64(now.Sub(lastFrameTime).Milliseconds()))
-			lastFrameTime = now
+		common.StreamLatencyMs.WithLabelValues(p.config.CameraID).Set(float64(now.Sub(lastFrameTime).Milliseconds()))
+		lastFrameTime = now
 
-			bytesInWindow += int64(len(frame))
-			if now.Sub(windowStart) >= time.Second {
-				bps := float64(bytesInWindow) * 8 / now.Sub(windowStart).Seconds()
-				common.StreamBitrate.WithLabelValues(p.config.CameraID).Set(bps)
-				bytesInWindow = 0
-				windowStart = now
-			}
+		bytesInWindow += int64(len(nal))
+		if now.Sub(windowStart) >= time.Second {
+			bps := float64(bytesInWindow) * 8 / now.Sub(windowStart).Seconds()
+			common.StreamBitrate.WithLabelValues(p.config.CameraID).Set(bps)
+			bytesInWindow = 0
+			windowStart = now
+		}
 
-			if err := p.nc.Publish(subject, frame); err != nil {
+		t := nalType(nal)
+		isNewFrame := t == 7 || (t == 6 && hasSlice) || ((t == 1 || t == 5) && isFirstSliceOfFrame(nal))
+
+		if isNewFrame && hasSlice {
+			if err := p.nc.Publish(subject, frameBuf); err != nil {
 				p.logger.Debug("Failed to publish H264 frame", "error", err)
 				common.FramesDroppedTotal.WithLabelValues(p.config.CameraID, "publish_error").Inc()
 			} else {
 				common.FramesProcessed.WithLabelValues(p.config.CameraID, "h264").Inc()
 			}
+			frameBuf = nil
+			hasSlice = false
 		}
+
+		frameBuf = append(frameBuf, nal...)
+		if t == 1 || t == 5 {
+			hasSlice = true
+		}
+	}
+
+	// Publish any remaining buffered data
+	if len(frameBuf) > 0 && p.nc != nil {
+		if err := p.nc.Publish(subject, frameBuf); err != nil {
+			p.logger.Debug("Failed to publish remaining H264 frame", "error", err)
+		} else {
+			common.FramesProcessed.WithLabelValues(p.config.CameraID, "h264").Inc()
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		p.logger.Error("H264 scanner error", "camera_id", p.config.CameraID, "error", err)
+	} else {
+		p.logger.Info("H264 scanner finished", "camera_id", p.config.CameraID)
 	}
 }
 
-// IngestService manages the ingest service lifecycle
+// IngestService manages the ingest service lifecycle for multiple cameras
 type IngestService struct {
-	config    IngestConfig
-	logger    *slog.Logger
-	processor *StreamProcessor
-	nc        *nats.Conn
-	healthSrv *http.Server
+	config     IngestConfig
+	db         *sqlx.DB
+	logger     *slog.Logger
+	processors map[string]*StreamProcessor
+	nc         *nats.Conn
+	healthSrv  *http.Server
+	mu         sync.Mutex
+	discCancel context.CancelFunc
 }
 
 // NewIngestService creates a new ingest service
-func NewIngestService(config IngestConfig, logger *slog.Logger) (*IngestService, error) {
+func NewIngestService(ctx context.Context, config IngestConfig, logger *slog.Logger) (*IngestService, error) {
 	var nc *nats.Conn
 	var err error
 
@@ -503,9 +516,19 @@ func NewIngestService(config IngestConfig, logger *slog.Logger) (*IngestService,
 		logger.Info("Connected to NATS", "url", config.NATSURL)
 	}
 
+	cb := common.NewDBCircuitBreaker("ingest")
+	db, err := common.ConnectDBWithCircuitBreaker(ctx, "postgres", config.DBURL, cb)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+	logger.Info("Connected to database")
+
 	h := common.NewHealthHandler()
 	if nc != nil {
 		h.AddNATSChecker(nc, "nats")
+	}
+	if db != nil {
+		h.AddDBChecker(db.DB, "postgres")
 	}
 
 	mux := http.NewServeMux()
@@ -513,43 +536,136 @@ func NewIngestService(config IngestConfig, logger *slog.Logger) (*IngestService,
 	mux.HandleFunc("/ready", h.Readiness)
 
 	return &IngestService{
-		config:    config,
-		logger:    logger,
-		nc:        nc,
-		healthSrv: &http.Server{Addr: ":8092", Handler: mux},
+		config:     config,
+		db:         db,
+		logger:     logger,
+		nc:         nc,
+		processors: make(map[string]*StreamProcessor),
+		healthSrv:  &http.Server{Addr: ":8092", Handler: mux},
 	}, nil
+}
+
+// discoverCameras queries the database and starts/stops processors accordingly
+func (s *IngestService) discoverCameras(ctx context.Context) {
+	var cameras []DBCamera
+	if err := s.db.SelectContext(ctx, &cameras,
+		"SELECT id, name, connection_url, status, onvif_username, onvif_password FROM cameras WHERE connection_url IS NOT NULL AND connection_URL != ''",
+	); err != nil {
+		s.logger.Error("Failed to query cameras", "error", err)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	active := make(map[string]bool)
+	for _, cam := range cameras {
+		if cam.ConnectionURL == "" {
+			continue
+		}
+		active[cam.ID] = true
+
+		if _, exists := s.processors[cam.ID]; exists {
+			continue
+		}
+
+		username := ""
+		password := ""
+		if cam.OnvifUsername != nil {
+			username = *cam.OnvifUsername
+		}
+		if cam.OnvifPassword != nil {
+			password = *cam.OnvifPassword
+		}
+
+		rtspURL, err := negotiateRTSPURL(ctx, cam.ConnectionURL, username, password)
+		if err != nil {
+			s.logger.Warn("ONVIF negotiation failed, using direct RTSP URL",
+				"camera_id", cam.ID,
+				"error", err)
+		}
+
+		proc := NewStreamProcessor(CameraStreamConfig{
+			CameraID:      cam.ID,
+			RTSPURL:       rtspURL,
+			RecordingsDir: s.config.RecordingsDir,
+		}, s.nc, s.logger)
+
+		if err := proc.Start(ctx); err != nil {
+			s.logger.Error("Failed to start stream processor",
+				"camera_id", cam.ID,
+				"error", err)
+			continue
+		}
+
+		s.processors[cam.ID] = proc
+		s.logger.Info("Started ingesting camera",
+			"camera_id", cam.ID,
+			"name", cam.Name,
+			"url", cam.ConnectionURL)
+	}
+
+	for id, proc := range s.processors {
+		if !active[id] {
+			proc.Stop()
+			delete(s.processors, id)
+			s.logger.Info("Stopped ingesting camera (removed from DB)", "camera_id", id)
+		}
+	}
+}
+
+// discoveryLoop periodically discovers cameras from the DB
+func (s *IngestService) discoveryLoop(ctx context.Context) {
+	s.discoverCameras(ctx)
+	ticker := time.NewTicker(discoveryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.discoverCameras(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // Close gracefully shuts down the service
 func (s *IngestService) Close() error {
+	if s.discCancel != nil {
+		s.discCancel()
+	}
+
 	if s.healthSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.healthSrv.Shutdown(ctx); err != nil {
+		if err := s.healthSrv.Shutdown(shutdownCtx); err != nil {
 			s.logger.Error("Health server shutdown error", "error", err)
 		}
 	}
 
-	if s.processor != nil {
-		return s.processor.Stop()
+	s.mu.Lock()
+	for id, proc := range s.processors {
+		proc.Stop()
+		delete(s.processors, id)
 	}
+	s.mu.Unlock()
+
 	if s.nc != nil {
 		s.nc.Close()
+	}
+
+	if s.db != nil {
+		s.db.Close()
 	}
 	return nil
 }
 
 // Start starts the ingest service
 func (s *IngestService) Start(ctx context.Context) error {
-	s.processor = NewStreamProcessor(s.config, s.nc, s.logger)
-	return s.processor.Start(ctx)
-}
-
-// Wait waits for the service to complete
-func (s *IngestService) Wait() error {
-	if s.processor != nil {
-		return s.processor.Wait()
-	}
+	discCtx, discCancel := context.WithCancel(ctx)
+	s.discCancel = discCancel
+	go s.discoveryLoop(discCtx)
 	return nil
 }
 
@@ -566,27 +682,7 @@ func main() {
 	defer stop()
 
 	config := DefaultIngestConfig()
-	config.CameraID = common.SanitizeCameraID(os.Getenv("CAMERA_ID"))
-	config.RTSPURL = os.Getenv("RTSP_URL")
-	config.ONVIFMode = os.Getenv("ONVIF_MODE") == "true"
-	config.ONVIFDeviceURL = os.Getenv("ONVIF_DEVICE_URL")
-
-	if config.ONVIFMode {
-		logger.Info("ONVIF mode enabled, negotiating RTSP URL",
-			"device_url", config.ONVIFDeviceURL)
-		negotiatedURL, err := negotiateRTSPURL(ctx, config.ONVIFDeviceURL)
-		if err != nil {
-			logger.Error("ONVIF negotiation failed", "error", err)
-			os.Exit(1)
-		}
-		config.RTSPURL = negotiatedURL
-		logger.Info("ONVIF negotiation succeeded", "rtsp_url", config.RTSPURL)
-	}
-
-	if err := common.ValidateRTSPURL(config.RTSPURL); err != nil {
-		logger.Error("Invalid RTSP URL", "error", err)
-		os.Exit(1)
-	}
+	config.DBURL = os.Getenv("DB_URL")
 
 	if addr := os.Getenv("NATS_URL"); addr != "" {
 		config.NATSURL = addr
@@ -603,7 +699,7 @@ func main() {
 	common.StartMetricsServer(config.MetricsAddr)
 	common.StartResourceMonitor(ctx)
 
-	service, err := NewIngestService(config, logger)
+	service, err := NewIngestService(ctx, config, logger)
 	if err != nil {
 		logger.Error("Failed to create ingest service", "error", err)
 		os.Exit(1)
@@ -620,13 +716,6 @@ func main() {
 		if err := service.healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("Health server error", "error", err)
 		}
-	}()
-
-	go func() {
-		if err := service.Wait(); err != nil {
-			logger.Error("FFmpeg process exited", "error", err)
-		}
-		stop()
 	}()
 
 	<-ctx.Done()

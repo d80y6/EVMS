@@ -46,9 +46,9 @@ export default function RecordingsPage() {
       api.getEvents(),
     ])
       .then(([recData, camData, evData]) => {
-        setRecordings(recData.recordings);
-        setCameras(camData);
-        setEvents(evData.events);
+        setRecordings(recData.recordings || []);
+        setCameras(camData || []);
+        setEvents(evData.events || []);
         if (camData.length > 0 && !selectedCamera) {
           setSelectedCamera(camData[0].id);
         }

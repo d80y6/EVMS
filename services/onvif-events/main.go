@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,11 +13,27 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/dam-vms/dam/pkg/onvif"
 )
+
+type OnvifEventRow struct {
+	ID             string    `db:"id" json:"id"`
+	CameraID       string    `db:"camera_id" json:"camera_id"`
+	SubscriptionID string    `db:"subscription_id" json:"subscription_id,omitempty"`
+	Topic          string    `db:"topic" json:"topic,omitempty"`
+	Source         string    `db:"source" json:"source,omitempty"`
+	EventType      string    `db:"event_type" json:"event_type"`
+	Severity       string    `db:"severity" json:"severity,omitempty"`
+	Message        string    `db:"message" json:"message,omitempty"`
+	RawXML         string    `db:"raw_xml" json:"raw_xml,omitempty"`
+	EventTime      time.Time `db:"event_time" json:"event_time"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
 
 type OnvifEventsConfig struct {
 	Port        string
@@ -44,12 +57,14 @@ type subscription struct {
 	PullPointURL string
 	Username     string
 	Password     string
+	client       *onvif.SOAPClient
 	stopCh       chan struct{}
 }
 
 type OnvifEventsService struct {
 	config        *OnvifEventsConfig
 	nc            *nats.Conn
+	db            *sqlx.DB
 	logger        *slog.Logger
 	mu            sync.Mutex
 	subs          map[string]*subscription
@@ -67,14 +82,27 @@ func NewOnvifEventsService(config *OnvifEventsConfig, logger *slog.Logger) (*Onv
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
+	var db *sqlx.DB
+	if config.DBURL != "" {
+		cb := common.NewDBCircuitBreaker("onvif-events")
+		db, err = common.ConnectDBWithCircuitBreaker(context.Background(), "postgres", config.DBURL, cb)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to database: %w", err)
+		}
+	}
+
 	svc := &OnvifEventsService{
 		config:        config,
 		nc:            nc,
+		db:            db,
 		logger:        logger,
 		subs:          make(map[string]*subscription),
 		healthHandler: common.NewHealthHandler(),
 	}
 	svc.healthHandler.AddNATSChecker(nc, "nats")
+	if db != nil {
+		svc.healthHandler.AddDBChecker(db.DB, "postgres")
+	}
 	return svc, nil
 }
 
@@ -101,6 +129,35 @@ func (s *OnvifEventsService) Start() error {
 	return nil
 }
 
+func (s *OnvifEventsService) insertEvent(ctx context.Context, sub *subscription, evt onvif.ONVIFEvent, eventType string) error {
+	if s.db == nil {
+		return nil
+	}
+
+	now := evt.Timestamp
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	msg := ""
+	if m, ok := evt.Data["message"].(string); ok {
+		msg = m
+	}
+	severity := ""
+	if sev, ok := evt.Data["severity"].(string); ok {
+		severity = sev
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO onvif_events (camera_id, subscription_id, topic, source, event_type, severity, message, event_time, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+		sub.CameraID, sub.PullPointURL, evt.Topic, "ONVIF", eventType, severity, msg, now)
+	if err != nil {
+		return fmt.Errorf("insert onvif event: %w", err)
+	}
+	return nil
+}
+
 func (s *OnvifEventsService) Close() error {
 	s.mu.Lock()
 	for _, sub := range s.subs {
@@ -121,6 +178,12 @@ func (s *OnvifEventsService) Close() error {
 
 	if s.nc != nil {
 		s.nc.Close()
+	}
+
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close database: %w", err))
+		}
 	}
 
 	if len(errs) > 0 {
@@ -172,7 +235,7 @@ func (s *OnvifEventsService) handleSubscribe(w http.ResponseWriter, r *http.Requ
 	}
 	s.mu.Unlock()
 
-	pullPointURL, err := s.createPullPointSubscription(req.DeviceURL, req.Username, req.Password)
+	pullPointSub, client, err := s.createPullPointSubscription(req.DeviceURL, req.Username, req.Password)
 	if err != nil {
 		s.logger.Error("failed to create PullPoint subscription", "camera_id", req.CameraID, "error", err)
 		http.Error(w, fmt.Sprintf("failed to create ONVIF subscription: %v", err), http.StatusBadGateway)
@@ -182,9 +245,10 @@ func (s *OnvifEventsService) handleSubscribe(w http.ResponseWriter, r *http.Requ
 	sub := &subscription{
 		CameraID:     req.CameraID,
 		DeviceURL:    req.DeviceURL,
-		PullPointURL: pullPointURL,
+		PullPointURL: pullPointSub.Address,
 		Username:     req.Username,
 		Password:     req.Password,
+		client:       client,
 		stopCh:       make(chan struct{}),
 	}
 
@@ -194,13 +258,13 @@ func (s *OnvifEventsService) handleSubscribe(w http.ResponseWriter, r *http.Requ
 
 	go s.runSubscription(sub)
 
-	s.logger.Info("ONVIF subscription created", "camera_id", req.CameraID, "pull_point_url", pullPointURL)
+	s.logger.Info("ONVIF subscription created", "camera_id", req.CameraID, "pull_point_url", pullPointSub.Address)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(subscribeResponse{
 		CameraID:     req.CameraID,
-		PullPointURL: pullPointURL,
+		PullPointURL: pullPointSub.Address,
 	})
 }
 
@@ -255,194 +319,50 @@ func (s *OnvifEventsService) handleListSubscriptions(w http.ResponseWriter, r *h
 
 
 
-func (s *OnvifEventsService) createPullPointSubscription(deviceURL, username, password string) (string, error) {
-	subID := uuid.New().String()
+func (s *OnvifEventsService) createPullPointSubscription(deviceURL, username, password string) (*onvif.PullPointSubscription, *onvif.SOAPClient, error) {
+	creds := &onvif.Credentials{Username: username, Password: password}
+	client := onvif.NewSOAPClient(10*time.Second, creds)
 
-	soapReq := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wse="http://docs.oasis-open.org/wsn/b-2" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
-  <soap:Header>
-    <wse:Identifier>uuid:%s</wse:Identifier>
-  </soap:Header>
-  <soap:Body>
-    <wsnt:CreatePullPointSubscription>
-      <wsnt:InitialTerminationTime>PT3600S</wsnt:InitialTerminationTime>
-    </wsnt:CreatePullPointSubscription>
-  </soap:Body>
-</soap:Envelope>`, subID)
-
-	eventServiceURL := fmt.Sprintf("%s/onvif/event_service", strings.TrimRight(deviceURL, "/"))
-
-	req, err := http.NewRequest(http.MethodPost, eventServiceURL, strings.NewReader(soapReq))
+	eventURL := onvif.BuildEventURL(deviceURL)
+	sub, err := onvif.CreatePullPointSubscription(context.Background(), client, eventURL, 3600*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-
-	if username != "" && password != "" {
-		req.SetBasicAuth(username, password)
+		return nil, nil, fmt.Errorf("CreatePullPointSubscription failed: %w", err)
 	}
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send CreatePullPointSubscription: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("ONVIF device returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return extractPullPointAddress(body)
-}
-
-func extractPullPointAddress(data []byte) (string, error) {
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	var address string
-	inAddress := false
-
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			break
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			if t.Name.Local == "Address" {
-				inAddress = true
-			}
-		case xml.CharData:
-			if inAddress {
-				address = string(t)
-				return address, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("no Address element found in response")
-}
-
-func (s *OnvifEventsService) pullMessages(pullPointURL string) ([]byte, error) {
-	soapReq := `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
-  <soap:Body>
-    <wsnt:PullMessages>
-      <wsnt:MaxNumberOfMessages>10</wsnt:MaxNumberOfMessages>
-      <wsnt:Timeout>PT5S</wsnt:Timeout>
-    </wsnt:PullMessages>
-  </soap:Body>
-</soap:Envelope>`
-
-	req, err := http.NewRequest(http.MethodPost, pullPointURL, strings.NewReader(soapReq))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create PullMessages request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/soap+xml; charset=utf-8")
-
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send PullMessages: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read PullMessages response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return nil, fmt.Errorf("PullMessages returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return body, nil
-}
-
-const (
-	EventTypeMotion = "motion"
-	EventTypeTamper = "tamper"
-	EventTypeAlarm  = "alarm"
-)
-
-var topicPatterns = map[string]string{
-	"MotionAlarm":               EventTypeMotion,
-	"CellMotionDetector/Motion": EventTypeMotion,
-	"Motion":                    EventTypeMotion,
-	"Tampering":                 EventTypeTamper,
-	"Tamper":                    EventTypeTamper,
-	"alarm":                     EventTypeAlarm,
-	"Alarm":                     EventTypeAlarm,
-}
-
-func classifyTopic(topic string) string {
-	topic = strings.TrimSpace(topic)
-	for pattern, eventType := range topicPatterns {
-		if strings.Contains(topic, pattern) {
-			return eventType
-		}
-	}
-	return ""
-}
-
-func extractTopics(data []byte) []string {
-	var topics []string
-	decoder := xml.NewDecoder(bytes.NewReader(data))
-	inTopic := false
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			break
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			if t.Name.Local == "Topic" {
-				inTopic = true
-			}
-		case xml.CharData:
-			if inTopic {
-				topics = append(topics, string(t))
-				inTopic = false
-			}
-		case xml.EndElement:
-			if t.Name.Local == "Topic" {
-				inTopic = false
-			}
-		}
-	}
-	return topics
+	return sub, client, nil
 }
 
 func (s *OnvifEventsService) runSubscription(sub *subscription) {
 	s.logger.Info("starting subscription poller", "camera_id", sub.CameraID)
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	pullTicker := time.NewTicker(5 * time.Second)
+	renewTicker := time.NewTicker(30 * time.Minute)
+	defer pullTicker.Stop()
+	defer renewTicker.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
-			respBody, err := s.pullMessages(sub.PullPointURL)
+		case <-pullTicker.C:
+			events, err := onvif.PullMessages(context.Background(), sub.client, sub.PullPointURL, 10, 5*time.Second)
 			if err != nil {
 				s.logger.Error("PullMessages failed", "camera_id", sub.CameraID, "error", err)
 				continue
 			}
 
-			topics := extractTopics(respBody)
-			for _, topic := range topics {
-				eventType := classifyTopic(topic)
+			for _, evt := range events {
+				eventType := onvif.ClassifyEventTopic(evt.Topic)
 				if eventType == "" {
 					continue
+				}
+
+				if err := s.insertEvent(context.Background(), sub, evt, eventType); err != nil {
+					s.logger.Error("failed to persist event", "camera_id", sub.CameraID, "error", err)
 				}
 
 				event := map[string]string{
 					"camera_id":  sub.CameraID,
 					"event_type": eventType,
-					"timestamp":  time.Now().UTC().Format(time.RFC3339),
+					"timestamp":  evt.Timestamp.Format(time.RFC3339),
 					"source":     "ONVIF",
 				}
 
@@ -456,12 +376,21 @@ func (s *OnvifEventsService) runSubscription(sub *subscription) {
 				if err := s.nc.Publish(subject, data); err != nil {
 					s.logger.Error("failed to publish event", "subject", subject, "error", err)
 				} else {
-					s.logger.Info("published ONVIF event", "camera_id", sub.CameraID, "event_type", eventType, "topic", topic)
+					s.logger.Info("published ONVIF event", "camera_id", sub.CameraID, "event_type", eventType, "topic", evt.Topic)
 				}
+			}
+
+		case <-renewTicker.C:
+			s.logger.Debug("renewing subscription", "camera_id", sub.CameraID)
+			if err := onvif.RenewPullPointSubscription(context.Background(), sub.client, sub.PullPointURL, 3600*time.Second); err != nil {
+				s.logger.Error("subscription renewal failed", "camera_id", sub.CameraID, "error", err)
 			}
 
 		case <-sub.stopCh:
 			s.logger.Info("stopping subscription poller", "camera_id", sub.CameraID)
+			if err := onvif.UnsubscribePullPoint(context.Background(), sub.client, sub.PullPointURL); err != nil {
+				s.logger.Warn("Unsubscribe failed", "camera_id", sub.CameraID, "error", err)
+			}
 			return
 		}
 	}

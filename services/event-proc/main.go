@@ -39,6 +39,20 @@ func DefaultEventProcConfig() *EventProcConfig {
 	}
 }
 
+type OnvifEventRow struct {
+	ID             string    `db:"id" json:"id"`
+	CameraID       string    `db:"camera_id" json:"camera_id"`
+	SubscriptionID string    `db:"subscription_id" json:"subscription_id,omitempty"`
+	Topic          string    `db:"topic" json:"topic,omitempty"`
+	Source         string    `db:"source" json:"source,omitempty"`
+	EventType      string    `db:"event_type" json:"event_type"`
+	Severity       string    `db:"severity" json:"severity,omitempty"`
+	Message        string    `db:"message" json:"message,omitempty"`
+	RawXML         string    `db:"raw_xml" json:"raw_xml,omitempty"`
+	EventTime      time.Time `db:"event_time" json:"event_time"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
+
 type Detection struct {
 	Label      string    `json:"label"`
 	Confidence float64   `json:"confidence"`
@@ -306,19 +320,24 @@ func (t *Tracker) StartCleanupLoop(stopCh <-chan struct{}) {
 }
 
 type EventProcessor struct {
-	config        *EventProcConfig
-	nc            *nats.Conn
-	logger        *slog.Logger
-	eventSub      *nats.Subscription
-	tracker       *Tracker
-	alertRules    *AlertRuleManager
-	alertWorkflow *AlertWorkflowManager
-	ruleEngine    *RuleEngine
-	tourScheduler *TourScheduler
-	ha            *HeatmapAggregator
-	db            *sqlx.DB
-	adminServer   *http.Server
-	stopCh        chan struct{}
+	config          *EventProcConfig
+	nc              *nats.Conn
+	logger          *slog.Logger
+	eventSub        *nats.Subscription
+	tracker         *Tracker
+	alertRules      *AlertRuleManager
+	alertWorkflow   *AlertWorkflowManager
+	ruleEngine      *RuleEngine
+	tourScheduler   *TourScheduler
+	peopleCounter   *PeopleCounter
+	ha              *HeatmapAggregator
+	intrusion       *IntrusionDetector
+	loitering       *LoiteringDetector
+	abandonedObject *AbandonedObjectDetector
+	forensics       *ForensicsService
+	db              *sqlx.DB
+	adminServer     *http.Server
+	stopCh          chan struct{}
 }
 
 func NewEventProcessor(ctx context.Context, config *EventProcConfig, logger *slog.Logger) (*EventProcessor, error) {
@@ -335,20 +354,25 @@ func NewEventProcessor(ctx context.Context, config *EventProcConfig, logger *slo
 	}
 
 	return &EventProcessor{
-		config:        config,
-		nc:            nc,
-		logger:        logger,
-		tracker:       NewTracker(0.3, 3*time.Second),
-		alertRules:    NewAlertRuleManager(),
-		alertWorkflow: NewAlertWorkflowManager(ctx, AlertWorkflowConfig{
+		config:          config,
+		nc:              nc,
+		logger:          logger,
+		tracker:         NewTracker(0.3, 3*time.Second),
+		peopleCounter:   NewPeopleCounter(db),
+		alertRules:      NewAlertRuleManager(),
+		alertWorkflow:   NewAlertWorkflowManager(ctx, AlertWorkflowConfig{
 			EscalationTimeout: 5 * time.Minute,
 			EscalationWebhook: os.Getenv("ESCALATION_WEBHOOK"),
 		}, logger),
-		ruleEngine:    NewRuleEngine(logger),
-		tourScheduler: NewTourScheduler(logger),
-		ha:            NewHeatmapAggregator(db),
-		db:            db,
-		stopCh:        make(chan struct{}),
+		ruleEngine:      NewRuleEngine(logger),
+		tourScheduler:   NewTourScheduler(logger),
+		ha:              NewHeatmapAggregator(db),
+		intrusion:       NewIntrusionDetector(db, logger),
+		loitering:       NewLoiteringDetector(logger),
+		abandonedObject: NewAbandonedObjectDetector(logger),
+		forensics:       NewForensicsService(db, logger),
+		db:              db,
+		stopCh:          make(chan struct{}),
 	}, nil
 }
 
@@ -361,6 +385,10 @@ func (s *EventProcessor) Start() error {
 	s.eventSub.SetPendingLimits(1024, 64*1024*1024)
 
 	go s.tracker.StartCleanupLoop(s.stopCh)
+
+	s.intrusion.Start()
+	s.loitering.Start()
+	s.abandonedObject.Start()
 
 	if err := s.ha.Init(context.Background()); err != nil {
 		return fmt.Errorf("failed to initialize heatmap aggregator: %w", err)
@@ -380,6 +408,21 @@ func (s *EventProcessor) Start() error {
 	mux.Handle("/api/tours", common.JWTAuthMiddleware(s.tourScheduler.HandleHTTP))
 	mux.Handle("/api/tours/", common.JWTAuthMiddleware(s.tourScheduler.HandleHTTP))
 	mux.Handle("/api/analytics/heatmap", common.JWTAuthMiddleware(handleHeatmap(s.ha)))
+	mux.Handle("/api/analytics/people-counts", common.JWTAuthMiddleware(handlePeopleCounts(s.db)))
+	mux.Handle("/api/events", common.JWTAuthMiddleware(s.handleEvents))
+	mux.Handle("/api/events/stats", common.JWTAuthMiddleware(s.handleEventStats))
+	mux.Handle("/api/incidents", common.JWTAuthMiddleware(handleIncidents(s.db)))
+	mux.Handle("/api/incidents/", common.JWTAuthMiddleware(handleIncidentByID(s.db)))
+	mux.Handle("/api/intrusion-zones", common.JWTAuthMiddleware(s.intrusion.HandleHTTP))
+	mux.Handle("/api/intrusion-zones/", common.JWTAuthMiddleware(s.intrusion.HandleHTTP))
+	mux.Handle("/api/loitering-zones", common.JWTAuthMiddleware(s.loitering.HandleHTTP))
+	mux.Handle("/api/loitering-zones/", common.JWTAuthMiddleware(s.loitering.HandleHTTP))
+	mux.Handle("/api/abandoned-object-zones", common.JWTAuthMiddleware(s.abandonedObject.HandleHTTP))
+	mux.Handle("/api/abandoned-object-zones/", common.JWTAuthMiddleware(s.abandonedObject.HandleHTTP))
+	mux.Handle("/api/forensics/search", common.JWTAuthMiddleware(s.forensics.HandleSearch))
+	mux.Handle("/api/forensics/search/vector", common.JWTAuthMiddleware(s.forensics.HandleVectorSearch))
+	mux.Handle("/api/forensics/tracks/", common.JWTAuthMiddleware(s.forensics.HandleTrackPath))
+	mux.Handle("/api/forensics/export", common.JWTAuthMiddleware(s.forensics.HandleExport))
 
 	s.adminServer = &http.Server{
 		Addr:    s.config.AlertAdminPort,
@@ -441,7 +484,31 @@ func (s *EventProcessor) handleCameraEvent(msg *nats.Msg) {
 				s.alertWorkflow.CreateAlert(rule.ID, cameraID, fmt.Sprintf("Rule '%s' triggered on %s", rule.Name, cameraID))
 			}
 		}
+	}
 
+	// Evaluate intrusion detection
+	intrusionEvents := s.intrusion.Evaluate(cameraID, tracks)
+	for _, ev := range intrusionEvents {
+		s.logger.Info("Intrusion detected",
+			"zone", ev.ZoneID, "camera", ev.CameraID,
+			"direction", ev.Direction, "track", ev.TrackID)
+	}
+
+	// Evaluate loitering detection
+	loiteringZones := s.loitering.zoneManager.GetActive(cameraID)
+	if len(loiteringZones) > 0 {
+		loiteringEvents := s.loitering.Evaluate(cameraID, tracks, loiteringZones)
+		for _, ev := range loiteringEvents {
+			s.logger.Info("Loitering detected",
+				"zone", ev.ZoneID, "camera", ev.CameraID,
+				"track", ev.TrackID, "dwell", ev.DwellSeconds)
+		}
+	}
+
+	// Evaluate abandoned object detection
+	s.abandonedObject.Evaluate(cameraID, detections)
+
+	for _, d := range detections {
 		// Evaluate rule engine
 		eventData := map[string]interface{}{
 			"camera_id":   cameraID,
@@ -686,6 +753,149 @@ func (s *EventProcessor) deleteAlertRule(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+func (s *EventProcessor) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	cameraID := q.Get("camera_id")
+	eventType := q.Get("event_type")
+	startTime := q.Get("start_time")
+	endTime := q.Get("end_time")
+	limit := 100
+	offset := 0
+
+	if l := q.Get("limit"); l != "" {
+		if v, err := parseInt(l); err == nil && v > 0 && v <= 1000 {
+			limit = v
+		}
+	}
+	if o := q.Get("offset"); o != "" {
+		if v, err := parseInt(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	where := "WHERE 1=1"
+	args := []interface{}{}
+	argIdx := 1
+
+	if cameraID != "" {
+		where += fmt.Sprintf(" AND camera_id = $%d", argIdx)
+		args = append(args, cameraID)
+		argIdx++
+	}
+	if eventType != "" {
+		where += fmt.Sprintf(" AND event_type = $%d", argIdx)
+		args = append(args, eventType)
+		argIdx++
+	}
+	if startTime != "" {
+		where += fmt.Sprintf(" AND event_time >= $%d", argIdx)
+		args = append(args, startTime)
+		argIdx++
+	}
+	if endTime != "" {
+		where += fmt.Sprintf(" AND event_time <= $%d", argIdx)
+		args = append(args, endTime)
+		argIdx++
+	}
+
+	var total int
+	if err := s.db.Get(&total, "SELECT COUNT(*) FROM onvif_events "+where, args...); err != nil {
+		s.logger.Error("failed to count onvif events", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to query events")
+		return
+	}
+
+	query := "SELECT id, camera_id, subscription_id, topic, source, event_type, severity, message, event_time, created_at FROM onvif_events " +
+		where + " ORDER BY event_time DESC LIMIT $"+fmt.Sprintf("%d", argIdx) + " OFFSET $" + fmt.Sprintf("%d", argIdx+1)
+	args = append(args, limit, offset)
+
+	var events []OnvifEventRow
+	if err := s.db.Select(&events, query, args...); err != nil {
+		s.logger.Error("failed to query onvif events", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to query events")
+		return
+	}
+	if events == nil {
+		events = []OnvifEventRow{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"events": events,
+		"total":  total,
+	})
+}
+
+func (s *EventProcessor) handleEventStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	cameraID := q.Get("camera_id")
+	startTime := q.Get("start_time")
+	endTime := q.Get("end_time")
+
+	where := "WHERE 1=1"
+	args := []interface{}{}
+	argIdx := 1
+
+	if cameraID != "" {
+		where += fmt.Sprintf(" AND camera_id = $%d", argIdx)
+		args = append(args, cameraID)
+		argIdx++
+	}
+	if startTime != "" {
+		where += fmt.Sprintf(" AND event_time >= $%d", argIdx)
+		args = append(args, startTime)
+		argIdx++
+	}
+	if endTime != "" {
+		where += fmt.Sprintf(" AND event_time <= $%d", argIdx)
+		args = append(args, endTime)
+		argIdx++
+	}
+
+	var total int
+	if err := s.db.Get(&total, "SELECT COUNT(*) FROM onvif_events "+where, args...); err != nil {
+		s.logger.Error("failed to count onvif events", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to query stats")
+		return
+	}
+
+	type typeCount struct {
+		EventType string `db:"event_type"`
+		Count     int    `db:"count"`
+	}
+	var byType []typeCount
+	if err := s.db.Select(&byType, "SELECT event_type, COUNT(*) as count FROM onvif_events "+where+" GROUP BY event_type ORDER BY count DESC", args...); err != nil {
+		s.logger.Error("failed to query event type stats", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to query stats")
+		return
+	}
+
+	byTypeMap := make(map[string]int)
+	for _, tc := range byType {
+		byTypeMap[tc.EventType] = tc.Count
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"total":   total,
+		"by_type": byTypeMap,
+	})
+}
+
+func parseInt(s string) (int, error) {
+	var v int
+	_, err := fmt.Sscanf(s, "%d", &v)
+	return v, err
+}
+
 func pointInPolygon(pt [2]float64, polygon [][2]float64) bool {
 	n := len(polygon)
 	inside := false
@@ -702,6 +912,9 @@ func pointInPolygon(pt [2]float64, polygon [][2]float64) bool {
 
 func (s *EventProcessor) Close() error {
 	close(s.stopCh)
+	s.intrusion.Stop()
+	s.loitering.Stop()
+	s.abandonedObject.Stop()
 
 	var errs []error
 

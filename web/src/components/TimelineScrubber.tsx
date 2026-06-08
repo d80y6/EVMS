@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { api, Bookmark } from '../api/client';
 
 interface TimelineScrubberProps {
@@ -31,18 +31,21 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
   const containerRef = useRef<HTMLDivElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
 
-  const now = new Date();
-  const end = now.toISOString();
-  const start = new Date(now.getTime() - ZOOM_DURATIONS[zoom] * 1000).toISOString();
+  const timeRange = useMemo(() => {
+    const now = new Date();
+    const end = now.toISOString();
+    const start = new Date(now.getTime() - ZOOM_DURATIONS[zoom] * 1000).toISOString();
+    return { start, end };
+  }, [zoom]);
 
   useEffect(() => {
-    api.getTimeline(cameraId, start, end, ZOOM_INTERVALS[zoom])
+    api.getTimeline(cameraId, timeRange.start, timeRange.end, ZOOM_INTERVALS[zoom])
       .then((data) => setThumbnails(data.thumbnails))
       .catch(() => setThumbnails([]));
-  }, [cameraId, zoom, start, end]);
+  }, [cameraId, zoom, timeRange]);
 
   useEffect(() => {
-    api.listBookmarks(cameraId).then((data) => setBookmarks(data.bookmarks)).catch(() => {});
+    api.listBookmarks(cameraId).then((data) => setBookmarks(data.bookmarks || [])).catch(() => {});
   }, [cameraId]);
 
   useEffect(() => {
@@ -94,13 +97,13 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
     };
   }, [isDragging, playhead, thumbnails, onSeek]);
 
-  const eventPositions = events.map((ev) => {
+  const eventPositions = useMemo(() => events.map((ev) => {
     const evTime = new Date(ev.timestamp).getTime();
-    const rangeStart = new Date(start).getTime();
-    const rangeEnd = new Date(end).getTime();
+    const rangeStart = new Date(timeRange.start).getTime();
+    const rangeEnd = new Date(timeRange.end).getTime();
     const pos = (evTime - rangeStart) / (rangeEnd - rangeStart);
     return { ...ev, position: Math.max(0, Math.min(1, pos)) };
-  });
+  }), [events, timeRange]);
 
   return (
     <div className="space-y-3">
@@ -147,8 +150,8 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
 
         {bookmarks.map(bm => {
           const bmTime = new Date(bm.timestamp).getTime();
-          const rangeStart = new Date(start).getTime();
-          const rangeEnd = new Date(end).getTime();
+          const rangeStart = new Date(timeRange.start).getTime();
+          const rangeEnd = new Date(timeRange.end).getTime();
           const pos = (bmTime - rangeStart) / (rangeEnd - rangeStart);
           if (pos < 0 || pos > 1) return null;
           return (
@@ -175,8 +178,8 @@ export default function TimelineScrubber({ cameraId, onSeek, events = [] }: Time
         <div className="absolute bottom-0 left-0 right-0 h-5 bg-gradient-to-t from-slate-900/80 to-transparent pointer-events-none" />
 
         <div className="absolute bottom-1 left-0 right-0 px-2 flex justify-between text-[9px] text-slate-600 pointer-events-none">
-          <span>{new Date(start).toLocaleTimeString()}</span>
-          <span>{new Date(end).toLocaleTimeString()}</span>
+          <span>{new Date(timeRange.start).toLocaleTimeString()}</span>
+          <span>{new Date(timeRange.end).toLocaleTimeString()}</span>
         </div>
 
         {playhead !== null && (

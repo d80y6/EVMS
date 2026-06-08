@@ -1,4 +1,3 @@
-use ndarray::{Array, IxDyn};
 use crate::{InputTensor, TensorDataType, TensorData, error::{Error, Result}};
 
 /// Tensor preprocessing operations

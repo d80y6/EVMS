@@ -51,6 +51,15 @@ spec:
             configMapKeyRef:
               name: evms-config
               key: NATS_URL
+        - name: DB_URL
+          value: {{ .Values.services.discovery.env.DB_URL | quote }}
+        - name: DISCOVERY_NATS_URL
+          value: {{ .Values.services.discovery.env.DISCOVERY_NATS_URL | quote }}
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
         resources:
           {{- toYaml .Values.services.discovery.resources | nindent 10 }}
 ---

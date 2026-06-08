@@ -102,6 +102,45 @@ export default function PtzOverlay({ cameraId, visible, onVisibilityChange }: Pt
     resetInactivity();
   }, [cameraId, resetInactivity]);
 
+  const handleHome = useCallback(async () => {
+    setSending('home');
+    try {
+      await api.ptzHome(cameraId);
+    } catch {
+    } finally {
+      setSending(null);
+    }
+    resetInactivity();
+  }, [cameraId, resetInactivity]);
+
+  const handleSetPreset = useCallback(async () => {
+    const name = prompt('Preset name:');
+    if (!name) return;
+    setSending('set-preset');
+    try {
+      await api.ptzSetPreset(cameraId, Date.now(), name);
+      const data = await api.ptzGetPresets(cameraId);
+      setPresets(data.presets);
+    } catch {
+    } finally {
+      setSending(null);
+    }
+    resetInactivity();
+  }, [cameraId, resetInactivity]);
+
+  const handleRemovePreset = useCallback(async (presetToken: string) => {
+    setSending(`remove-${presetToken}`);
+    try {
+      await api.ptzRemovePreset(cameraId, presetToken);
+      const data = await api.ptzGetPresets(cameraId);
+      setPresets(data.presets);
+    } catch {
+    } finally {
+      setSending(null);
+    }
+    resetInactivity();
+  }, [cameraId, resetInactivity]);
+
   if (!visible) return null;
 
   return (
@@ -120,9 +159,6 @@ export default function PtzOverlay({ cameraId, visible, onVisibilityChange }: Pt
                 left: [1, 0], right: [1, 2],
                 'down-left': [2, 0], down: [2, 1], 'down-right': [2, 2],
               }[dir];
-              if (dir === 'up' || dir === 'down') {
-                return null;
-              }
               return (
                 <button
                   key={dir}
@@ -142,6 +178,14 @@ export default function PtzOverlay({ cameraId, visible, onVisibilityChange }: Pt
             className="absolute inset-0 m-auto w-10 h-10 bg-red-500/80 hover:bg-red-500 rounded-full flex items-center justify-center text-white font-bold disabled:opacity-50 transition-colors z-10"
           >
             ■
+          </button>
+          </div>
+          <button
+            onClick={handleHome}
+            disabled={sending === 'home'}
+            className="mt-1 w-full py-0.5 text-[10px] bg-white/10 hover:bg-white/20 text-white/70 hover:text-white rounded disabled:opacity-50 transition-colors"
+          >
+            ⌂ Home
           </button>
         </div>
 
@@ -193,21 +237,36 @@ export default function PtzOverlay({ cameraId, visible, onVisibilityChange }: Pt
           >
             {showPresets ? 'Hide' : `Presets (${presets.length})`}
           </button>
+          <button
+            onClick={handleSetPreset}
+            disabled={sending === 'set-preset'}
+            className="px-2 py-0.5 text-[10px] bg-indigo-600/60 hover:bg-indigo-600 text-white rounded disabled:opacity-50 transition-colors"
+          >
+            + Set Preset
+          </button>
           {showPresets && presets.length === 0 && (
             <span className="text-[10px] text-white/40">No presets</span>
           )}
           {showPresets && presets.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => handlePresetGoto(String(p.id))}
-              disabled={sending === `preset-${p.id}`}
-              className="px-2 py-0.5 text-[10px] bg-white/10 hover:bg-white/20 text-white/70 hover:text-white rounded disabled:opacity-50 transition-colors text-left"
-            >
-              {p.name || `Preset ${p.id}`}
-            </button>
+            <div key={p.id} className="flex items-center gap-1">
+              <button
+                onClick={() => handlePresetGoto(String(p.id))}
+                disabled={sending === `preset-${p.id}`}
+                className="flex-1 px-2 py-0.5 text-[10px] bg-white/10 hover:bg-white/20 text-white/70 hover:text-white rounded disabled:opacity-50 transition-colors text-left"
+              >
+                {p.name || `Preset ${p.id}`}
+              </button>
+              <button
+                onClick={() => handleRemovePreset(String(p.id))}
+                disabled={sending === `remove-${p.id}`}
+                className="w-5 h-5 flex items-center justify-center bg-red-500/60 hover:bg-red-500 text-white rounded text-[10px] disabled:opacity-50 transition-colors"
+                title="Remove preset"
+              >
+                ×
+              </button>
+            </div>
           ))}
         </div>
       </div>
-    </div>
   );
 }

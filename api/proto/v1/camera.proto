@@ -23,7 +23,8 @@ message Camera {
   string connection_url = 5;
   string substream_url = 6;
   string status = 7;
-  google.protobuf.Timestamp created_at = 8;
+  string onvif_username = 8;
+  google.protobuf.Timestamp created_at = 9;
 }
 
 message ListCamerasRequest {

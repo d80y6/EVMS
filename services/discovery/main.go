@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -39,24 +37,6 @@ func DefaultDiscoveryConfig() *DiscoveryConfig {
 	}
 }
 
-type discoveredCamera struct {
-	Address      string   `json:"url"`
-	Manufacturer string   `json:"manufacturer"`
-	Model        string   `json:"model"`
-	Firmware     string   `json:"firmware_version"`
-	SerialNumber string   `json:"serial_number"`
-	Hostname     string   `json:"hostname"`
-	Capabilities []string `json:"capabilities"`
-	XAddrs       string   `json:"xaddrs"`
-	Scopes       string   `json:"scopes"`
-}
-
-type scanStatus struct {
-	Scanning bool   `json:"scanning"`
-	Count    int    `json:"count"`
-	Error    string `json:"error,omitempty"`
-}
-
 type DiscoveryService struct {
 	config        *DiscoveryConfig
 	logger        *slog.Logger
@@ -65,10 +45,6 @@ type DiscoveryService struct {
 	orchestrator  *ScanOrchestrator
 	scheduler     *Scheduler
 	scanners      map[string]Scanner
-	mu            sync.RWMutex
-	results       []discoveredCamera
-	scanning      bool
-	scanError     string
 	natsConn      *nats.Conn
 	server        *http.Server
 	healthHandler *common.HealthHandler
@@ -78,7 +54,6 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 	s := &DiscoveryService{
 		config:        config,
 		logger:        logger,
-		results:       nil,
 		healthHandler: common.NewHealthHandler(),
 	}
 
@@ -120,23 +95,30 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 
 func (s *DiscoveryService) Start() error {
 	mux := http.NewServeMux()
-	scanHandler := NewScanHandler(s.orchestrator, s.store, s.logger)
 
-	mux.HandleFunc("/discovery/scans", common.JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			scanHandler.handleCreateScan(w, r)
-		case http.MethodGet:
-			scanHandler.handleListScans(w, r)
-		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
+	// DB-backed endpoints only available when database is connected
+	if s.orchestrator != nil && s.store != nil {
+		scanHandler := NewScanHandler(s.orchestrator, s.store, s.logger)
+
+		mux.HandleFunc("/discovery/scans", common.JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				scanHandler.handleCreateScan(w, r)
+			case http.MethodGet:
+				scanHandler.handleListScans(w, r)
+			default:
+				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		}))
+		mux.HandleFunc("/discovery/scans/{id}", common.JWTAuthMiddleware(scanHandler.handleGetScan))
+		mux.HandleFunc("/discovery/scans/{id}/cancel", common.JWTAuthMiddleware(scanHandler.handleCancelScan))
+		mux.HandleFunc("/discovery/scans/{id}/results", common.JWTAuthMiddleware(scanHandler.handleGetResults))
+		mux.HandleFunc("/discovery/scans/{id}/import", common.JWTAuthMiddleware(scanHandler.handleImport))
+	}
+
+	mux.HandleFunc("/discovery/credentials/test", common.JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		(&ScanHandler{logger: s.logger}).handleTestCredentials(w, r)
 	}))
-	mux.HandleFunc("/discovery/scans/{id}", common.JWTAuthMiddleware(scanHandler.handleGetScan))
-	mux.HandleFunc("/discovery/scans/{id}/cancel", common.JWTAuthMiddleware(scanHandler.handleCancelScan))
-	mux.HandleFunc("/discovery/scans/{id}/results", common.JWTAuthMiddleware(scanHandler.handleGetResults))
-	mux.HandleFunc("/discovery/scans/{id}/import", common.JWTAuthMiddleware(scanHandler.handleImport))
-	mux.HandleFunc("/discovery/credentials/test", common.JWTAuthMiddleware(scanHandler.handleTestCredentials))
 	mux.HandleFunc("/health", s.healthHandler.Liveness)
 	mux.HandleFunc("/ready", s.healthHandler.Readiness)
 
@@ -175,117 +157,6 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 	}
 	return nil
 }
-
-func (s *DiscoveryService) handleScan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	s.mu.Lock()
-	s.scanning = true
-	s.scanError = ""
-	s.results = nil
-	s.mu.Unlock()
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.config.ScanTimeout+2*time.Second)
-		defer cancel()
-
-		scanner := NewWSDiscoveryScanner(s.logger)
-		resultCh, err := scanner.Scan(ctx, "", nil, ScanOptions{Timeout: s.config.ScanTimeout})
-		if err != nil {
-			s.mu.Lock()
-			s.scanning = false
-			s.scanError = err.Error()
-			s.logger.Error("Scan failed", "error", err)
-			s.mu.Unlock()
-			return
-		}
-
-		var cameras []discoveredCamera
-		for res := range resultCh {
-			if res.Error != nil {
-				continue
-			}
-			cam := discoveredCamera{
-				Address:      res.IP,
-				Manufacturer: res.Manufacturer,
-				Model:        res.Model,
-				Firmware:     res.Firmware,
-				SerialNumber: res.SerialNumber,
-				Hostname:     res.Hostname,
-				XAddrs:       res.XAddr,
-			}
-			var caps []string
-			for k := range res.Capabilities {
-				caps = append(caps, k)
-			}
-			cam.Capabilities = caps
-			cameras = append(cameras, cam)
-		}
-
-		s.mu.Lock()
-		s.scanning = false
-		s.results = cameras
-		s.logger.Info("Discovery scan complete", "cameras_found", len(cameras))
-		s.mu.Unlock()
-
-		if s.natsConn != nil {
-			for _, cam := range cameras {
-				data, err := json.Marshal(cam)
-				if err != nil {
-					s.logger.Warn("Failed to marshal camera for NATS", "error", err)
-					continue
-				}
-				if err := s.natsConn.Publish("cameras.discovered", data); err != nil {
-					s.logger.Warn("Failed to publish camera to NATS", "error", err)
-				}
-			}
-		}
-	}()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "scanning"})
-}
-
-func (s *DiscoveryService) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	status := scanStatus{
-		Scanning: s.scanning,
-		Count:    len(s.results),
-		Error:    s.scanError,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
-}
-
-func (s *DiscoveryService) handleResults(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	if s.results == nil {
-		w.Write([]byte(`[]`))
-		return
-	}
-	json.NewEncoder(w).Encode(s.results)
-}
-
-
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

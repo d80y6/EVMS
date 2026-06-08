@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { api, APIKey } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { LegalHoldPage } from './LegalHoldPage';
 
@@ -13,7 +13,7 @@ interface UserItem {
 
 export default function AdminPage() {
   const { role } = useAuth();
-  const [tab, setTab] = useState<'users' | 'legal-holds'>('users');
+  const [tab, setTab] = useState<'users' | 'legal-holds' | 'api-keys'>('users');
   const [users, setUsers] = useState<UserItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +24,14 @@ export default function AdminPage() {
   const [siteName, setSiteName] = useState('');
   const [siteLocation, setSiteLocation] = useState('');
 
+  // API Key state
+  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
+  const [showCreateKey, setShowCreateKey] = useState(false);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyScopes, setNewKeyScopes] = useState('read');
+  const [newKeyExpiry, setNewKeyExpiry] = useState('');
+  const [createdKey, setCreatedKey] = useState<{key: string; id: string} | null>(null);
+
   const fetchUsers = () => {
     setIsLoading(true);
     api.getUsers()
@@ -32,9 +40,16 @@ export default function AdminPage() {
       .finally(() => setIsLoading(false));
   };
 
+  const fetchAPIKeys = () => {
+    api.getAPIKeys()
+      .then((data) => setApiKeys(data.api_keys))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     fetchUsers();
     api.getSites().then(d => setSites(d.sites || [])).catch(() => {});
+    fetchAPIKeys();
   }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -67,6 +82,35 @@ export default function AdminPage() {
     }
   };
 
+  const handleCreateKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const data: {name: string; scopes?: string; expires_in?: string} = { name: newKeyName, scopes: newKeyScopes };
+      if (newKeyExpiry) {
+        data.expires_in = newKeyExpiry;
+      }
+      const res = await api.createAPIKey(data);
+      setCreatedKey({ key: res.key, id: res.id });
+      setShowCreateKey(false);
+      setNewKeyName('');
+      setNewKeyScopes('read');
+      setNewKeyExpiry('');
+      fetchAPIKeys();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create API key');
+    }
+  };
+
+  const handleRevokeKey = async (keyId: string) => {
+    if (!window.confirm('Revoke this API key? This action cannot be undone.')) return;
+    try {
+      await api.revokeAPIKey(keyId);
+      fetchAPIKeys();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke API key');
+    }
+  };
+
   if (role !== 'admin') {
     return (
       <div className="flex items-center justify-center h-64">
@@ -85,6 +129,14 @@ export default function AdminPage() {
           }`}
         >
           User Administration
+        </button>
+        <button
+          onClick={() => setTab('api-keys')}
+          className={`pb-2 text-sm font-medium transition-colors ${
+            tab === 'api-keys' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          API Keys
         </button>
         <button
           onClick={() => setTab('legal-holds')}
@@ -220,10 +272,165 @@ export default function AdminPage() {
         </>
       )}
 
+      {tab === 'api-keys' && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-slate-200">API Key Management</h2>
+            <button
+              onClick={() => { setShowCreateKey(true); setCreatedKey(null); }}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              Create API Key
+            </button>
+          </div>
+
+          {error && (
+            <div className="mb-4 bg-red-900/30 border border-red-800 rounded-lg p-3 text-sm text-red-400">
+              {error}
+            </div>
+          )}
+
+          {createdKey && (
+            <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 space-y-2">
+              <h3 className="text-sm font-medium text-amber-300">API Key Created - Copy it now!</h3>
+              <p className="text-xs text-amber-400">This key will not be shown again.</p>
+              <div className="bg-slate-900 rounded-lg p-3 font-mono text-sm text-amber-200 break-all select-all">
+                {createdKey.key}
+              </div>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(createdKey.key);
+                  setCreatedKey(null);
+                }}
+                className="text-xs px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded transition-colors"
+              >
+                Copy & Dismiss
+              </button>
+            </div>
+          )}
+
+          {showCreateKey && (
+            <form onSubmit={handleCreateKey} className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+              <h3 className="text-sm font-medium text-slate-400">New API Key</h3>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-500">Name</label>
+                  <input
+                    type="text"
+                    value={newKeyName}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    required
+                    placeholder="e.g. Automation"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-500">Scopes</label>
+                  <select
+                    value={newKeyScopes}
+                    onChange={(e) => setNewKeyScopes(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="read">Read Only</option>
+                    <option value="read,write">Read & Write</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-500">Expires In (optional)</label>
+                  <select
+                    value={newKeyExpiry}
+                    onChange={(e) => setNewKeyExpiry(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Never</option>
+                    <option value="24h">24 hours</option>
+                    <option value="720h">30 days</option>
+                    <option value="8760h">1 year</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  Generate Key
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateKey(false)}
+                  className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-500 uppercase text-xs tracking-wider">
+                  <th className="text-left pb-3 pr-4">Name</th>
+                  <th className="text-left pb-3 pr-4">Key Prefix</th>
+                  <th className="text-left pb-3 pr-4">Scopes</th>
+                  <th className="text-left pb-3 pr-4">Status</th>
+                  <th className="text-left pb-3 pr-4">Created</th>
+                  <th className="text-left pb-3 pr-4">Last Used</th>
+                  <th className="text-left pb-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apiKeys.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="py-8 text-center text-slate-500 text-sm">
+                      No API keys configured.
+                    </td>
+                  </tr>
+                )}
+                {apiKeys.map((k) => (
+                  <tr key={k.id} className="border-b border-slate-800/50 text-slate-300">
+                    <td className="py-3 pr-4 font-medium">{k.name}</td>
+                    <td className="py-3 pr-4">
+                      <code className="text-xs bg-slate-800 px-2 py-1 rounded text-slate-400">{k.key_prefix}...</code>
+                    </td>
+                    <td className="py-3 pr-4 text-xs text-slate-400">{k.scopes}</td>
+                    <td className="py-3 pr-4">
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${
+                        k.active ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                      }`}>
+                        {k.active ? 'Active' : 'Revoked'}
+                      </span>
+                    </td>
+                    <td className="py-3 pr-4 text-slate-500 text-xs">
+                      {new Date(k.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="py-3 pr-4 text-slate-500 text-xs">
+                      {k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : 'Never'}
+                    </td>
+                    <td className="py-3">
+                      {k.active && (
+                        <button
+                          onClick={() => handleRevokeKey(k.id)}
+                          className="text-red-400 hover:text-red-300 text-xs transition-colors"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {tab === 'legal-holds' && <LegalHoldPage />}
 
       {/* Sites Section */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4 mt-6">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-medium text-slate-400">Sites</h3>
           <button onClick={() => setShowSiteDialog(true)}

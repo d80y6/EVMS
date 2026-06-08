@@ -8,17 +8,19 @@ import (
 )
 
 type Camera struct {
-	Id            string
-	SiteId        string
-	Name          string
-	Description   string
-	ConnectionUrl string
-	SubstreamUrl  string
-	Status        string
-	PtzProtocol   string
+	Id               string
+	SiteId           string
+	Name             string
+	Description      string
+	ConnectionUrl    string
+	SubstreamUrl     string
+	Status           string
+	PtzProtocol      string
 	RetentionDays    int32
 	PrerecordSeconds int32
 	OnvifData        string
+	OnvifUsername    string
+	OnvifPassword    string
 	Config           string
 	CreatedAt        *timestamppb.Timestamp
 }
@@ -46,6 +48,8 @@ type CreateCameraRequest struct {
 	PtzProtocol      string
 	RetentionDays    int32
 	PrerecordSeconds int32
+	OnvifUsername    string
+	OnvifPassword    string
 }
 
 type GetCameraRequest struct {
@@ -61,6 +65,8 @@ type UpdateCameraRequest struct {
 	PtzProtocol      string
 	RetentionDays    int32
 	PrerecordSeconds int32
+	OnvifUsername    string
+	OnvifPassword    string
 	Config           string
 }
 
