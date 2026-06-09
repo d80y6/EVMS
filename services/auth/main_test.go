@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
 )
@@ -36,6 +40,75 @@ func TestConfigValidation(t *testing.T) {
 func withUserContext(r *http.Request, username string) *http.Request {
 	ctx := context.WithValue(r.Context(), common.UserKey, username)
 	return r.WithContext(ctx)
+}
+
+func TestIPRateLimiter_FirstRequestAllowed(t *testing.T) {
+	rl := newIPRateLimiter(5, 1*time.Minute)
+	if !rl.Allow("192.168.1.1") {
+		t.Error("expected first request to be allowed")
+	}
+}
+
+func TestIPRateLimiter_ExceedsLimit(t *testing.T) {
+	rl := newIPRateLimiter(3, 1*time.Minute)
+
+	for i := 0; i < 3; i++ {
+		if !rl.Allow("10.0.0.1") {
+			t.Errorf("request %d should be allowed", i+1)
+		}
+	}
+	if rl.Allow("10.0.0.1") {
+		t.Error("expected request after limit to be denied")
+	}
+}
+
+func TestIPRateLimiter_DifferentIPs(t *testing.T) {
+	rl := newIPRateLimiter(2, 1*time.Minute)
+
+	rl.Allow("192.168.1.1")
+	rl.Allow("192.168.1.1")
+
+	if rl.Allow("192.168.1.1") {
+		t.Error("expected third request from same IP to be denied")
+	}
+	if !rl.Allow("10.0.0.2") {
+		t.Error("expected request from different IP to be allowed")
+	}
+}
+
+func TestIPRateLimiter_WindowExpiry(t *testing.T) {
+	rl := newIPRateLimiter(2, 50*time.Millisecond)
+
+	if !rl.Allow("10.0.0.1") {
+		t.Error("expected first request to be allowed")
+	}
+	if !rl.Allow("10.0.0.1") {
+		t.Error("expected second request to be allowed")
+	}
+	if rl.Allow("10.0.0.1") {
+		t.Error("expected third request to be denied")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	if !rl.Allow("10.0.0.1") {
+		t.Error("expected request after window expiry to be allowed")
+	}
+}
+
+func TestIPRateLimiter_ConcurrentSafe(t *testing.T) {
+	rl := newIPRateLimiter(100, 1*time.Minute)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rl.Allow("10.0.0.1")
+		}()
+	}
+	wg.Wait()
+	// If we got here without race, the test passes
 }
 
 func TestHandleLogout_MethodNotAllowed(t *testing.T) {
@@ -92,6 +165,29 @@ func TestHandleLogout_MissingRefreshToken(t *testing.T) {
 	json.NewDecoder(rr.Body).Decode(&resp)
 	if resp["error"] != "refresh_token required" {
 		t.Errorf("error = %q, want %q", resp["error"], "refresh_token required")
+	}
+}
+
+func TestHandleLogin_RateLimited(t *testing.T) {
+	rl := newIPRateLimiter(1, 1*time.Minute)
+	s := &AuthService{loginRateLimiter: rl, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	// Exhaust the rate limit for this IP
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(`{"username":"u","password":"p"}`)))
+	req.RemoteAddr = "203.0.113.1:12345"
+	rr := httptest.NewRecorder()
+	rl.Allow("203.0.113.1:12345") // consume the single allowed request
+
+	s.handleLogin(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["error"] != "too many login attempts" {
+		t.Errorf("error = %q, want %q", resp["error"], "too many login attempts")
 	}
 }
 

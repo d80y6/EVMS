@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,59 @@ import (
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
+
+type ipRateLimiter struct {
+	mu       sync.Mutex
+	requests map[string]*ipRequest
+	limit    int
+	window   time.Duration
+}
+
+type ipRequest struct {
+	count       int
+	windowStart time.Time
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{
+		requests: make(map[string]*ipRequest),
+		limit:    limit,
+		window:   window,
+	}
+}
+
+func (rl *ipRateLimiter) Allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	req, ok := rl.requests[ip]
+	if !ok || now.Sub(req.windowStart) > rl.window {
+		rl.requests[ip] = &ipRequest{count: 1, windowStart: now}
+		return true
+	}
+
+	if req.count >= rl.limit {
+		return false
+	}
+
+	req.count++
+	return true
+}
+
+func (rl *ipRateLimiter) cleanup(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for ip, req := range rl.requests {
+			if now.Sub(req.windowStart) > rl.window {
+				delete(rl.requests, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -165,10 +219,11 @@ type revokeSessionRequest struct {
 
 // AuthService handles authentication operations
 type AuthService struct {
-	logger        *slog.Logger
-	db            *sqlx.DB
-	config        AuthConfig
-	healthHandler *common.HealthHandler
+	logger           *slog.Logger
+	db               *sqlx.DB
+	config           AuthConfig
+	healthHandler    *common.HealthHandler
+	loginRateLimiter *ipRateLimiter
 }
 
 // NewAuthService creates a new auth service instance
@@ -204,10 +259,14 @@ func NewAuthService(ctx context.Context, config AuthConfig, logger *slog.Logger)
 		}
 	}
 
+	rl := newIPRateLimiter(20, 1*time.Minute)
+	go rl.cleanup(5 * time.Minute)
+
 	return &AuthService{
-		logger: logger,
-		db:     db,
-		config: config,
+		logger:           logger,
+		db:               db,
+		config:           config,
+		loginRateLimiter: rl,
 	}, nil
 }
 
@@ -235,6 +294,17 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if req.Username == "" || req.Password == "" {
 		jsonError(w, "username and password required", http.StatusBadRequest)
+		return
+	}
+
+	// IP-based rate limiting
+	clientIP := r.RemoteAddr
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		clientIP = strings.Split(forwarded, ",")[0]
+	}
+	if !s.loginRateLimiter.Allow(clientIP) {
+		s.logger.Warn("Login rate limit exceeded", "ip", clientIP, "username", req.Username)
+		jsonError(w, "too many login attempts", http.StatusTooManyRequests)
 		return
 	}
 
