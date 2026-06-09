@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"os"
@@ -220,37 +221,33 @@ func (s *AuthService) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(LoginResponse{Token: token})
 }
 
+type samlNameID struct {
+	XMLName xml.Name
+	Value   string `xml:",chardata"`
+	Format  string `xml:"Format,attr"`
+}
+
+type samlSubject struct {
+	XMLName xml.Name
+	NameID  samlNameID `xml:"NameID"`
+}
+
+type samlAssertion struct {
+	XMLName xml.Name
+	Subject samlSubject `xml:"Subject"`
+}
+
+type samlResponse struct {
+	XMLName   xml.Name
+	Assertion samlAssertion `xml:"Assertion"`
+}
+
 func extractNameIDFromSAML(samlXML string) string {
-	// Simple extraction - production would use proper XML parsing
-	startTag := "<saml2:NameID"
-	endTag := "</saml2:NameID>"
-
-	start := strings.Index(samlXML, startTag)
-	if start < 0 {
-		startTag = "<NameID"
-		start = strings.Index(samlXML, startTag)
-		if start < 0 {
-			return ""
-		}
-	}
-
-	valueStart := strings.Index(samlXML[start:], ">")
-	if valueStart < 0 {
+	var resp samlResponse
+	if err := xml.Unmarshal([]byte(samlXML), &resp); err != nil {
 		return ""
 	}
-	valueStart += start + 1
-
-	valueEnd := strings.Index(samlXML[valueStart:], endTag)
-	if valueEnd < 0 {
-		// Try without namespace
-		endTag = "</NameID>"
-		valueEnd = strings.Index(samlXML[valueStart:], endTag)
-		if valueEnd < 0 {
-			return ""
-		}
-	}
-
-	return strings.TrimSpace(samlXML[valueStart : valueStart+valueEnd])
+	return strings.TrimSpace(resp.Assertion.Subject.NameID.Value)
 }
 
 func (s *AuthService) handleAdminSSOProviders(w http.ResponseWriter, r *http.Request) {

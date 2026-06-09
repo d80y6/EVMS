@@ -229,6 +229,62 @@ func TestOIDCCallback_StateCookieMismatch(t *testing.T) {
 	}
 }
 
+func TestExtractNameIDFromSAML_WithNamespace(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<saml2:Response xmlns:saml2="urn:oasis:names:tc:SAML:2.0:protocol"
+    xmlns:saml2a="urn:oasis:names:tc:SAML:2.0:assertion"
+    Destination="https://example.com/acs">
+    <saml2a:Assertion>
+        <saml2a:Subject>
+            <saml2a:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">
+                user@example.com
+            </saml2a:NameID>
+        </saml2a:Subject>
+    </saml2a:Assertion>
+</saml2:Response>`
+	result := extractNameIDFromSAML(xml)
+	if result != "user@example.com" {
+		t.Errorf("got %q, want %q", result, "user@example.com")
+	}
+}
+
+func TestExtractNameIDFromSAML_WithoutNamespace(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Assertion>
+        <Subject>
+            <NameID>simple-user@example.com</NameID>
+        </Subject>
+    </Assertion>
+</Response>`
+	result := extractNameIDFromSAML(xml)
+	if result != "simple-user@example.com" {
+		t.Errorf("got %q, want %q", result, "simple-user@example.com")
+	}
+}
+
+func TestExtractNameIDFromSAML_NoNameID(t *testing.T) {
+	xml := `<Response><Assertion><Subject></Subject></Assertion></Response>`
+	result := extractNameIDFromSAML(xml)
+	if result != "" {
+		t.Errorf("got %q, want empty string", result)
+	}
+}
+
+func TestExtractNameIDFromSAML_InvalidXML(t *testing.T) {
+	result := extractNameIDFromSAML("not xml at all")
+	if result != "" {
+		t.Errorf("got %q, want empty string", result)
+	}
+}
+
+func TestExtractNameIDFromSAML_EmptyString(t *testing.T) {
+	result := extractNameIDFromSAML("")
+	if result != "" {
+		t.Errorf("got %q, want empty string", result)
+	}
+}
+
 func TestHandleLogin_RateLimited(t *testing.T) {
 	rl := newIPRateLimiter(1, 1*time.Minute)
 	s := &AuthService{loginRateLimiter: rl, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
