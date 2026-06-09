@@ -649,6 +649,58 @@ func (s *AuthService) handleRevokeAllSessions(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(map[string]string{"status": "all_sessions_revoked"})
 }
 
+func (s *AuthService) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	username := r.Context().Value(common.UserKey).(string)
+
+	var req refreshTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.RefreshToken == "" {
+		jsonError(w, "refresh_token required", http.StatusBadRequest)
+		return
+	}
+
+	hash := sha256.Sum256([]byte(req.RefreshToken))
+	hashedToken := hex.EncodeToString(hash[:])
+
+	var session Session
+	err := s.db.Get(&session,
+		"SELECT id, user_id FROM user_sessions WHERE refresh_token_hash = $1 AND active = true",
+		hashedToken)
+	if err != nil {
+		jsonError(w, "invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	// Verify session belongs to authenticated user
+	var user User
+	err = s.db.Get(&user,
+		"SELECT id FROM users WHERE username = $1 AND active = true AND deleted_at IS NULL",
+		username)
+	if err != nil || user.ID != session.UserID {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	_, err = s.db.Exec("UPDATE user_sessions SET active = false WHERE id = $1", session.ID)
+	if err != nil {
+		s.logger.Error("Failed to revoke session", "error", err)
+		jsonError(w, "failed to revoke session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "logged_out"})
+}
+
 func (s *AuthService) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -867,6 +919,7 @@ func (s *AuthService) Start(ctx context.Context) error {
 	mux.HandleFunc("/auth/sessions", s.authMiddleware(s.handleListSessions))
 	mux.HandleFunc("/auth/sessions/revoke", s.authMiddleware(s.handleRevokeSession))
 	mux.HandleFunc("/auth/sessions/revoke-all", s.authMiddleware(s.handleRevokeAllSessions))
+	mux.HandleFunc("/auth/logout", s.authMiddleware(s.handleLogout))
 
 	// MFA endpoints
 	mux.HandleFunc("/auth/mfa/enroll", s.authMiddleware(s.handleMFAEnroll))
