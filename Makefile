@@ -96,16 +96,6 @@ fips-test: fips-build
 	./$(BINARY_DIR)/fips-verify
 	@echo "FIPS self-test passed"
 
-# Docker compose helpers
-docker-up:
-	docker compose -f deploy/docker/docker-compose.yml up -d
-
-docker-down:
-	docker compose -f deploy/docker/docker-compose.yml down
-
-docker-logs:
-	docker compose -f deploy/docker/docker-compose.yml logs -f
-
 # Development helpers
 dev-auth:
 	$(GO) run ./services/auth/main.go
@@ -129,6 +119,23 @@ triton-test:
 	else \
 		echo "cargo not found, skipping Triton tests"; \
 	fi
+
+# Docker compose helpers with auto-detected host IP
+DOCKER_COMPOSE := docker compose --env-file ./.env -f deploy/docker/docker-compose.yml
+
+.PHONY: docker-up docker-build docker-logs docker-down
+
+docker-up:
+	HOST_IP=$$(hostname -I | awk '{print $$1}') $(DOCKER_COMPOSE) up -d
+
+docker-build:
+	HOST_IP=$$(hostname -I | awk '{print $$1}') $(DOCKER_COMPOSE) build $(SERVICE)
+
+docker-logs:
+	$(DOCKER_COMPOSE) logs -f $(SERVICE)
+
+docker-down:
+	$(DOCKER_COMPOSE) down
 
 # Full beta verification target
 .PHONY: beta-verify

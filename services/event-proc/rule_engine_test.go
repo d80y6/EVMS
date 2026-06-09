@@ -5,7 +5,7 @@ import (
 )
 
 func TestSimpleRuleMatch(t *testing.T) {
-	re := NewRuleEngine(nil)
+	re := NewRuleEngine(nil, nil)
 	re.AddRule(&Rule{
 		ID: "test1", Enabled: true,
 		Conditions: []Condition{
@@ -26,7 +26,7 @@ func TestSimpleRuleMatch(t *testing.T) {
 }
 
 func TestRuleNoMatch(t *testing.T) {
-	re := NewRuleEngine(nil)
+	re := NewRuleEngine(nil, nil)
 	re.AddRule(&Rule{
 		ID: "test2", Enabled: true,
 		Conditions: []Condition{
@@ -44,7 +44,7 @@ func TestRuleNoMatch(t *testing.T) {
 }
 
 func TestORLogic(t *testing.T) {
-	re := NewRuleEngine(nil)
+	re := NewRuleEngine(nil, nil)
 	re.AddRule(&Rule{
 		ID: "test3", Enabled: true, Logic: "OR",
 		Conditions: []Condition{
@@ -61,7 +61,7 @@ func TestORLogic(t *testing.T) {
 }
 
 func TestDisabledRule(t *testing.T) {
-	re := NewRuleEngine(nil)
+	re := NewRuleEngine(nil, nil)
 	re.AddRule(&Rule{
 		ID: "test4", Enabled: false,
 		Conditions: []Condition{

@@ -84,12 +84,70 @@ type AlertRule struct {
 type AlertRuleManager struct {
 	mu    sync.RWMutex
 	rules map[string]*AlertRule
+	db    *sqlx.DB
 }
 
-func NewAlertRuleManager() *AlertRuleManager {
-	return &AlertRuleManager{
+func NewAlertRuleManager(db *sqlx.DB) *AlertRuleManager {
+	m := &AlertRuleManager{
 		rules: make(map[string]*AlertRule),
+		db:    db,
 	}
+	m.loadFromDB()
+	return m
+}
+
+func (m *AlertRuleManager) loadFromDB() {
+	if m.db == nil {
+		return
+	}
+	var rows []struct {
+		ID            string    `db:"id"`
+		CameraID      string    `db:"camera_id"`
+		Name          string    `db:"name"`
+		ObjectType    string    `db:"object_type"`
+		Zone          string    `db:"zone"`
+		MinConfidence float64   `db:"min_confidence"`
+		Action        string    `db:"action"`
+		Enabled       bool      `db:"enabled"`
+		CreatedAt     time.Time `db:"created_at"`
+	}
+	if err := m.db.Select(&rows, "SELECT id, camera_id, name, object_type, zone, min_confidence, action, enabled, created_at FROM alert_rules"); err != nil {
+		slog.Warn("Failed to load alert rules from DB", "error", err)
+		return
+	}
+	for _, row := range rows {
+		m.rules[row.ID] = &AlertRule{
+			ID:            row.ID,
+			CameraID:      row.CameraID,
+			Name:          row.Name,
+			ObjectType:    row.ObjectType,
+			Zone:          row.Zone,
+			MinConfidence: row.MinConfidence,
+			Action:        row.Action,
+			Enabled:       row.Enabled,
+			CreatedAt:     row.CreatedAt.Format(time.RFC3339),
+		}
+	}
+	slog.Info("Loaded alert rules from database", "count", len(rows))
+}
+
+func (m *AlertRuleManager) saveRule(rule *AlertRule) error {
+	if m.db == nil {
+		return nil
+	}
+	_, err := m.db.Exec(`INSERT INTO alert_rules (id, camera_id, name, object_type, zone, min_confidence, action, enabled, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		ON CONFLICT (id) DO UPDATE SET camera_id=$2, name=$3, object_type=$4, zone=$5, min_confidence=$6, action=$7, enabled=$8, updated_at=NOW()`,
+		rule.ID, rule.CameraID, rule.Name, rule.ObjectType, rule.Zone, rule.MinConfidence, rule.Action, rule.Enabled, rule.CreatedAt)
+	return err
+}
+
+func (m *AlertRuleManager) deleteRuleFromDB(id string) error {
+	if m.db == nil {
+		return nil
+	}
+	_, err := m.db.Exec("DELETE FROM alert_rules WHERE id=$1", id)
+	return err
 }
 
 func (m *AlertRuleManager) List(cameraID string) []*AlertRule {
@@ -111,6 +169,9 @@ func (m *AlertRuleManager) Create(rule *AlertRule) error {
 
 	rule.ID = uuid.New().String()
 	rule.CreatedAt = time.Now().Format(time.RFC3339)
+	if err := m.saveRule(rule); err != nil {
+		return fmt.Errorf("failed to persist alert rule: %w", err)
+	}
 	m.rules[rule.ID] = rule
 	return nil
 }
@@ -125,6 +186,9 @@ func (m *AlertRuleManager) Update(rule *AlertRule) error {
 	}
 
 	rule.CreatedAt = existing.CreatedAt
+	if err := m.saveRule(rule); err != nil {
+		return fmt.Errorf("failed to persist alert rule update: %w", err)
+	}
 	m.rules[rule.ID] = rule
 	return nil
 }
@@ -135,6 +199,10 @@ func (m *AlertRuleManager) Delete(id string) bool {
 
 	_, ok := m.rules[id]
 	if !ok {
+		return false
+	}
+	if err := m.deleteRuleFromDB(id); err != nil {
+		slog.Error("Failed to delete alert rule from DB", "id", id, "error", err)
 		return false
 	}
 	delete(m.rules, id)
@@ -353,19 +421,24 @@ func NewEventProcessor(ctx context.Context, config *EventProcConfig, logger *slo
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
+	migrator := common.NewMigrator(db, common.GetEnv("MIGRATIONS_DIR", "/migrations"), logger)
+	if err := migrator.Run(); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
 	return &EventProcessor{
 		config:          config,
 		nc:              nc,
 		logger:          logger,
 		tracker:         NewTracker(0.3, 3*time.Second),
 		peopleCounter:   NewPeopleCounter(db),
-		alertRules:      NewAlertRuleManager(),
-		alertWorkflow:   NewAlertWorkflowManager(ctx, AlertWorkflowConfig{
+		alertRules:      NewAlertRuleManager(db),
+		alertWorkflow:   NewAlertWorkflowManager(db, ctx, AlertWorkflowConfig{
 			EscalationTimeout: 5 * time.Minute,
 			EscalationWebhook: os.Getenv("ESCALATION_WEBHOOK"),
 		}, logger),
-		ruleEngine:      NewRuleEngine(logger),
-		tourScheduler:   NewTourScheduler(logger),
+		ruleEngine:      NewRuleEngine(db, logger),
+		tourScheduler:   NewTourScheduler(db, logger),
 		ha:              NewHeatmapAggregator(db),
 		intrusion:       NewIntrusionDetector(db, logger),
 		loitering:       NewLoiteringDetector(logger),
@@ -951,6 +1024,8 @@ func (s *EventProcessor) Close() error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("event-proc"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

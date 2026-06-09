@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/jmoiron/sqlx"
 )
 
 type Condition struct {
@@ -35,26 +37,90 @@ type Rule struct {
 type RuleEngine struct {
 	mu     sync.RWMutex
 	rules  map[string]*Rule
+	db     *sqlx.DB
 	logger *slog.Logger
 }
 
-func NewRuleEngine(logger *slog.Logger) *RuleEngine {
-	return &RuleEngine{
+func NewRuleEngine(db *sqlx.DB, logger *slog.Logger) *RuleEngine {
+	re := &RuleEngine{
 		rules:  make(map[string]*Rule),
+		db:     db,
 		logger: logger,
 	}
+	re.loadFromDB()
+	return re
+}
+
+func (re *RuleEngine) loadFromDB() {
+	if re.db == nil {
+		return
+	}
+	var rows []struct {
+		ID         string          `db:"id"`
+		Name       string          `db:"name"`
+		Enabled    bool            `db:"enabled"`
+		Logic      string          `db:"logic"`
+		Conditions json.RawMessage `db:"conditions"`
+		Actions    json.RawMessage `db:"actions"`
+	}
+	if err := re.db.Select(&rows, "SELECT id, name, enabled, logic, conditions, actions FROM rules"); err != nil {
+		re.logger.Warn("Failed to load rules from DB", "error", err)
+		return
+	}
+	for _, row := range rows {
+		var conditions []Condition
+		var actions []Action
+		json.Unmarshal(row.Conditions, &conditions)
+		json.Unmarshal(row.Actions, &actions)
+		re.rules[row.ID] = &Rule{
+			ID:         row.ID,
+			Name:       row.Name,
+			Enabled:    row.Enabled,
+			Logic:      row.Logic,
+			Conditions: conditions,
+			Actions:    actions,
+		}
+	}
+	re.logger.Info("Loaded rules from database", "count", len(rows))
+}
+
+func (re *RuleEngine) saveRule(rule *Rule) error {
+	if re.db == nil {
+		return nil
+	}
+	conds, _ := json.Marshal(rule.Conditions)
+	acts, _ := json.Marshal(rule.Actions)
+	_, err := re.db.Exec(`INSERT INTO rules (id, name, enabled, logic, conditions, actions, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		ON CONFLICT (id) DO UPDATE SET name=$2, enabled=$3, logic=$4, conditions=$5, actions=$6, updated_at=NOW()`,
+		rule.ID, rule.Name, rule.Enabled, rule.Logic, conds, acts)
+	return err
+}
+
+func (re *RuleEngine) deleteRule(id string) error {
+	if re.db == nil {
+		return nil
+	}
+	_, err := re.db.Exec("DELETE FROM rules WHERE id=$1", id)
+	return err
 }
 
 func (re *RuleEngine) AddRule(rule *Rule) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
 	re.rules[rule.ID] = rule
+	if err := re.saveRule(rule); err != nil {
+		re.logger.Error("Failed to persist rule", "id", rule.ID, "error", err)
+	}
 }
 
 func (re *RuleEngine) RemoveRule(id string) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
 	delete(re.rules, id)
+	if err := re.deleteRule(id); err != nil {
+		re.logger.Error("Failed to remove rule from DB", "id", id, "error", err)
+	}
 }
 
 func (re *RuleEngine) Evaluate(event map[string]interface{}) []Action {

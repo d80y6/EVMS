@@ -58,7 +58,7 @@ func NewDiscoveryService(config *DiscoveryConfig, logger *slog.Logger) (*Discove
 	}
 
 	if config.NATSURL != "" {
-		nc, err := nats.Connect(config.NATSURL)
+		nc, err := nats.Connect(config.NATSURL, common.NATSTLSOptions()...)
 		if err != nil {
 			logger.Warn("Failed to connect to NATS, proceeding without it", "error", err)
 		} else {
@@ -161,6 +161,8 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("discovery"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

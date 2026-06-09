@@ -81,11 +81,11 @@ type NotificationService struct {
 
 // NewNotificationService creates a new notification service instance
 func NewNotificationService(config *NotificationConfig, logger *slog.Logger) (*NotificationService, error) {
-	nc, err := nats.Connect(config.NATSURL,
+	nc, err := nats.Connect(config.NATSURL, append(common.NATSTLSOptions(),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}

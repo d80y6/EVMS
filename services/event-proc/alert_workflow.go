@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/jmoiron/sqlx"
 )
 
 type AlertStatus string
@@ -41,6 +42,7 @@ type AlertWorkflowManager struct {
 	alerts map[string]*Alert
 	config AlertWorkflowConfig
 	logger *slog.Logger
+	db     *sqlx.DB
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -51,7 +53,7 @@ type AlertWorkflowConfig struct {
 	CheckInterval     time.Duration `json:"check_interval"`
 }
 
-func NewAlertWorkflowManager(ctx context.Context, cfg AlertWorkflowConfig, logger *slog.Logger) *AlertWorkflowManager {
+func NewAlertWorkflowManager(db *sqlx.DB, ctx context.Context, cfg AlertWorkflowConfig, logger *slog.Logger) *AlertWorkflowManager {
 	if cfg.EscalationTimeout == 0 {
 		cfg.EscalationTimeout = 5 * time.Minute
 	}
@@ -63,11 +65,62 @@ func NewAlertWorkflowManager(ctx context.Context, cfg AlertWorkflowConfig, logge
 		alerts: make(map[string]*Alert),
 		config: cfg,
 		logger: logger,
+		db:     db,
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	m.loadFromDB()
 	go m.escalationLoop()
 	return m
+}
+
+func (m *AlertWorkflowManager) loadFromDB() {
+	if m.db == nil {
+		return
+	}
+	var rows []struct {
+		ID                string     `db:"id"`
+		RuleID            string     `db:"rule_id"`
+		CameraID          string     `db:"camera_id"`
+		Message           string     `db:"message"`
+		Status            string     `db:"status"`
+		AckedBy           string     `db:"acked_by"`
+		AckedAt           *time.Time `db:"acked_at"`
+		Escalated         bool       `db:"escalated"`
+		EscalationWebhook string     `db:"escalation_webhook"`
+		CreatedAt         time.Time  `db:"created_at"`
+	}
+	if err := m.db.Select(&rows, "SELECT id, rule_id, camera_id, message, status, acked_by, acked_at, escalated, escalation_webhook, created_at FROM alerts"); err != nil {
+		m.logger.Warn("Failed to load alerts from DB", "error", err)
+		return
+	}
+	for _, row := range rows {
+		alert := &Alert{
+			ID:                row.ID,
+			RuleID:            row.RuleID,
+			CameraID:          row.CameraID,
+			Message:           row.Message,
+			Status:            AlertStatus(row.Status),
+			CreatedAt:         row.CreatedAt,
+			AckedBy:           row.AckedBy,
+			AckedAt:           row.AckedAt,
+			Escalated:         row.Escalated,
+			EscalationWebhook: row.EscalationWebhook,
+		}
+		m.alerts[alert.ID] = alert
+	}
+	m.logger.Info("Loaded alerts from database", "count", len(rows))
+}
+
+func (m *AlertWorkflowManager) saveAlert(alert *Alert) error {
+	if m.db == nil {
+		return nil
+	}
+	_, err := m.db.Exec(`INSERT INTO alerts (id, rule_id, camera_id, message, status, acked_by, acked_at, escalated, escalation_webhook, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+		ON CONFLICT (id) DO UPDATE SET status=$5, acked_by=$6, acked_at=$7, escalated=$8, escalation_webhook=$9, updated_at=NOW()`,
+		alert.ID, alert.RuleID, alert.CameraID, alert.Message, string(alert.Status), alert.AckedBy, alert.AckedAt, alert.Escalated, alert.EscalationWebhook, alert.CreatedAt)
+	return err
 }
 
 func (m *AlertWorkflowManager) CreateAlert(ruleID, cameraID, message string) *Alert {
@@ -82,6 +135,9 @@ func (m *AlertWorkflowManager) CreateAlert(ruleID, cameraID, message string) *Al
 		CreatedAt: time.Now(),
 	}
 	m.alerts[alert.ID] = alert
+	if err := m.saveAlert(alert); err != nil {
+		m.logger.Error("Failed to persist alert", "id", alert.ID, "error", err)
+	}
 	m.logger.Info("Alert created", "id", alert.ID, "camera", cameraID)
 	return alert
 }
@@ -97,6 +153,9 @@ func (m *AlertWorkflowManager) Acknowledge(id, username string) error {
 	alert.Status = AlertAcknowledged
 	alert.AckedBy = username
 	alert.AckedAt = &now
+	if err := m.saveAlert(alert); err != nil {
+		m.logger.Error("Failed to persist alert acknowledgment", "id", id, "error", err)
+	}
 	m.logger.Info("Alert acknowledged", "id", id, "by", username)
 	return nil
 }
@@ -115,6 +174,9 @@ func (m *AlertWorkflowManager) escalationLoop() {
 				if alert.Status == AlertTriggered && now.Sub(alert.CreatedAt) > m.config.EscalationTimeout {
 					alert.Status = AlertEscalated
 					alert.Escalated = true
+					if err := m.saveAlert(alert); err != nil {
+						m.logger.Error("Failed to persist escalation", "id", alert.ID, "error", err)
+					}
 					m.logger.Warn("Alert escalated", "id", alert.ID)
 					if m.config.EscalationWebhook != "" {
 						go m.fireEscalationWebhook(alert)

@@ -1,0 +1,64 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup-verify
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup-verify
+spec:
+  schedule: {{ .Values.backup.verify.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: verify
+            image: postgres:15-alpine
+            command:
+            - /bin/bash
+            - /scripts/verify-backup.sh
+            - /backups
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: backups
+            persistentVolumeClaim:
+              claimName: db-backups-pvc
+          - name: scripts
+            configMap:
+              name: db-backup-verify-scripts
+              defaultMode: 0555
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-backup-verify-scripts
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup-verify
+data:
+  verify-backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    BACKUP_DIR="${1:-/backups}"
+    LATEST=$(ls -t "$BACKUP_DIR"/*.sql.gz 2>/dev/null | head -1)
+    if [ -z "$LATEST" ]; then
+        echo "ERROR: No backup found in $BACKUP_DIR"
+        exit 1
+    fi
+    echo "Verifying: $LATEST"
+    pg_restore -l "$LATEST" > /dev/null 2>&1 || { echo "FAILED"; exit 1; }
+    ENTRIES=$(pg_restore -l "$LATEST" 2>/dev/null | wc -l)
+    echo "OK - $ENTRIES objects verified"
+{{- end }}

@@ -50,11 +50,11 @@ func NewAuditService(logger *slog.Logger) (*AuditService, error) {
 	port := common.GetEnv("AUDIT_PORT", ":8093")
 	dbURL := os.Getenv("DATABASE_URL")
 
-	nc, err := nats.Connect(natsURL,
+	nc, err := nats.Connect(natsURL, append(common.NATSTLSOptions(),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -319,6 +319,8 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("audit"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

@@ -354,6 +354,7 @@ backup:
   enabled: false
   schedule: "0 2 * * *"
   retentionDays: 30
+  retentionMode: simple
   storageSize: 50Gi
   storageClass: standard
   s3Bucket: ""
@@ -361,6 +362,8 @@ backup:
   restore:
     dropBefore: false
     file: ""
+  verify:
+    schedule: "0 3 * * 0"
 
 podDisruptionBudgets:
   enabled: true

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -104,41 +105,57 @@ type CameraStreamConfig struct {
 
 // StreamProcessor handles video stream processing for a single camera
 type StreamProcessor struct {
-	config CameraStreamConfig
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	nc     *nats.Conn
-	logger *slog.Logger
-	wg     sync.WaitGroup
+	config     CameraStreamConfig
+	cmd        *exec.Cmd
+	cancel     context.CancelFunc
+	nc         *nats.Conn
+	logger     *slog.Logger
+	wg         sync.WaitGroup
+	mu         sync.Mutex
+	restartCh  chan struct{}
+	running    bool
+	health     StreamHealth
+}
+
+type StreamHealth struct {
+	mu           sync.RWMutex
+	Running      bool      `json:"running"`
+	Uptime       time.Time `json:"uptime"`
+	RestartCount int       `json:"restart_count"`
+	LastError    string    `json:"last_error,omitempty"`
+	LastRestart  time.Time `json:"last_restart,omitempty"`
+}
+
+func (h *StreamHealth) snapshot() StreamHealth {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return StreamHealth{
+		Running:      h.Running,
+		Uptime:       h.Uptime,
+		RestartCount: h.RestartCount,
+		LastError:    h.LastError,
+		LastRestart:  h.LastRestart,
+	}
 }
 
 // NewStreamProcessor creates a new stream processor
 func NewStreamProcessor(config CameraStreamConfig, nc *nats.Conn, logger *slog.Logger) *StreamProcessor {
 	return &StreamProcessor{
-		config: config,
-		nc:     nc,
-		logger: logger,
+		config:    config,
+		nc:        nc,
+		logger:    logger,
+		restartCh: make(chan struct{}, 1),
+		health:    StreamHealth{},
 	}
 }
 
-// Start begins stream processing
-func (p *StreamProcessor) Start(ctx context.Context) error {
-	childCtx, cancel := context.WithCancel(ctx)
-	p.cancel = cancel
-
-	recordingsPath := filepath.Join(p.config.RecordingsDir, p.config.CameraID)
-	if err := os.MkdirAll(recordingsPath, 0755); err != nil {
-		return fmt.Errorf("failed to create recordings directory: %w", err)
-	}
-
-	// Optimized FFmpeg args for low latency and consistent segmenting
-	args := []string{
+func ffmpegArgs(recordingsPath, rtspURL string) []string {
+	return []string{
 		"-rtsp_transport", "tcp",
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-hwaccel", "auto",
-		"-i", p.config.RTSPURL,
-		// Stream 0: Video copy for recording
+		"-i", rtspURL,
 		"-map", "0:v:0",
 		"-c:v:0", "copy",
 		"-f", "segment",
@@ -148,78 +165,165 @@ func (p *StreamProcessor) Start(ctx context.Context) error {
 		"-reset_timestamps", "1",
 		"-strftime", "1",
 		filepath.Join(recordingsPath, "%Y%m%d_%H%M%S.mp4"),
-		// Stream 1: Low-res MJPEG for AI/Preview
 		"-map", "0:v:0",
 		"-s", "640x360",
 		"-f", "mjpeg",
 		"-q:v", "5",
 		"-fpsmax", "10",
 		"pipe:3",
-		// Stream 2: H264 for WebRTC (copy, don't re-encode)
 		"-map", "0:v:0",
 		"-c:v", "copy",
 		"-f", "h264",
 		"-bsf:v", "h264_mp4toannexb",
 		"pipe:4",
 	}
+}
 
-	p.cmd = exec.CommandContext(childCtx, "ffmpeg", args...)
+// runFFmpeg launches ffmpeg and the associated pipeline goroutines.
+// It returns when ffmpeg exits.
+func (p *StreamProcessor) runFFmpeg(ctx context.Context) error {
+	recordingsPath := filepath.Join(p.config.RecordingsDir, p.config.CameraID)
+	if err := os.MkdirAll(recordingsPath, 0755); err != nil {
+		return fmt.Errorf("failed to create recordings directory: %w", err)
+	}
+
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(childCtx, "ffmpeg", ffmpegArgs(recordingsPath, p.config.RTSPURL)...)
 
 	mjpegR, mjpegW, _ := os.Pipe()
 	h264R, h264W, _ := os.Pipe()
-	p.cmd.ExtraFiles = []*os.File{mjpegW, h264W}
+	cmd.ExtraFiles = []*os.File{mjpegW, h264W}
 
-	p.wg.Add(3)
+	ffWg := sync.WaitGroup{}
+	ffWg.Add(3)
 	go func() {
-		defer p.wg.Done()
+		defer ffWg.Done()
 		p.publishMJPEG(mjpegR, fmt.Sprintf("camera.%s.frames", p.config.CameraID))
+		mjpegR.Close()
 	}()
 	go func() {
-		defer p.wg.Done()
+		defer ffWg.Done()
 		p.publishH264(h264R, fmt.Sprintf("camera.%s.h264", p.config.CameraID))
+		h264R.Close()
 	}()
 	go func() {
-		defer p.wg.Done()
+		defer ffWg.Done()
 		p.watchRecordings(childCtx, recordingsPath)
 	}()
-
-	common.StreamActive.WithLabelValues(p.config.CameraID).Set(1)
 
 	p.logger.Info("Starting FFmpeg process",
 		"camera_id", p.config.CameraID,
 		"url", p.config.RTSPURL)
 
-	if err := p.cmd.Start(); err != nil {
-		cancel()
+	if err := cmd.Start(); err != nil {
 		mjpegW.Close()
 		h264W.Close()
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
+
+	p.mu.Lock()
+	p.cmd = cmd
+	p.mu.Unlock()
+
 	mjpegW.Close()
 	h264W.Close()
-	return nil
+
+	err := cmd.Wait()
+	ffWg.Wait()
+	return err
+}
+
+// StartSupervisor launches the supervised ffmpeg lifecycle with exponential backoff restarts.
+func (p *StreamProcessor) StartSupervisor(ctx context.Context) {
+	p.mu.Lock()
+	if p.running {
+		p.mu.Unlock()
+		return
+	}
+	p.running = true
+	p.mu.Unlock()
+
+	backoff := 1 * time.Second
+	maxBackoff := 5 * time.Minute
+	cameraID := p.config.CameraID
+
+	p.health.mu.Lock()
+	p.health.Running = true
+	p.health.Uptime = time.Now()
+	p.mu.Unlock()
+
+	for {
+		start := time.Now()
+		err := p.runFFmpeg(ctx)
+		duration := time.Since(start)
+
+		p.health.mu.Lock()
+		p.health.RestartCount++
+		p.health.LastRestart = time.Now()
+		if err != nil {
+			p.health.LastError = err.Error()
+		} else {
+			p.health.LastError = "ffmpeg exited"
+		}
+		p.health.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			p.logger.Info("Stream processor stopped", "camera_id", cameraID,
+				"uptime", duration.Round(time.Second), "restarts", p.health.RestartCount)
+			common.StreamActive.WithLabelValues(cameraID).Set(0)
+			p.health.mu.Lock()
+			p.health.Running = false
+			p.health.mu.Unlock()
+			return
+		default:
+		}
+
+		if err != nil {
+			p.logger.Warn("FFmpeg exited, restarting",
+				"camera_id", cameraID, "uptime", duration.Round(time.Second),
+				"error", err, "backoff", backoff.Round(time.Second))
+		} else {
+			p.logger.Warn("FFmpeg exited unexpectedly, restarting",
+				"camera_id", cameraID, "uptime", duration.Round(time.Second),
+				"backoff", backoff.Round(time.Second))
+		}
+
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			common.StreamActive.WithLabelValues(cameraID).Set(0)
+			return
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
 
 // Stop gracefully stops the stream processor
 func (p *StreamProcessor) Stop() error {
+	p.mu.Lock()
+	if !p.running {
+		p.mu.Unlock()
+		return nil
+	}
+	p.running = false
 	if p.cancel != nil {
 		p.cancel()
 	}
-
 	if p.cmd != nil && p.cmd.Process != nil {
 		p.cmd.Process.Kill()
 	}
-
-	p.wg.Wait()
+	p.mu.Unlock()
 
 	common.StreamActive.WithLabelValues(p.config.CameraID).Set(0)
 	p.logger.Info("Stream processor stopped", "camera_id", p.config.CameraID)
 	return nil
-}
-
-// Wait waits for the FFmpeg process to complete
-func (p *StreamProcessor) Wait() error {
-	return p.cmd.Wait()
 }
 
 // watchRecordings monitors the recordings directory for new files
@@ -352,6 +456,30 @@ func nalType(nal []byte) byte {
 	return nal[offset] & 0x1F
 }
 
+// nalStartCodeIndex finds the next Annex B start code prefix (3 or 4 byte).
+// Returns -1 if not found. Checks 4-byte first so it doesn't match the
+// 3-byte suffix inside a 4-byte start code.
+func nalStartCodeIndex(data []byte) int {
+	if i := bytes.Index(data, []byte{0x00, 0x00, 0x00, 0x01}); i >= 0 {
+		return i
+	}
+	if i := bytes.Index(data, []byte{0x00, 0x00, 0x01}); i >= 0 {
+		return i
+	}
+	return -1
+}
+
+// nalStartCodeLen returns the length of the Annex B start code at the beginning of data.
+func nalStartCodeLen(data []byte) int {
+	if len(data) >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
+		return 4
+	}
+	if len(data) >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1 {
+		return 3
+	}
+	return 0
+}
+
 // readUE decodes an unsigned Exponential-Golomb code from the given bit offset.
 func readUE(nal []byte, bitOffset int) (int, int) {
 	leadingZeros := 0
@@ -413,16 +541,27 @@ func (p *StreamProcessor) publishH264(r io.Reader, subject string) {
 			return 0, nil, nil
 		}
 
-		if i := bytes.Index(data, []byte{0x00, 0x00, 0x01}); i >= 0 {
-			if j := bytes.Index(data[i+3:], []byte{0x00, 0x00, 0x01}); j >= 0 {
-				return i + j + 3, data[i : i+j+3], nil
+		// search for any Annex B start code (3 or 4 byte)
+		start := nalStartCodeIndex(data)
+		if start < 0 {
+			if atEOF {
+				return len(data), data, nil
 			}
+			return 0, nil, nil
 		}
 
-		if atEOF {
-			return len(data), data, nil
+		// search for the next start code after this one
+		rest := data[start+nalStartCodeLen(data[start:]):]
+		next := nalStartCodeIndex(rest)
+		if next < 0 {
+			if atEOF {
+				return len(data), data, nil
+			}
+			return 0, nil, nil
 		}
-		return 0, nil, nil
+
+		end := start + nalStartCodeLen(data[start:]) + next
+		return end, data[start:end], nil
 	})
 
 	var (
@@ -505,11 +644,11 @@ func NewIngestService(ctx context.Context, config IngestConfig, logger *slog.Log
 	var err error
 
 	if config.NATSURL != "" {
-		nc, err = nats.Connect(config.NATSURL,
+		nc, err = nats.Connect(config.NATSURL, append(common.NATSTLSOptions(),
 			nats.RetryOnFailedConnect(true),
 			nats.MaxReconnects(-1),
 			nats.ReconnectWait(2*time.Second),
-		)
+		)...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 		}
@@ -531,18 +670,45 @@ func NewIngestService(ctx context.Context, config IngestConfig, logger *slog.Log
 		h.AddDBChecker(db.DB, "postgres")
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", h.Liveness)
-	mux.HandleFunc("/ready", h.Readiness)
-
-	return &IngestService{
+	svc := &IngestService{
 		config:     config,
 		db:         db,
 		logger:     logger,
 		nc:         nc,
 		processors: make(map[string]*StreamProcessor),
-		healthSrv:  &http.Server{Addr: ":8092", Handler: mux},
-	}, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.Liveness)
+	mux.HandleFunc("/ready", h.Readiness)
+	mux.HandleFunc("/health/camera/", svc.handleCameraHealth)
+	svc.healthSrv = &http.Server{Addr: ":8092", Handler: mux}
+
+	return svc, nil
+}
+
+func (s *IngestService) handleCameraHealth(w http.ResponseWriter, r *http.Request) {
+	cameraID := strings.TrimPrefix(r.URL.Path, "/health/camera/")
+	if cameraID == "" {
+		http.Error(w, "camera_id required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	proc, exists := s.processors[cameraID]
+	s.mu.Unlock()
+
+	if !exists {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"camera_id": cameraID,
+			"running":   false,
+			"error":     "no active processor",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(proc.health.snapshot())
 }
 
 // discoverCameras queries the database and starts/stops processors accordingly
@@ -591,14 +757,8 @@ func (s *IngestService) discoverCameras(ctx context.Context) {
 			RecordingsDir: s.config.RecordingsDir,
 		}, s.nc, s.logger)
 
-		if err := proc.Start(ctx); err != nil {
-			s.logger.Error("Failed to start stream processor",
-				"camera_id", cam.ID,
-				"error", err)
-			continue
-		}
-
 		s.processors[cam.ID] = proc
+		go proc.StartSupervisor(ctx)
 		s.logger.Info("Started ingesting camera",
 			"camera_id", cam.ID,
 			"name", cam.Name,
@@ -672,6 +832,8 @@ func (s *IngestService) Start(ctx context.Context) error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("ingest"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

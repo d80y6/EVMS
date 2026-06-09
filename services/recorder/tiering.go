@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,7 +125,7 @@ func (m *TieringManager) s3Upload(src, dst string) error {
 			return fmt.Errorf("checksum failed: %w", err)
 		}
 
-		cmd := exec.Command("aws", "s3", "cp", src, dst, "--metadata", fmt.Sprintf("md5checksum=%s", checksum))
+		cmd := exec.Command("aws", "s3", "cp", src, dst, "--metadata", fmt.Sprintf("sha256=%s", checksum))
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("s3 cp failed: %s: %w", string(output), err)
 		}
@@ -201,7 +201,7 @@ func fileChecksum(path string) (string, error) {
 	}
 	defer f.Close()
 
-	h := md5.New()
+	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

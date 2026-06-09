@@ -6,7 +6,7 @@ interface CameraViewProps {
   streamType?: string;
 }
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const ICE_SERVERS: RTCIceServer[] = [];
 const RECONNECT_DELAY = 5000;
 
 export default function CameraView({ cameraId, streamType }: CameraViewProps) {

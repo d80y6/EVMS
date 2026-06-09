@@ -63,11 +63,12 @@ func NewMetadataService(config *MetadataConfig, logger *slog.Logger) (*MetadataS
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	nc, err := nats.Connect(config.NATSURL,
+	opts := append(common.NATSTLSOptions(),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
 	)
+	nc, err := nats.Connect(config.NATSURL, opts...)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
@@ -194,6 +195,8 @@ func (s *MetadataService) Close() error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("metadata"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

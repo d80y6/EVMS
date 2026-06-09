@@ -24,6 +24,7 @@ import (
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/sony/gobreaker"
 	"golang.org/x/crypto/acme/autocert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -261,14 +262,40 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	}
 	cameraSvc := damv1.NewCameraServiceClient(cameraCC)
 
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	defaultTimeout := 10 * time.Second
+	defaultRetries := 3
+
+	cbAuth := common.NewHTTPCircuitBreaker("auth")
+	cbPlayback := common.NewHTTPCircuitBreaker("playback")
+	cbWebRTC := common.NewHTTPCircuitBreaker("webrtc")
+	cbCameraControl := common.NewHTTPCircuitBreaker("camera-control")
+	cbThumbnails := common.NewHTTPCircuitBreaker("thumbnails")
+	cbRecorder := common.NewHTTPCircuitBreaker("recorder")
+	cbExport := common.NewHTTPCircuitBreaker("export")
+	cbAlert := common.NewHTTPCircuitBreaker("alert")
+	cbAudit := common.NewHTTPCircuitBreaker("audit")
+	cbPOS := common.NewHTTPCircuitBreaker("pos")
+	cbDiscovery := common.NewHTTPCircuitBreaker("discovery")
+	cbOnvifEvents := common.NewHTTPCircuitBreaker("onvif-events")
+	cbNotification := common.NewHTTPCircuitBreaker("notification")
+
+	makeCBTransport := func(cb *gobreaker.CircuitBreaker) http.RoundTripper {
+		return common.NewCircuitBreakerTransport(cb, defaultTimeout, defaultRetries, transport)
+	}
+
 	authURL, _ := url.Parse(config.AuthServiceURL)
 	authProxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = authURL.Scheme
 			req.URL.Host = authURL.Host
 			req.URL.Path = "/auth" + strings.TrimPrefix(req.URL.Path, "/api")
-			// RawQuery remains as-is — no transformation needed
 		},
+		Transport: makeCBTransport(cbAuth),
 	}
 	playbackURL, _ := url.Parse(config.PlaybackServiceURL)
 	webrtcURL, _ := url.Parse(config.WebRTCServiceURL)
@@ -283,6 +310,12 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	onvifEventsURL, _ := url.Parse(config.OnvifEventsURL)
 	notificationURL, _ := url.Parse(config.NotificationURL)
 
+	makeProxy := func(target *url.URL, cb *gobreaker.CircuitBreaker) *httputil.ReverseProxy {
+		p := httputil.NewSingleHostReverseProxy(target)
+		p.Transport = makeCBTransport(cb)
+		return p
+	}
+
 	h := common.NewHealthHandler()
 	if db != nil {
 		h.AddDBChecker(db.DB, "postgres")
@@ -295,18 +328,18 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		cameraCC:           cameraCC,
 		cameraSvc:          cameraSvc,
 		authProxy:          authProxy,
-		playbackProxy:      httputil.NewSingleHostReverseProxy(playbackURL),
-		webrtcProxy:        httputil.NewSingleHostReverseProxy(webrtcURL),
-		cameraControlProxy: httputil.NewSingleHostReverseProxy(cameraControlURL),
-		thumbnailsProxy:    httputil.NewSingleHostReverseProxy(thumbnailsURL),
-		recorderProxy:      httputil.NewSingleHostReverseProxy(recorderURL),
-		exportProxy:        httputil.NewSingleHostReverseProxy(exportURL),
-		alertProxy:         httputil.NewSingleHostReverseProxy(alertURL),
-		auditProxy:         httputil.NewSingleHostReverseProxy(auditURL),
-		posProxy:           httputil.NewSingleHostReverseProxy(posURL),
-		discoveryProxy:     httputil.NewSingleHostReverseProxy(discoveryURL),
-		onvifEventsProxy:   httputil.NewSingleHostReverseProxy(onvifEventsURL),
-		notificationProxy:  httputil.NewSingleHostReverseProxy(notificationURL),
+		playbackProxy:      makeProxy(playbackURL, cbPlayback),
+		webrtcProxy:        makeProxy(webrtcURL, cbWebRTC),
+		cameraControlProxy: makeProxy(cameraControlURL, cbCameraControl),
+		thumbnailsProxy:    makeProxy(thumbnailsURL, cbThumbnails),
+		recorderProxy:      makeProxy(recorderURL, cbRecorder),
+		exportProxy:        makeProxy(exportURL, cbExport),
+		alertProxy:         makeProxy(alertURL, cbAlert),
+		auditProxy:         makeProxy(auditURL, cbAudit),
+		posProxy:           makeProxy(posURL, cbPOS),
+		discoveryProxy:     makeProxy(discoveryURL, cbDiscovery),
+		onvifEventsProxy:   makeProxy(onvifEventsURL, cbOnvifEvents),
+		notificationProxy:  makeProxy(notificationURL, cbNotification),
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 		healthHandler:      h,
 		upstreamHealth: []upstreamHealth{
@@ -1334,6 +1367,8 @@ func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, l
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

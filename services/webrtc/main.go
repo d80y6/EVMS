@@ -15,11 +15,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dam-vms/dam/api/v1"
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/nats-io/nats.go"
 	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // StreamSession represents an active WebRTC streaming session
@@ -39,17 +42,20 @@ type WebRTCService struct {
 	config        WebRTCConfig
 	healthHandler *common.HealthHandler
 	webrtcAPI     *webrtc.API
+	cameraCC      *grpc.ClientConn
+	cameraSvc     damv1.CameraServiceClient
 }
 
 // WebRTCConfig holds configuration for the WebRTC service
 type WebRTCConfig struct {
-	HTTPAddr     string
-	MetricsAddr  string
-	NATSURL      string
-	ICEServers   []string
-	JWTSecretEnv string
-	ICEPort      int
-	ICEHost      string
+	HTTPAddr        string
+	MetricsAddr     string
+	NATSURL         string
+	ICEServers      []string
+	JWTSecretEnv    string
+	ICEPort         int
+	ICEHost         string
+	CameraSvcAddr   string
 }
 
 func detectHostIP() string {
@@ -87,26 +93,50 @@ func DefaultWebRTCConfig() WebRTCConfig {
 	}
 
 	return WebRTCConfig{
-		HTTPAddr:     common.GetEnv("HTTP_ADDR", ":8082"),
-		MetricsAddr:  common.GetEnv("METRICS_ADDR", ":2112"),
-		NATSURL:      common.GetEnv("NATS_URL", "nats://nats:4222"),
-		ICEServers:   iceServers,
-		JWTSecretEnv: "JWT_SECRET",
-		ICEPort:      icePort,
-		ICEHost:      iceHostOrDefault(),
+		HTTPAddr:        common.GetEnv("HTTP_ADDR", ":8082"),
+		MetricsAddr:     common.GetEnv("METRICS_ADDR", ":2112"),
+		NATSURL:         common.GetEnv("NATS_URL", "nats://nats:4222"),
+		ICEServers:      iceServers,
+		JWTSecretEnv:   "JWT_SECRET",
+		ICEPort:         icePort,
+		ICEHost:         iceHostOrDefault(),
+		CameraSvcAddr:   common.GetEnv("CAMERA_SERVICE_ADDR", "camera-mgmt:50051"),
 	}
+}
+
+// tenantUnaryInterceptor forwards tenant_id from context into gRPC metadata.
+func tenantUnaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if tenant := common.TenantFromContext(ctx); tenant != "" {
+		md := metadata.Pairs("tenant_id", tenant)
+		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
+	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
 // NewWebRTCService creates a new WebRTC service instance
 func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Logger) (*WebRTCService, error) {
-	nc, err := nats.Connect(config.NATSURL,
+	nc, err := nats.Connect(config.NATSURL, append(common.NATSTLSOptions(),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
+
+	creds, err := common.GRPCClientTLSCredentials("camera-mgmt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure gRPC credentials: %w", err)
+	}
+	cameraCC, err := grpc.NewClient(config.CameraSvcAddr,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithUnaryInterceptor(tenantUnaryInterceptor),
+	)
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("failed to connect to camera service: %w", err)
+	}
+	cameraSvc := damv1.NewCameraServiceClient(cameraCC)
 
 	svc := &WebRTCService{
 		logger:        logger,
@@ -114,6 +144,8 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 		sessions:      make(map[string]*StreamSession),
 		config:        config,
 		healthHandler: common.NewHealthHandler(),
+		cameraCC:      cameraCC,
+		cameraSvc:     cameraSvc,
 	}
 	svc.healthHandler.AddNATSChecker(nc, "nats")
 
@@ -168,6 +200,9 @@ func (s *WebRTCService) Close() error {
 	if s.natsConn != nil {
 		s.natsConn.Close()
 	}
+	if s.cameraCC != nil {
+		s.cameraCC.Close()
+	}
 
 	return nil
 }
@@ -185,6 +220,22 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+
+	ctx := r.Context()
+	tenantID := common.TenantFromContext(ctx)
+
+	if s.cameraSvc != nil {
+		verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if _, err := s.cameraSvc.GetCamera(verifyCtx, &damv1.GetCameraRequest{Id: cameraID}); err != nil {
+			s.logger.Warn("camera access denied", "camera_id", cameraID, "user", username, "tenant", tenantID, "error", err)
+			http.Error(w, "camera not found or access denied", http.StatusNotFound)
+			return
+		}
+	} else {
+		s.logger.Warn("camera service not configured, skipping camera-level auth", "camera_id", cameraID)
+	}
+
 	s.logger.Info("WebRTC offer request received", "camera_id", cameraID, "remote_addr", r.RemoteAddr, "user", username)
 
 	var offer webrtc.SessionDescription
@@ -394,6 +445,8 @@ func (s *WebRTCService) Start(ctx context.Context) error {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("webrtc"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

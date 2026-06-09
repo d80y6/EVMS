@@ -73,11 +73,11 @@ type OnvifEventsService struct {
 }
 
 func NewOnvifEventsService(config *OnvifEventsConfig, logger *slog.Logger) (*OnvifEventsService, error) {
-	nc, err := nats.Connect(config.NATSURL,
+	nc, err := nats.Connect(config.NATSURL, append(common.NATSTLSOptions(),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}

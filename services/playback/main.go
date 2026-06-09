@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -140,8 +141,42 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 		w.Header().Set("Content-Type", s.audioContentType(relPath))
 	}
 
+	// Integrity check for MP4 files before serving
+	if strings.HasSuffix(relPath, ".mp4") && info.Size() > 8 {
+		if err := validateMP4(evalPath, s.logger); err != nil {
+			s.logger.Warn("MP4 integrity check failed, serving anyway", "path", evalPath, "error", err)
+		}
+	}
+
 	s.logger.Info("Playback request", "path", evalPath, "remote_addr", r.RemoteAddr)
 	http.ServeFile(w, r, evalPath)
+}
+
+func validateMP4(path string, logger *slog.Logger) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	header := make([]byte, 16)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	if string(header[4:8]) != "ftyp" {
+		return fmt.Errorf("missing ftyp box")
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < 1024 {
+		return fmt.Errorf("file too small: %d bytes", info.Size())
+	}
+
+	return nil
 }
 
 func (s *PlaybackService) handleAudioPlayback(w http.ResponseWriter, r *http.Request, relPath string) {
@@ -192,6 +227,8 @@ func (s *PlaybackService) audioContentType(path string) string {
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	common.CheckJWTSecret()
 
 	if err := common.InitTelemetry("playback"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)

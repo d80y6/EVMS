@@ -1733,6 +1733,8 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	common.CheckJWTSecret()
+
 	if err := common.InitTelemetry("camera-control"); err != nil {
 		logger.Error("Failed to initialize telemetry", "error", err)
 	}

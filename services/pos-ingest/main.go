@@ -52,8 +52,8 @@ func main() {
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 	common.StartResourceMonitor(ctx)
 
-	nc, err := nats.Connect(common.GetEnv("NATS_URL", "nats://localhost:4222"),
-		nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1), nats.ReconnectWait(2*time.Second))
+	nc, err := nats.Connect(common.GetEnv("NATS_URL", "nats://localhost:4222"), append(common.NATSTLSOptions(),
+		nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1), nats.ReconnectWait(2*time.Second))...)
 	if err != nil {
 		logger.Error("Failed to connect to NATS", "error", err)
 		os.Exit(1)

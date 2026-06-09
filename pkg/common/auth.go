@@ -85,6 +85,12 @@ func GetEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func CheckJWTSecret() {
+	if os.Getenv("JWT_SECRET") == "" {
+		panic("JWT_SECRET environment variable is not set")
+	}
+}
+
 func getJWTKey() []byte {
 	return []byte(os.Getenv("JWT_SECRET"))
 }

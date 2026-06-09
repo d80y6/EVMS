@@ -54,6 +54,8 @@ spec:
                   key: db-password
             - name: RETENTION_DAYS
               value: {{ .Values.backup.retentionDays | quote }}
+            - name: RETENTION_MODE
+              value: {{ .Values.backup.retentionMode | quote }}
             - name: S3_BUCKET
               value: {{ .Values.backup.s3Bucket }}
             - name: S3_REGION

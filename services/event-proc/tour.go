@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
 
 func cameraControlURL() string {
@@ -40,15 +41,70 @@ type TourScheduler struct {
 	mu     sync.RWMutex
 	tours  map[string]*Tour
 	cancel map[string]context.CancelFunc
+	db     *sqlx.DB
 	logger *slog.Logger
 }
 
-func NewTourScheduler(logger *slog.Logger) *TourScheduler {
-	return &TourScheduler{
+func NewTourScheduler(db *sqlx.DB, logger *slog.Logger) *TourScheduler {
+	ts := &TourScheduler{
 		tours:  make(map[string]*Tour),
 		cancel: make(map[string]context.CancelFunc),
+		db:     db,
 		logger: logger,
 	}
+	ts.loadFromDB()
+	return ts
+}
+
+func (ts *TourScheduler) loadFromDB() {
+	if ts.db == nil {
+		return
+	}
+	var rows []struct {
+		ID         string          `db:"id"`
+		Name       string          `db:"name"`
+		Enabled    bool            `db:"enabled"`
+		Interval   int             `db:"interval_sec"`
+		Steps      json.RawMessage `db:"steps"`
+		CreatedAt  time.Time       `db:"created_at"`
+	}
+	if err := ts.db.Select(&rows, "SELECT id, name, enabled, interval_sec, steps, created_at FROM tours"); err != nil {
+		ts.logger.Warn("Failed to load tours from DB", "error", err)
+		return
+	}
+	for _, row := range rows {
+		var steps []TourStep
+		json.Unmarshal(row.Steps, &steps)
+		ts.tours[row.ID] = &Tour{
+			ID:        row.ID,
+			Name:      row.Name,
+			Enabled:   row.Enabled,
+			Interval:  row.Interval,
+			Steps:     steps,
+			CreatedAt: row.CreatedAt,
+		}
+	}
+	ts.logger.Info("Loaded tours from database", "count", len(rows))
+}
+
+func (ts *TourScheduler) saveTour(tour *Tour) error {
+	if ts.db == nil {
+		return nil
+	}
+	steps, _ := json.Marshal(tour.Steps)
+	_, err := ts.db.Exec(`INSERT INTO tours (id, name, enabled, interval_sec, steps, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (id) DO UPDATE SET name=$2, enabled=$3, interval_sec=$4, steps=$5, updated_at=NOW()`,
+		tour.ID, tour.Name, tour.Enabled, tour.Interval, steps, tour.CreatedAt)
+	return err
+}
+
+func (ts *TourScheduler) deleteTour(id string) error {
+	if ts.db == nil {
+		return nil
+	}
+	_, err := ts.db.Exec("DELETE FROM tours WHERE id=$1", id)
+	return err
 }
 
 func (ts *TourScheduler) AddTour(tour *Tour) {
@@ -59,6 +115,9 @@ func (ts *TourScheduler) AddTour(tour *Tour) {
 	ts.mu.Lock()
 	ts.tours[tour.ID] = tour
 	ts.mu.Unlock()
+	if err := ts.saveTour(tour); err != nil {
+		ts.logger.Error("Failed to persist tour", "id", tour.ID, "error", err)
+	}
 }
 
 func (ts *TourScheduler) RemoveTour(id string) {
@@ -69,6 +128,9 @@ func (ts *TourScheduler) RemoveTour(id string) {
 	}
 	delete(ts.tours, id)
 	delete(ts.cancel, id)
+	if err := ts.deleteTour(id); err != nil {
+		ts.logger.Error("Failed to remove tour from DB", "id", id, "error", err)
+	}
 }
 
 func (ts *TourScheduler) StartTour(id string) error {

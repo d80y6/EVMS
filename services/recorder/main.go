@@ -158,6 +158,7 @@ type Recorder struct {
 	timelineService *TimelineService
 	frameAnalysis   *FrameAnalysisService
 	audioService    *AudioService
+	rateTracker     *IngestionRateTracker
 }
 
 // NewRecorder creates a new recorder instance
@@ -190,6 +191,7 @@ func NewRecorder(ctx context.Context, config RecorderConfig, logger *slog.Logger
 		timelineService: NewTimelineService(db),
 		frameAnalysis:   NewFrameAnalysisService(db),
 		audioService:    NewAudioService(db),
+		rateTracker:     NewIngestionRateTracker(5 * time.Minute),
 	}, nil
 }
 
@@ -234,6 +236,9 @@ func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error
 		"size", seg.FileSize)
 	common.SegmentWriteDuration.WithLabelValues(seg.CameraID).Observe(duration)
 	common.RecordingsIndexed.WithLabelValues(seg.CameraID).Inc()
+	if r.rateTracker != nil {
+		r.rateTracker.Record(seg.CameraID, seg.FileSize)
+	}
 	return nil
 }
 
@@ -323,6 +328,25 @@ func (r *Recorder) flushPrerecord(cameraID string, recordingPath string) {
 	r.logger.Info("Flushed prerecord buffer", "camera_id", cameraID, "path", prerollPath)
 }
 
+// fixupMoovAtom runs ffmpeg faststart to relocate the moov atom to the beginning
+// of the MP4 file for optimal streaming. Falls back to integrity check only.
+func fixupMoovAtom(path string, logger *slog.Logger) {
+	tmpPath := path + ".tmp"
+	cmd := exec.Command("ffmpeg", "-i", path, "-c", "copy", "-movflags", "+faststart", "-y", tmpPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		logger.Warn("ffmpeg faststart failed, serving file as-is",
+			"path", path, "error", err, "output", string(output))
+		os.Remove(tmpPath)
+	} else {
+		if err := os.Rename(tmpPath, path); err != nil {
+			logger.Error("failed to replace file after faststart", "path", path, "error", err)
+			os.Remove(tmpPath)
+		} else {
+			logger.Info("moov atom relocated to front", "path", path)
+		}
+	}
+}
+
 // processRecordingEvent processes a recording event and returns a segment
 func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEvent) (RecordingSegment, error) {
 	// Wait for file to be fully written by FFmpeg.
@@ -362,6 +386,9 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 	if info == nil {
 		return RecordingSegment{}, fmt.Errorf("recording file not found after retries: %s", event.Path)
 	}
+
+	// Relocate moov atom to front for fast streaming start
+	fixupMoovAtom(event.Path, r.logger)
 
 	filename := filepath.Base(event.Path)
 	timeStr := strings.TrimSuffix(filename, ".mp4")
@@ -466,6 +493,7 @@ type RecorderService struct {
 	nc             *nats.Conn
 	leader         *LeaderElection
 	bookmarkServer *http.Server
+	rateTracker    *IngestionRateTracker
 }
 
 // NewRecorderService creates a new recorder service
@@ -483,10 +511,11 @@ func NewRecorderService(config RecorderConfig, logger *slog.Logger) (*RecorderSe
 	}
 
 	return &RecorderService{
-		config: config,
-		logger: logger,
-		nc:     nc,
-		leader: leader,
+		config:      config,
+		logger:      logger,
+		nc:          nc,
+		leader:      leader,
+		rateTracker: NewIngestionRateTracker(5 * time.Minute),
 	}, nil
 }
 
@@ -610,6 +639,7 @@ func (s *RecorderService) Start(ctx context.Context) error {
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.Handle("/storage/estimates", common.JWTAuthMiddleware(handleStorageEstimate(recorder.db)))
+	mux.Handle("/storage/forecast", common.JWTAuthMiddleware(handleStorageForecast(recorder.db, s.rateTracker)))
 	mux.Handle("/bookmarks", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
