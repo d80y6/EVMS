@@ -139,7 +139,21 @@ func (s *AuthService) handleOIDCCallback(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if state == "" {
-		s.logger.Warn("OIDC callback missing state parameter")
+		jsonError(w, "state parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate state against cookie to prevent CSRF
+	cookie, err := r.Cookie("oidc_state")
+	if err != nil {
+		s.logger.Warn("OIDC callback missing state cookie")
+		jsonError(w, "invalid state", http.StatusUnauthorized)
+		return
+	}
+	if cookie.Value != state {
+		s.logger.Warn("OIDC callback state mismatch", "expected", cookie.Value, "got", state)
+		jsonError(w, "invalid state", http.StatusUnauthorized)
+		return
 	}
 
 	oidcConfig, err := fetchOIDCConfig(provider.IssuerURL)

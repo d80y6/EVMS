@@ -168,6 +168,67 @@ func TestHandleLogout_MissingRefreshToken(t *testing.T) {
 	}
 }
 
+func TestOIDCCallback_MissingState(t *testing.T) {
+	s := &AuthService{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/test/callback?code=abc123", nil)
+	rr := httptest.NewRecorder()
+
+	provider := SSOProvider{Name: "test", ProviderType: "oidc"}
+	s.handleOIDCCallback(rr, req, provider)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["error"] != "state parameter required" {
+		t.Errorf("error = %q, want %q", resp["error"], "state parameter required")
+	}
+}
+
+func TestOIDCCallback_MissingStateCookie(t *testing.T) {
+	s := &AuthService{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/test/callback?code=abc123&state=xyz789", nil)
+	rr := httptest.NewRecorder()
+
+	provider := SSOProvider{Name: "test", ProviderType: "oidc"}
+	s.handleOIDCCallback(rr, req, provider)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["error"] != "invalid state" {
+		t.Errorf("error = %q, want %q", resp["error"], "invalid state")
+	}
+}
+
+func TestOIDCCallback_StateCookieMismatch(t *testing.T) {
+	s := &AuthService{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/test/callback?code=abc123&state=from_query", nil)
+	req.AddCookie(&http.Cookie{Name: "oidc_state", Value: "from_cookie"})
+	rr := httptest.NewRecorder()
+
+	provider := SSOProvider{Name: "test", ProviderType: "oidc"}
+	s.handleOIDCCallback(rr, req, provider)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["error"] != "invalid state" {
+		t.Errorf("error = %q, want %q", resp["error"], "invalid state")
+	}
+}
+
 func TestHandleLogin_RateLimited(t *testing.T) {
 	rl := newIPRateLimiter(1, 1*time.Minute)
 	s := &AuthService{loginRateLimiter: rl, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
