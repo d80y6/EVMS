@@ -123,12 +123,12 @@ func ValidateJWT(tokenString string) (*Claims, error) {
 func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		authHeader = r.URL.Query().Get("token")
-		if authHeader != "" {
-			r.URL.RawQuery = ""
+		if authHeader == "" {
+			authHeader = r.URL.Query().Get("token")
+			if authHeader != "" {
+				r.URL.RawQuery = ""
+			}
 		}
-	}
 
 		if authHeader == "" {
 			http.Error(w, "Authorization header required", http.StatusUnauthorized)
@@ -136,13 +136,24 @@ func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		_, err := ValidateJWT(tokenString)
+		claims, err := ValidateJWT(tokenString)
 		if err != nil {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		next(w, r)
+		ctx := r.Context()
+		if claims.TenantID != "" {
+			ctx = context.WithValue(ctx, TenantKey, claims.TenantID)
+		}
+		if claims.Username != "" {
+			ctx = context.WithValue(ctx, UserKey, claims.Username)
+		}
+		if claims.Role != "" {
+			ctx = context.WithValue(ctx, RoleKey, claims.Role)
+		}
+
+		next(w, r.WithContext(ctx))
 	}
 }
 

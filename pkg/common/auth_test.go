@@ -1,10 +1,14 @@
 package common
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 func TestGetEnv(t *testing.T) {
@@ -140,4 +144,117 @@ func TestExtractClaims(t *testing.T) {
 			t.Error("expected nil claims when no auth header")
 		}
 	})
+}
+
+func TestJWTAuthMiddleware_InjectsClaims(t *testing.T) {
+	os.Setenv("JWT_SECRET", "test-secret-for-context-test")
+	defer os.Unsetenv("JWT_SECRET")
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
+		Username: "testuser",
+		Role:     "admin",
+		TenantID: "tenant-123",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject: uuid.New().String(),
+		},
+	}).SignedString([]byte("test-secret-for-context-test"))
+	if err != nil {
+		t.Fatalf("failed to sign test token: %v", err)
+	}
+
+	var capturedCtx context.Context
+	handler := JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if got := TenantFromContext(capturedCtx); got != "tenant-123" {
+		t.Errorf("TenantFromContext = %q, want 'tenant-123'", got)
+	}
+	if got := UserFromContext(capturedCtx); got != "testuser" {
+		t.Errorf("UserFromContext = %q, want 'testuser'", got)
+	}
+	if got := RoleFromContext(capturedCtx); got != "admin" {
+		t.Errorf("RoleFromContext = %q, want 'admin'", got)
+	}
+}
+
+func TestJWTAuthMiddleware_TokenInQueryParam(t *testing.T) {
+	os.Setenv("JWT_SECRET", "test-secret-query-param")
+	defer os.Unsetenv("JWT_SECRET")
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
+		Username: "queryuser",
+		Role:     "viewer",
+		TenantID: "tenant-456",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject: uuid.New().String(),
+		},
+	}).SignedString([]byte("test-secret-query-param"))
+	if err != nil {
+		t.Fatalf("failed to sign test token: %v", err)
+	}
+
+	var capturedCtx context.Context
+	handler := JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/resource?token="+token, nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if got := TenantFromContext(capturedCtx); got != "tenant-456" {
+		t.Errorf("TenantFromContext = %q, want 'tenant-456'", got)
+	}
+	if got := UserFromContext(capturedCtx); got != "queryuser" {
+		t.Errorf("UserFromContext = %q, want 'queryuser'", got)
+	}
+}
+
+func TestJWTAuthMiddleware_ValidTokenNoClaims(t *testing.T) {
+	os.Setenv("JWT_SECRET", "test-secret-no-claims")
+	defer os.Unsetenv("JWT_SECRET")
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject: uuid.New().String(),
+		},
+	}).SignedString([]byte("test-secret-no-claims"))
+	if err != nil {
+		t.Fatalf("failed to sign test token: %v", err)
+	}
+
+	var capturedCtx context.Context
+	handler := JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		capturedCtx = r.Context()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if got := TenantFromContext(capturedCtx); got != "" {
+		t.Errorf("expected empty tenant, got %q", got)
+	}
 }
