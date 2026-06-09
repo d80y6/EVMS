@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -61,12 +60,6 @@ func GetUserIDFromContext(ctx context.Context) (uuid.UUID, error) {
 	return uuid.Nil, errors.New("user id not found in context")
 }
 
-var (
-	jwtKey     []byte
-	jwtKeyOnce sync.Once
-)
-
-// GetEnv retrieves an environment variable with a default value fallback.
 type JSONCodec struct{}
 
 func (c JSONCodec) Marshal(v interface{}) ([]byte, error) {
@@ -93,12 +86,7 @@ func GetEnv(key, defaultValue string) string {
 }
 
 func getJWTKey() []byte {
-	jwtKeyOnce.Do(func() {
-		if key := os.Getenv("JWT_SECRET"); key != "" {
-			jwtKey = []byte(key)
-		}
-	})
-	return jwtKey
+	return []byte(os.Getenv("JWT_SECRET"))
 }
 
 type Claims struct {
