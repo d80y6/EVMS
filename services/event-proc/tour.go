@@ -6,12 +6,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+func cameraControlURL() string {
+	if u := os.Getenv("CAMERA_CONTROL_URL"); u != "" {
+		return u
+	}
+	return "http://camera-control:8088"
+}
 
 type TourStep struct {
 	CameraID     string `json:"camera_id"`
@@ -108,8 +116,15 @@ func (ts *TourScheduler) runTour(ctx context.Context, tour *Tour) {
 				"preset", step.PresetToken, "dwell", step.DwellSeconds)
 
 			if step.PresetToken != "" {
-				http.Post(fmt.Sprintf("http://camera-control:8088/cameras/%s/ptz/presets/%s/goto",
-					step.CameraID, step.PresetToken), "application/json", nil)
+				url := fmt.Sprintf("%s/cameras/%s/ptz/presets/%s/goto",
+					cameraControlURL(), step.CameraID, step.PresetToken)
+				client := &http.Client{Timeout: 5 * time.Second}
+				resp, err := client.Post(url, "application/json", nil)
+				if err != nil {
+					ts.logger.Warn("tour PTZ goto failed", "tour", tour.Name, "camera", step.CameraID, "error", err)
+				} else {
+					resp.Body.Close()
+				}
 			}
 
 			stepIdx = (stepIdx + 1) % len(tour.Steps)

@@ -52,9 +52,28 @@ type WebRTCConfig struct {
 	ICEHost      string
 }
 
+func detectHostIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
+func iceHostOrDefault() string {
+	if h := os.Getenv("WEBRTC_HOST_IP"); h != "" {
+		return h
+	}
+	if h := detectHostIP(); h != "" {
+		return h
+	}
+	return ""
+}
+
 // DefaultWebRTCConfig returns a configuration with sensible defaults
 func DefaultWebRTCConfig() WebRTCConfig {
-	iceServers := []string{"stun:stun.l.google.com:19302"}
+	iceServers := []string{}
 	if turnURL := os.Getenv("TURN_URL"); turnURL != "" {
 		if turnUsername := os.Getenv("TURN_USERNAME"); turnUsername != "" {
 			if turnCredential := os.Getenv("TURN_CREDENTIAL"); turnCredential != "" {
@@ -74,7 +93,7 @@ func DefaultWebRTCConfig() WebRTCConfig {
 		ICEServers:   iceServers,
 		JWTSecretEnv: "JWT_SECRET",
 		ICEPort:      icePort,
-		ICEHost:      os.Getenv("WEBRTC_HOST_IP"),
+		ICEHost:      iceHostOrDefault(),
 	}
 }
 
@@ -98,6 +117,12 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 	}
 	svc.healthHandler.AddNATSChecker(nc, "nats")
 
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterDefaultCodecs(); err != nil {
+		return nil, fmt.Errorf("failed to register default codecs: %w", err)
+	}
+	apiOpts := []func(*webrtc.API){webrtc.WithMediaEngine(m)}
+
 	// Set up ICE UDP mux and NAT 1:1 mapping for Docker deployment
 	if config.ICEPort > 0 || config.ICEHost != "" {
 		var se webrtc.SettingEngine
@@ -118,8 +143,10 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 			logger.Info("NAT 1:1 mapping configured", "host", config.ICEHost, "candidate_type", "host")
 		}
 
-		svc.webrtcAPI = webrtc.NewAPI(webrtc.WithSettingEngine(se))
+		apiOpts = append(apiOpts, webrtc.WithSettingEngine(se))
 	}
+
+	svc.webrtcAPI = webrtc.NewAPI(apiOpts...)
 
 	return svc, nil
 }
@@ -153,11 +180,20 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	username := common.UserFromContext(r.Context())
+	if username == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.logger.Info("WebRTC offer request received", "camera_id", cameraID, "remote_addr", r.RemoteAddr, "user", username)
+
 	var offer webrtc.SessionDescription
 	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+		s.logger.Error("Failed to decode offer", "camera_id", cameraID, "error", err)
 		http.Error(w, "invalid offer", http.StatusBadRequest)
 		return
 	}
+	s.logger.Info("Offer decoded successfully", "camera_id", cameraID, "offer_type", offer.Type)
 
 	iceServers := []webrtc.ICEServer{}
 	for _, url := range s.config.ICEServers {
@@ -180,19 +216,13 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		ICEServers: iceServers,
 	}
 
-	var (
-		peerConnection *webrtc.PeerConnection
-		err error
-	)
-	if s.webrtcAPI != nil {
-		peerConnection, err = s.webrtcAPI.NewPeerConnection(config)
-	} else {
-		peerConnection, err = webrtc.NewPeerConnection(config)
-	}
+	peerConnection, err := s.webrtcAPI.NewPeerConnection(config)
 	if err != nil {
+		s.logger.Error("Failed to create PeerConnection", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("PeerConnection created", "camera_id", cameraID)
 
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
@@ -200,34 +230,64 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		"pion",
 	)
 	if err != nil {
+		s.logger.Error("Failed to create video track", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("Video track created", "camera_id", cameraID)
 
 	if _, err = peerConnection.AddTrack(videoTrack); err != nil {
+		s.logger.Error("Failed to add track", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("Track added to PeerConnection", "camera_id", cameraID)
 
 	if err = peerConnection.SetRemoteDescription(offer); err != nil {
+		s.logger.Error("Failed to set remote description", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("Remote description set", "camera_id", cameraID)
 
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
+		s.logger.Error("Failed to create answer", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("Answer created", "camera_id", cameraID)
 
 	if err = peerConnection.SetLocalDescription(answer); err != nil {
+		s.logger.Error("Failed to set local description", "camera_id", cameraID, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("Local description set", "camera_id", cameraID)
 
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+	select {
+	case <-gatherComplete:
+		s.logger.Info("ICE gathering completed", "camera_id", cameraID)
+	case <-time.After(5 * time.Second):
+		s.logger.Warn("ICE gathering timed out, sending answer with partial candidates", "camera_id", cameraID)
+	}
+
+	lastFrameTime := time.Now()
 	sub, err := s.natsConn.Subscribe(fmt.Sprintf("camera.%s.h264", cameraID), func(msg *nats.Msg) {
-		if err := videoTrack.WriteSample(media.Sample{Data: msg.Data}); err != nil {
-			s.logger.Warn("Failed to write video sample", "error", err)
+		now := time.Now()
+		dur := now.Sub(lastFrameTime)
+		if dur < 16*time.Millisecond {
+			dur = 16 * time.Millisecond
+		} else if dur > 250*time.Millisecond {
+			dur = 250 * time.Millisecond
+		}
+		lastFrameTime = now
+
+		if err := videoTrack.WriteSample(media.Sample{Duration: dur, Data: msg.Data}); err != nil {
+			s.logger.Warn("Failed to write video sample", "error", err, "len", len(msg.Data))
+		} else {
+			s.logger.Debug("Wrote video sample", "len", len(msg.Data), "dur", dur)
 		}
 		common.FramesProcessed.WithLabelValues(cameraID, "webrtc").Inc()
 	})
@@ -237,6 +297,7 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "failed to subscribe to stream", http.StatusInternalServerError)
 		return
 	}
+	s.logger.Info("NATS subscription created", "camera_id", cameraID)
 
 	sub.SetPendingLimits(256, 32*1024*1024)
 
@@ -253,13 +314,29 @@ func (s *WebRTCService) createOfferHandler(w http.ResponseWriter, r *http.Reques
 	s.sessionsMu.Unlock()
 
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.logger.Info("PeerConnection state changed", "camera_id", cameraID, "state", state.String())
 		if state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateFailed {
 			s.cleanupSession(cameraID)
 		}
 	})
 
-	if err := json.NewEncoder(w).Encode(answer); err != nil {
-		s.logger.Error("Failed to encode answer", "error", err)
+	localDesc := peerConnection.LocalDescription()
+	if localDesc == nil {
+		s.logger.Error("Local description is nil after SetLocalDescription", "camera_id", cameraID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Info("Sending answer to client", "camera_id", cameraID)
+	candidateCount := 0
+	for _, line := range strings.Split(localDesc.SDP, "\n") {
+		if strings.Contains(line, "a=candidate:") {
+			candidateCount++
+			s.logger.Info("ICE candidate in answer", "camera_id", cameraID, "candidate", strings.TrimSpace(line))
+		}
+	}
+	s.logger.Info("ICE candidate summary", "camera_id", cameraID, "count", candidateCount)
+	if err := json.NewEncoder(w).Encode(*localDesc); err != nil {
+		s.logger.Error("Failed to encode answer", "camera_id", cameraID, "error", err)
 	}
 }
 
@@ -284,8 +361,6 @@ func (s *WebRTCService) cleanupSession(cameraID string) {
 	common.WebRTCSessionsActive.Set(float64(len(s.sessions)))
 	s.logger.Info("Cleaned up WebRTC session", "camera_id", cameraID)
 }
-
-
 
 // Start starts the HTTP server and blocks until ctx is cancelled
 func (s *WebRTCService) Start(ctx context.Context) error {
