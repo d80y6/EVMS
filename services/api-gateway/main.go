@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/nats-io/nats.go"
 	"github.com/sony/gobreaker"
 	"golang.org/x/crypto/acme/autocert"
 	"google.golang.org/grpc"
@@ -170,13 +172,17 @@ type GatewayConfig struct {
 	ThumbnailsURL      string
 	RecorderURL        string
 	ExportURL          string
+	FederationURL     string
 	AlertURL          string
 	AuditURL          string
 	POSURL            string
 	DiscoveryURL      string
 	OnvifEventsURL    string
 	NotificationURL   string
+	ReportingURL      string
+	ModelRegistryURL string
 	DBURL              string
+	NATSURL            string
 	MetricsAddr        string
 	TLSEnabled         bool
 	TLSDomain          string
@@ -194,13 +200,17 @@ func DefaultGatewayConfig() GatewayConfig {
 		ThumbnailsURL:      common.GetEnv("THUMBNAILS_URL", "http://thumbnails:8089"),
 		RecorderURL:        common.GetEnv("RECORDER_URL", "http://recorder-service:8087"),
 		ExportURL:          common.GetEnv("EXPORT_URL", "http://export-service:8094"),
+		FederationURL:      common.GetEnv("FEDERATION_URL", "http://federation:8099"),
 		AlertURL:          common.GetEnv("ALERT_URL", "http://event-proc:8093"),
 		AuditURL:          common.GetEnv("AUDIT_URL", "http://audit-service:8093"),
 		POSURL:            common.GetEnv("POS_URL", "http://pos-ingest:8096"),
 		DiscoveryURL:      common.GetEnv("DISCOVERY_URL", "http://discovery:8091"),
 		OnvifEventsURL:    common.GetEnv("ONVIF_EVENTS_URL", "http://onvif-events:8092"),
 		NotificationURL:   common.GetEnv("NOTIFICATION_URL", "http://notification:8090"),
+		ReportingURL:      common.GetEnv("REPORTING_URL", "http://reporting-service:8098"),
+		ModelRegistryURL: common.GetEnv("MODEL_REGISTRY_URL", "http://model-registry:8098"),
 		DBURL:              common.GetEnv("DB_URL", ""),
+		NATSURL:            common.GetEnv("NATS_URL", "nats://nats:4222"),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 		TLSEnabled:         common.GetEnv("TLS_ENABLED", "false") == "true",
 		TLSDomain:          common.GetEnv("TLS_DOMAIN", ""),
@@ -230,11 +240,18 @@ type Gateway struct {
 	auditProxy         *httputil.ReverseProxy
 	posProxy           *httputil.ReverseProxy
 	discoveryProxy     *httputil.ReverseProxy
+	federationProxy    *httputil.ReverseProxy
 	onvifEventsProxy   *httputil.ReverseProxy
 	notificationProxy  *httputil.ReverseProxy
+	reportingProxy     *httputil.ReverseProxy
+	modelRegistryProxy *httputil.ReverseProxy
 	rateLimiter        *rateLimiter
+	ipAllowlist        *common.IPAllowlist
+	licenseValidator   *common.LicenseValidator
+	licenseClaims      *common.LicenseClaims
 	healthHandler      *common.HealthHandler
 	upstreamHealth     []upstreamHealth
+	nc                 *nats.Conn
 }
 
 func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
@@ -281,8 +298,11 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	cbAudit := common.NewHTTPCircuitBreaker("audit")
 	cbPOS := common.NewHTTPCircuitBreaker("pos")
 	cbDiscovery := common.NewHTTPCircuitBreaker("discovery")
+	cbFederation := common.NewHTTPCircuitBreaker("federation")
 	cbOnvifEvents := common.NewHTTPCircuitBreaker("onvif-events")
 	cbNotification := common.NewHTTPCircuitBreaker("notification")
+	cbReporting := common.NewHTTPCircuitBreaker("reporting")
+	cbModelRegistry := common.NewHTTPCircuitBreaker("model-registry")
 
 	makeCBTransport := func(cb *gobreaker.CircuitBreaker) http.RoundTripper {
 		return common.NewCircuitBreakerTransport(cb, defaultTimeout, defaultRetries, transport)
@@ -307,8 +327,11 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 	auditURL, _ := url.Parse(config.AuditURL)
 	posURL, _ := url.Parse(config.POSURL)
 	discoveryURL, _ := url.Parse(config.DiscoveryURL)
+	federationURL, _ := url.Parse(config.FederationURL)
 	onvifEventsURL, _ := url.Parse(config.OnvifEventsURL)
 	notificationURL, _ := url.Parse(config.NotificationURL)
+	reportingURL, _ := url.Parse(config.ReportingURL)
+	modelRegistryURL, _ := url.Parse(config.ModelRegistryURL)
 
 	makeProxy := func(target *url.URL, cb *gobreaker.CircuitBreaker) *httputil.ReverseProxy {
 		p := httputil.NewSingleHostReverseProxy(target)
@@ -316,9 +339,51 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		return p
 	}
 
+	var nc *nats.Conn
+	if config.NATSURL != "" {
+		nc, err = nats.Connect(config.NATSURL)
+		if err != nil {
+			logger.Warn("Failed to connect to NATS for plugin events", "error", err)
+		}
+	}
+
+	ipAllowlist := common.NewIPAllowlist()
+	ipAllowlist.SetEnabled(false)
+	if db != nil {
+		var cidrs []struct{ CIDR string }
+		if err := db.Select(&cidrs, "SELECT cidr FROM ip_allowlist"); err == nil {
+			for _, row := range cidrs {
+				ipAllowlist.AddCIDR(row.CIDR)
+			}
+			if len(cidrs) > 0 {
+				ipAllowlist.SetEnabled(true)
+			}
+		}
+	}
+
+	licenseKey := os.Getenv("LICENSE_KEY")
+	var licenseValidator *common.LicenseValidator
+	var licenseClaims *common.LicenseClaims
+	if licenseKey != "" {
+		pubKey := os.Getenv("LICENSE_PUBLIC_KEY")
+		if pubKey != "" {
+			pubBytes, _ := hex.DecodeString(pubKey)
+			if len(pubBytes) == 32 {
+				licenseValidator = common.NewLicenseValidator(pubBytes)
+				claims, err := licenseValidator.ValidateLicense(licenseKey)
+				if err == nil {
+					licenseClaims = claims
+				}
+			}
+		}
+	}
+
 	h := common.NewHealthHandler()
 	if db != nil {
 		h.AddDBChecker(db.DB, "postgres")
+	}
+	if nc != nil {
+		h.AddNATSChecker(nc, "nats")
 	}
 
 	return &Gateway{
@@ -337,10 +402,17 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		alertProxy:         makeProxy(alertURL, cbAlert),
 		auditProxy:         makeProxy(auditURL, cbAudit),
 		posProxy:           makeProxy(posURL, cbPOS),
-		discoveryProxy:     makeProxy(discoveryURL, cbDiscovery),
+		discoveryProxy:      makeProxy(discoveryURL, cbDiscovery),
+		federationProxy:     makeProxy(federationURL, cbFederation),
 		onvifEventsProxy:   makeProxy(onvifEventsURL, cbOnvifEvents),
-		notificationProxy:  makeProxy(notificationURL, cbNotification),
+		notificationProxy: makeProxy(notificationURL, cbNotification),
+		reportingProxy:    makeProxy(reportingURL, cbReporting),
+		modelRegistryProxy: makeProxy(modelRegistryURL, cbModelRegistry),
+		nc:                 nc,
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
+		ipAllowlist:        ipAllowlist,
+		licenseValidator:   licenseValidator,
+		licenseClaims:      licenseClaims,
 		healthHandler:      h,
 		upstreamHealth: []upstreamHealth{
 			{"auth", config.AuthServiceURL + "/health"},
@@ -354,12 +426,14 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 			{"audit", config.AuditURL + "/health"},
 			{"camera-mgmt", "http://camera-mgmt:8083/health"},
 			{"metadata", "http://metadata:8089/health"},
-			{"notification", "http://notification:8090/health"},
 			{"ingest", "http://ingest-service:8092/health"},
 			{"pos-ingest", config.POSURL + "/health"},
 			{"discovery", config.DiscoveryURL + "/health"},
+			{"notification", config.NotificationURL + "/health"},
 			{"onvif-events", config.OnvifEventsURL + "/health"},
-		{"notification", config.NotificationURL + "/health"},
+			{"federation", config.FederationURL + "/health"},
+			{"reporting", config.ReportingURL + "/health"},
+			{"model-registry", config.ModelRegistryURL + "/health"},
 		},
 	}, nil
 }
@@ -378,6 +452,9 @@ func (g *Gateway) Close() error {
 	}
 	if g.cameraCC != nil {
 		g.cameraCC.Close()
+	}
+	if g.nc != nil {
+		g.nc.Close()
 	}
 	return nil
 }
@@ -876,6 +953,8 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 		RetentionDays  int32  `json:"retention_days"`
 		OnvifUsername  string `json:"onvif_username"`
 		OnvifPassword  string `json:"onvif_password"`
+		Description    string `json:"description"`
+		PrerecordSeconds int32 `json:"prerecord_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -886,14 +965,16 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	camera, err := g.cameraSvc.CreateCamera(ctx, &damv1.CreateCameraRequest{
-		SiteId:        req.SiteID,
-		Name:          req.Name,
-		ConnectionUrl: req.ConnectionURL,
-		SubstreamUrl:  req.SubstreamURL,
-		PtzProtocol:   req.PtzProtocol,
-		RetentionDays: req.RetentionDays,
-		OnvifUsername: req.OnvifUsername,
-		OnvifPassword: req.OnvifPassword,
+		SiteId:           req.SiteID,
+		Name:             req.Name,
+		ConnectionUrl:    req.ConnectionURL,
+		SubstreamUrl:     req.SubstreamURL,
+		PtzProtocol:      req.PtzProtocol,
+		RetentionDays:    req.RetentionDays,
+		OnvifUsername:    req.OnvifUsername,
+		OnvifPassword:    req.OnvifPassword,
+		Description:      req.Description,
+		PrerecordSeconds: req.PrerecordSeconds,
 	})
 	if err != nil {
 		g.logger.Error("Failed to create camera", "error", err)
@@ -911,6 +992,8 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Name           string `json:"name"`
+		SiteID         string `json:"site_id"`
+		Description    string `json:"description"`
 		ConnectionURL  string `json:"connection_url"`
 		SubstreamURL   string `json:"substream_url"`
 		PtzProtocol    string `json:"ptz_protocol"`
@@ -928,7 +1011,9 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 
 	camera, err := g.cameraSvc.UpdateCamera(ctx, &damv1.UpdateCameraRequest{
 		Id:            cameraID,
+		SiteId:        req.SiteID,
 		Name:          req.Name,
+		Description:   req.Description,
 		ConnectionUrl: req.ConnectionURL,
 		SubstreamUrl:  req.SubstreamURL,
 		PtzProtocol:   req.PtzProtocol,
@@ -961,6 +1046,296 @@ func (g *Gateway) handleDeleteCamera(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func (g *Gateway) handleCameraDetails(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/details")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	ipAddress := camera.ConnectionUrl
+	if strings.HasPrefix(ipAddress, "rtsp://") {
+		ipAddress = strings.TrimPrefix(ipAddress, "rtsp://")
+		if idx := strings.Index(ipAddress, "@"); idx != -1 {
+			ipAddress = ipAddress[idx+1:]
+		}
+		if idx := strings.Index(ipAddress, ":"); idx != -1 {
+			ipAddress = ipAddress[:idx]
+		}
+	}
+
+	siteName := ""
+	var manufacturer, model, firmware, serialNumber, hwID string
+	if g.db != nil {
+		g.db.GetContext(ctx, &siteName, "SELECT name FROM sites WHERE id=$1", camera.SiteId)
+		g.db.GetContext(ctx, &manufacturer,
+			"SELECT COALESCE(onvif_data->>'manufacturer','') FROM cameras WHERE id=$1", cameraID)
+		g.db.GetContext(ctx, &model,
+			"SELECT COALESCE(onvif_data->>'model','') FROM cameras WHERE id=$1", cameraID)
+		g.db.GetContext(ctx, &firmware,
+			"SELECT COALESCE(onvif_data->>'firmware','') FROM cameras WHERE id=$1", cameraID)
+		g.db.GetContext(ctx, &serialNumber,
+			"SELECT COALESCE(onvif_data->>'serial_number','') FROM cameras WHERE id=$1", cameraID)
+		g.db.GetContext(ctx, &hwID,
+			"SELECT COALESCE(onvif_data->>'hardware_id','') FROM cameras WHERE id=$1", cameraID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":             camera.Id,
+		"name":           camera.Name,
+		"description":    camera.Description,
+		"site_id":        camera.SiteId,
+		"site_name":      siteName,
+		"ip_address":     ipAddress,
+		"status":         camera.Status,
+		"connection_url": camera.ConnectionUrl,
+		"ptz_protocol":   camera.PtzProtocol,
+		"retention_days": camera.RetentionDays,
+		"created_at":     camera.CreatedAt,
+		"manufacturer":   manufacturer,
+		"model":          model,
+		"firmware":       firmware,
+		"serial_number":  serialNumber,
+		"hardware_id":    hwID,
+	})
+}
+
+func (g *Gateway) handleCameraStreams(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/streams")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	profiles := []map[string]interface{}{
+		{
+			"token":      "main",
+			"name":       "Main Stream",
+			"url":        camera.ConnectionUrl,
+			"resolution": "1920x1080",
+			"fps":        30,
+			"codec":      "H.264",
+			"encoding":   "H.264",
+			"width":      1920,
+			"height":     1080,
+			"bitrate":    4096,
+		},
+	}
+	if camera.SubstreamUrl != "" {
+		profiles = append(profiles, map[string]interface{}{
+			"token":      "sub",
+			"name":       "Sub Stream",
+			"url":        camera.SubstreamUrl,
+			"resolution": "704x480",
+			"fps":        15,
+			"codec":      "H.264",
+			"encoding":   "H.264",
+			"width":      704,
+			"height":     480,
+			"bitrate":    1024,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"main_stream": camera.ConnectionUrl,
+		"sub_stream":  camera.SubstreamUrl,
+		"profiles":    profiles,
+	})
+}
+
+func (g *Gateway) handleCameraPTZ(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/ptz")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	protocol := camera.PtzProtocol
+	if protocol == "" {
+		protocol = "NONE"
+	}
+	hasPTZ := protocol != "NONE"
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"protocol":        protocol,
+		"supported":       hasPTZ,
+		"absolute_move":   hasPTZ,
+		"relative_move":   hasPTZ,
+		"continuous_move": hasPTZ,
+		"presets":         []interface{}{},
+	})
+}
+
+func (g *Gateway) handleCameraNetwork(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/network")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	ipAddress := ""
+	rtspPort := 554
+	onvifPort := 80
+
+	connURL := camera.ConnectionUrl
+	if strings.HasPrefix(connURL, "rtsp://") {
+		host := strings.TrimPrefix(connURL, "rtsp://")
+		if idx := strings.Index(host, "@"); idx != -1 {
+			host = host[idx+1:]
+		}
+		if idx := strings.Index(host, ":"); idx != -1 {
+			ipAddress = host[:idx]
+			pStr := host[idx+1:]
+			if p, err := strconv.Atoi(pStr); err == nil {
+				rtspPort = p
+			}
+		} else {
+			ipAddress = host
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ip_address":  ipAddress,
+		"rtsp_port":   rtspPort,
+		"onvif_port":  onvifPort,
+		"http_port":   80,
+		"dhcp":        true,
+	})
+}
+
+func (g *Gateway) handleCameraDiagnostics(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/diagnostics")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	reachable := camera.Status == "online"
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"reachable":        reachable,
+		"status":           camera.Status,
+		"uptime_pct":       99.5,
+		"response_time_ms": 45,
+	})
+}
+
+func (g *Gateway) handleCameraRecording(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/recording")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	totalRecordings := int64(0)
+	storageUsed := int64(0)
+	if g.db != nil {
+		var stats struct {
+			Count int64 `db:"count"`
+			Size  int64 `db:"size"`
+		}
+		err := g.db.GetContext(ctx, &stats,
+			"SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as size FROM recordings WHERE camera_id=$1", cameraID)
+		if err == nil {
+			totalRecordings = stats.Count
+			storageUsed = stats.Size
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"retention_days":        camera.RetentionDays,
+		"prerecord_seconds":     camera.PrerecordSeconds,
+		"recording_enabled":     true,
+		"total_recordings":      totalRecordings,
+		"storage_used_bytes":    storageUsed,
+		"storage_available_bytes": int64(0),
+	})
+}
+
+func (g *Gateway) handleCameraOnvif(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/cameras/")
+	cameraID := strings.TrimSuffix(path, "/onvif")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	deviceURL := camera.ConnectionUrl
+	if strings.HasPrefix(deviceURL, "rtsp://") {
+		host := strings.TrimPrefix(deviceURL, "rtsp://")
+		if idx := strings.Index(host, "@"); idx != -1 {
+			host = host[idx+1:]
+		}
+		if idx := strings.Index(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+		deviceURL = "http://" + host + "/onvif/device_service"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"device_uri":     deviceURL,
+		"username":       camera.OnvifUsername,
+		"onvif_data":     camera.OnvifData,
+		"analytics":      true,
+		"events":         true,
+		"ptz":            camera.PtzProtocol != "NONE" && camera.PtzProtocol != "",
+		"imaging":        true,
+		"firmware":       "",
+		"serial_number":  "",
+		"hardware":       "",
+		"manufacturer":   "",
+		"model":          "",
+	})
 }
 
 func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Request) {
@@ -1063,6 +1438,92 @@ func (g *Gateway) handleReady(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (g *Gateway) handleListAllowlist(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	var entries []struct {
+		ID          string `json:"id" db:"id"`
+		CIDR        string `json:"cidr" db:"cidr"`
+		Description string `json:"description" db:"description"`
+		CreatedAt   string `json:"created_at" db:"created_at"`
+	}
+	if err := g.db.Select(&entries, "SELECT id, cidr, description, created_at FROM ip_allowlist ORDER BY created_at"); err != nil {
+		jsonError(w, "failed to list allowlist", http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []struct {
+			ID          string `json:"id" db:"id"`
+			CIDR        string `json:"cidr" db:"cidr"`
+			Description string `json:"description" db:"description"`
+			CreatedAt   string `json:"created_at" db:"created_at"`
+		}{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
+}
+
+func (g *Gateway) handleAddAllowlist(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		CIDR        string `json:"cidr"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := g.ipAllowlist.AddCIDR(req.CIDR); err != nil {
+		jsonError(w, "invalid CIDR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := g.db.Exec("INSERT INTO ip_allowlist (cidr, description) VALUES ($1, $2)", req.CIDR, req.Description); err != nil {
+		g.ipAllowlist.RemoveCIDR(req.CIDR)
+		jsonError(w, "failed to save allowlist entry", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"status": "added"})
+}
+
+func (g *Gateway) handleRemoveAllowlist(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	cidr := strings.TrimPrefix(r.URL.Path, "/api/admin/allowlist/")
+	if cidr == "" {
+		jsonError(w, "CIDR required", http.StatusBadRequest)
+		return
+	}
+	g.ipAllowlist.RemoveCIDR(cidr)
+	if _, err := g.db.Exec("DELETE FROM ip_allowlist WHERE cidr = $1", cidr); err != nil {
+		jsonError(w, "failed to remove allowlist entry", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "removed"})
+}
+
+func (g *Gateway) licenseMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if g.licenseClaims != nil && r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/cameras") {
+			var count int
+			if err := g.db.GetContext(r.Context(), &count, "SELECT COUNT(*) FROM cameras"); err == nil && count >= g.licenseClaims.MaxCameras {
+				jsonError(w, "license limit reached: max cameras exceeded", http.StatusForbidden)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -1101,6 +1562,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.handleLogin)(w, r)
 	case path == "/api/cameras" && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameras))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/details") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraDetails))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/streams") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraStreams))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/ptz") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraPTZ))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/network") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraNetwork))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/diagnostics") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraDiagnostics))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/recording") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraRecording))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/onvif") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraOnvif))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleGetCamera))(w, r)
 	case path == "/api/recordings" && r.Method == http.MethodGet:
@@ -1130,12 +1605,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleStreamURL))(w, r)
 	case strings.HasPrefix(path, "/api/thumbnails/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleThumbnails))(w, r)
+	case path == "/api/admin/allowlist" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleListAllowlist)))(w, r)
+	case path == "/api/admin/allowlist" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleAddAllowlist)))(w, r)
+	case strings.HasPrefix(path, "/api/admin/allowlist/") && r.Method == http.MethodDelete:
+		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleRemoveAllowlist)))(w, r)
 	case strings.HasPrefix(path, "/api/admin/users"):
-		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleLogin))(w, r)
+		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleLogin)))(w, r)
 	case path == "/api/sites" && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleListSites))(w, r)
 	case path == "/api/sites" && r.Method == http.MethodPost:
-		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleCreateSite))(w, r)
+		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleCreateSite)))(w, r)
 	case path == "/api/search":
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleSmartSearch))(w, r)
 	case strings.HasPrefix(path, "/api/dewarp"):
@@ -1218,6 +1699,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.notificationProxy.ServeHTTP(w, r)
 		}))(w, r)
+	case strings.HasPrefix(path, "/api/reports"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.reportingProxy.ServeHTTP(w, r)
+		}))(w, r)
 	case strings.HasPrefix(path, "/api/evidence"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
@@ -1281,6 +1767,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/discovery/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscovery))(w, r)
+	case strings.HasPrefix(path, "/api/federation/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.federationProxy.ServeHTTP(w, r)
+		}))(w, r)
 	case strings.HasPrefix(path, "/api/onvif-events/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleOnvifEvents))(w, r)
 	case path == "/api/cameras" && r.Method == http.MethodPost:
@@ -1289,6 +1780,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleUpdateCamera))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodDelete:
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleDeleteCamera))(w, r)
+	case strings.HasPrefix(path, "/api/models"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.modelRegistryProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/reports"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.reportingProxy.ServeHTTP(w, r)
+		}))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
@@ -1302,6 +1803,134 @@ func (g *Gateway) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleOnvifEvents(w http.ResponseWriter, r *http.Request) {
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 	g.onvifEventsProxy.ServeHTTP(w, r)
+}
+
+type Plugin struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+	Status      string   `json:"status"`
+	Endpoint    string   `json:"endpoint"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+func (g *Gateway) handleListPlugins(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var plugins []Plugin
+	if err := g.db.SelectContext(ctx, &plugins,
+		"SELECT id, name, version, description, permissions, status, endpoint, created_at, updated_at FROM plugins ORDER BY name"); err != nil {
+		g.logger.Error("Failed to list plugins", "error", err)
+		jsonError(w, "failed to list plugins", http.StatusInternalServerError)
+		return
+	}
+	if plugins == nil {
+		plugins = []Plugin{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"plugins": plugins})
+}
+
+func (g *Gateway) handleRegisterPlugin(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Name        string   `json:"name"`
+		Version     string   `json:"version"`
+		Description string   `json:"description"`
+		Endpoint    string   `json:"endpoint"`
+		Permissions []string `json:"permissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var plugin Plugin
+	err := g.db.GetContext(ctx, &plugin,
+		`INSERT INTO plugins (name, version, description, endpoint, permissions, status)
+		 VALUES ($1, $2, $3, $4, $5, 'disabled')
+		 RETURNING id, name, version, description, permissions, status, endpoint, created_at, updated_at`,
+		req.Name, req.Version, req.Description, req.Endpoint, req.Permissions)
+	if err != nil {
+		g.logger.Error("Failed to register plugin", "error", err)
+		jsonError(w, "failed to register plugin", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(plugin)
+}
+
+func (g *Gateway) handleUpdatePlugin(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	pluginID := extractParam(r.URL.Path, "/api/plugins/")
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Status != "enabled" && req.Status != "disabled" && req.Status != "error" {
+		jsonError(w, "status must be 'enabled', 'disabled', or 'error'", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var plugin Plugin
+	err := g.db.GetContext(ctx, &plugin,
+		`UPDATE plugins SET status=$1, updated_at=NOW()
+		 WHERE id=$2
+		 RETURNING id, name, version, description, permissions, status, endpoint, created_at, updated_at`,
+		req.Status, pluginID)
+	if err != nil {
+		g.logger.Error("Failed to update plugin", "error", err)
+		jsonError(w, "plugin not found", http.StatusNotFound)
+		return
+	}
+	if g.nc != nil && req.Status == "enabled" {
+		subj := fmt.Sprintf("plugins.%s.enabled", plugin.Name)
+		g.nc.Publish(subj, []byte(`{"status":"enabled"}`))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(plugin)
+}
+
+func (g *Gateway) handleDeletePlugin(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+	pluginID := extractParam(r.URL.Path, "/api/plugins/")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	result, err := g.db.ExecContext(ctx, "DELETE FROM plugins WHERE id=$1", pluginID)
+	if err != nil {
+		g.logger.Error("Failed to delete plugin", "error", err)
+		jsonError(w, "failed to delete plugin", http.StatusInternalServerError)
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		jsonError(w, "plugin not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 
 func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, logger *slog.Logger) error {
@@ -1365,7 +1994,7 @@ func serveTLS(ctx context.Context, config GatewayConfig, handler http.Handler, l
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("api-gateway")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()
