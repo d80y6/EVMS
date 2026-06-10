@@ -78,6 +78,74 @@ export interface Camera {
   config?: string;
 }
 
+export interface CameraDetailsResponse {
+  id: string;
+  name: string;
+  description: string;
+  site_id: string;
+  site_name: string;
+  ip_address: string;
+  status: string;
+  connection_url: string;
+  ptz_protocol: string;
+  retention_days: number;
+  manufacturer: string;
+  model: string;
+  firmware: string;
+  serial_number: string;
+  hardware_id: string;
+}
+
+export interface StreamProfile {
+  token: string;
+  name: string;
+  url: string;
+  resolution: string;
+  fps: number;
+  codec: string;
+}
+
+export interface CameraStreamsResponse {
+  main_stream: string;
+  sub_stream: string;
+  profiles: StreamProfile[];
+}
+
+export interface CameraPTZResponse {
+  protocol: string;
+  supported: boolean;
+  presets: { token: string; name: string }[];
+}
+
+export interface CameraNetworkResponse {
+  hostname: string;
+  dns: string[];
+  ntp: string[];
+  interfaces: { name: string; ipv4: string; mac: string }[];
+}
+
+export interface CameraDiagnosticsResponse {
+  reachable: boolean;
+  onvif: boolean;
+  rtsp: boolean;
+  latency_ms: number;
+  last_error: string;
+}
+
+export interface CameraRecordingResponse {
+  retention_days: number;
+  recordings_count: number;
+  oldest_recording: string;
+  latest_recording: string;
+}
+
+export interface CameraOnvifResponse {
+  username: string;
+  capabilities: Record<string, unknown>;
+  events_supported: boolean;
+  analytics_supported: boolean;
+}
+
 export interface Recording {
   camera_id: string;
   start_time: string;
@@ -167,6 +235,45 @@ export interface ResultRecord {
   already_in_db: boolean;
   imported: boolean;
   created_at: string;
+}
+
+export interface DiscoveryScanResult {
+  scan_id: string;
+}
+
+export interface DiscoveryScanItem {
+  id: string;
+  status: string;
+  started_at: string;
+  completed_at: string;
+}
+
+export interface DiscoveryListScansResponse {
+  scans: DiscoveryScanItem[];
+}
+
+export interface DiscoveryDevice {
+  ip: string;
+  manufacturer: string;
+  model: string;
+  serial_number: string;
+  onvif: boolean;
+  rtsp: boolean;
+}
+
+export interface DiscoveryResultsResponse {
+  devices: DiscoveryDevice[];
+}
+
+export interface DiscoveryTestCredentialsResponse {
+  success: boolean;
+  manufacturer: string;
+  model: string;
+}
+
+export interface DiscoveryImportResponse {
+  created: number;
+  failed: number;
 }
 
 export interface Bookmark {
@@ -547,7 +654,20 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  updateCamera: (id: string, data: Partial<{ name: string; connection_url: string; substream_url: string; ptz_protocol: string; retention_days: number; onvif_username: string; onvif_password: string }>) =>
+  updateCamera: (
+  id: string,
+  data: Partial<{
+    site_id: string;
+    name: string;
+    description: string;
+    connection_url: string;
+    substream_url: string;
+    ptz_protocol: string;
+    retention_days: number;
+    onvif_username: string;
+    onvif_password: string;
+  }>
+) =>
     request<Camera>(`/cameras/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -612,6 +732,25 @@ export const api = {
 
   testOnvifCredentials: (data: { ip: string; port: number; username: string; password: string }) =>
     request<{ success: boolean; error?: string }>('/discovery/credentials/test', { method: 'POST', body: JSON.stringify(data) }),
+
+  // New Discovery API
+  startScan: (data: { subnet: string; site_id: string }) =>
+    request<DiscoveryScanResult>('/discovery/scan', { method: 'POST', body: JSON.stringify(data) }),
+
+  listScans: () =>
+    request<DiscoveryListScansResponse>('/discovery/scans'),
+
+  getScan: (id: string) =>
+    request<DiscoveryScanItem>(`/discovery/scans/${id}`),
+
+  getScanResults: (id: string) =>
+    request<DiscoveryResultsResponse>(`/discovery/scans/${id}/results`),
+
+  testCredentials: (data: { ip: string; username: string; password: string }) =>
+    request<DiscoveryTestCredentialsResponse>('/discovery/test-credentials', { method: 'POST', body: JSON.stringify(data) }),
+
+  importDevices: (data: { scan_id: string; devices: string[]; site_id: string; username: string; password: string }) =>
+    request<DiscoveryImportResponse>('/discovery/import', { method: 'POST', body: JSON.stringify(data) }),
 
   // ONVIF Events
   subscribeOnvifEvents: (cameraId: string, onvifDeviceUrl: string) =>
@@ -986,6 +1125,28 @@ export const api = {
     const q = channelId ? '?channel_id=' + encodeURIComponent(channelId) : '';
     return request<{logs: any[]}>('/admin/channels/logs' + q);
   },
+
+  // Camera Details
+  getCameraDetails: (id: string) =>
+    request<CameraDetailsResponse>(`/cameras/${id}/details`),
+
+  getCameraStreams: (id: string) =>
+    request<CameraStreamsResponse>(`/cameras/${id}/streams`),
+
+  getCameraPTZ: (id: string) =>
+    request<CameraPTZResponse>(`/cameras/${id}/ptz`),
+
+  getCameraNetwork: (id: string) =>
+    request<CameraNetworkResponse>(`/cameras/${id}/network`),
+
+  getCameraDiagnostics: (id: string) =>
+    request<CameraDiagnosticsResponse>(`/cameras/${id}/diagnostics`),
+
+  getCameraRecording: (id: string) =>
+    request<CameraRecordingResponse>(`/cameras/${id}/recording`),
+
+  getCameraOnvif: (id: string) =>
+    request<CameraOnvifResponse>(`/cameras/${id}/onvif`),
 
   // CSRF
   getCSRFStatus: () =>
