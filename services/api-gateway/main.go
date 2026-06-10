@@ -1204,7 +1204,6 @@ func (g *Gateway) handleCameraNetwork(w http.ResponseWriter, r *http.Request) {
 
 	ipAddress := ""
 	rtspPort := 554
-	onvifPort := 80
 
 	connURL := camera.ConnectionUrl
 	if strings.HasPrefix(connURL, "rtsp://") {
@@ -1223,13 +1222,26 @@ func (g *Gateway) handleCameraNetwork(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	interfaces := []map[string]interface{}{}
+	if ipAddress != "" {
+		interfaces = append(interfaces, map[string]interface{}{
+			"name": "eth0",
+			"ipv4": ipAddress,
+			"mac":  "",
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ip_address":  ipAddress,
-		"rtsp_port":   rtspPort,
-		"onvif_port":  onvifPort,
-		"http_port":   80,
-		"dhcp":        true,
+		"hostname":     "",
+		"dns":          []string{},
+		"ntp":          []string{},
+		"interfaces":   interfaces,
+		"ip_address":   ipAddress,
+		"rtsp_port":    rtspPort,
+		"onvif_port":   80,
+		"http_port":    80,
+		"dhcp":         true,
 	})
 }
 
@@ -1251,6 +1263,10 @@ func (g *Gateway) handleCameraDiagnostics(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"reachable":        reachable,
+		"onvif":            reachable,
+		"rtsp":             reachable,
+		"latency_ms":       0,
+		"last_error":       "",
 		"status":           camera.Status,
 		"uptime_pct":       99.5,
 		"response_time_ms": 45,
@@ -1272,26 +1288,41 @@ func (g *Gateway) handleCameraRecording(w http.ResponseWriter, r *http.Request) 
 
 	totalRecordings := int64(0)
 	storageUsed := int64(0)
+	var oldestRecording, latestRecording string
 	if g.db != nil {
 		var stats struct {
-			Count int64 `db:"count"`
-			Size  int64 `db:"size"`
+			Count  int64    `db:"count"`
+			Size   int64    `db:"size"`
+			Oldest *string  `db:"oldest"`
+			Latest *string  `db:"latest"`
 		}
 		err := g.db.GetContext(ctx, &stats,
-			"SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as size FROM recordings WHERE camera_id=$1", cameraID)
+			`SELECT COUNT(*) as count,
+			        COALESCE(SUM(file_size), 0) as size,
+			        MIN(start_time)::text as oldest,
+			        MAX(end_time)::text as latest
+			 FROM recordings WHERE camera_id=$1`, cameraID)
 		if err == nil {
 			totalRecordings = stats.Count
 			storageUsed = stats.Size
+			if stats.Oldest != nil {
+				oldestRecording = *stats.Oldest
+			}
+			if stats.Latest != nil {
+				latestRecording = *stats.Latest
+			}
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"retention_days":        camera.RetentionDays,
-		"prerecord_seconds":     camera.PrerecordSeconds,
-		"recording_enabled":     true,
-		"total_recordings":      totalRecordings,
-		"storage_used_bytes":    storageUsed,
+		"retention_days":          camera.RetentionDays,
+		"recordings_count":        totalRecordings,
+		"oldest_recording":        oldestRecording,
+		"latest_recording":        latestRecording,
+		"prerecord_seconds":       camera.PrerecordSeconds,
+		"recording_enabled":       true,
+		"storage_used_bytes":      storageUsed,
 		"storage_available_bytes": int64(0),
 	})
 }
@@ -1321,20 +1352,37 @@ func (g *Gateway) handleCameraOnvif(w http.ResponseWriter, r *http.Request) {
 		deviceURL = "http://" + host + "/onvif/device_service"
 	}
 
+	capabilities := map[string]interface{}{}
+	eventsSupported := true
+	analyticsSupported := true
+	if camera.OnvifData != "" {
+		var onvifData map[string]interface{}
+		if json.Unmarshal([]byte(camera.OnvifData), &onvifData) == nil {
+			if caps, ok := onvifData["capabilities"].(map[string]interface{}); ok {
+				capabilities = caps
+			}
+			if caps, ok := onvifData["capabilities"].(map[string]interface{}); ok {
+				if v, ok := caps["events"].(bool); ok {
+					eventsSupported = v
+				}
+				if v, ok := caps["analytics"].(bool); ok {
+					analyticsSupported = v
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"device_uri":     deviceURL,
-		"username":       camera.OnvifUsername,
-		"onvif_data":     camera.OnvifData,
-		"analytics":      true,
-		"events":         true,
-		"ptz":            camera.PtzProtocol != "NONE" && camera.PtzProtocol != "",
-		"imaging":        true,
-		"firmware":       "",
-		"serial_number":  "",
-		"hardware":       "",
-		"manufacturer":   "",
-		"model":          "",
+		"username":            camera.OnvifUsername,
+		"capabilities":        capabilities,
+		"events_supported":    eventsSupported,
+		"analytics_supported": analyticsSupported,
+		"device_uri":          deviceURL,
+		"analytics":           analyticsSupported,
+		"events":              eventsSupported,
+		"ptz":                 camera.PtzProtocol != "NONE" && camera.PtzProtocol != "",
+		"imaging":             true,
 	})
 }
 
