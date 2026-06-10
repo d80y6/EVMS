@@ -23,8 +23,9 @@ import (
 
 	"github.com/dam-vms/dam/api/v1"
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"github.com/sony/gobreaker"
 	"golang.org/x/crypto/acme/autocert"
@@ -1386,6 +1387,205 @@ func (g *Gateway) handleCameraOnvif(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (g *Gateway) handleDiscoveryScan(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	var req struct {
+		Subnet string `json:"subnet"`
+		SiteID string `json:"site_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	scanID := uuid.New()
+
+	var userID *uuid.UUID
+	if uid, err := common.GetUserIDFromContext(r.Context()); err == nil {
+		userID = &uid
+	}
+
+	subnets := []string{}
+	if req.Subnet != "" {
+		subnets = append(subnets, req.Subnet)
+	}
+
+	var siteID *uuid.UUID
+	if req.SiteID != "" {
+		parsed, err := uuid.Parse(req.SiteID)
+		if err == nil {
+			siteID = &parsed
+		}
+	}
+
+	_, err := g.db.ExecContext(ctx,
+		`INSERT INTO discovery_scans (id, site_id, status, methods, subnets, ports, created_by, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+		scanID, siteID, "pending", pq.Array([]string{"iprange"}), pq.Array(subnets), pq.Array([]int{80, 554, 8080}), userID)
+	if err != nil {
+		g.logger.Error("Failed to create discovery scan", "error", err)
+		jsonError(w, "failed to create scan", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"scan_id": scanID.String(),
+	})
+}
+
+func (g *Gateway) handleDiscoveryListScans(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	type scanRow struct {
+		ID          string     `db:"id"`
+		Status      string     `db:"status"`
+		StartedAt   *time.Time `db:"started_at"`
+		CompletedAt *time.Time `db:"completed_at"`
+	}
+
+	var scans []scanRow
+	if err := g.db.SelectContext(ctx, &scans,
+		"SELECT id, status, started_at, completed_at FROM discovery_scans ORDER BY created_at DESC"); err != nil {
+		g.logger.Error("Failed to list discovery scans", "error", err)
+		jsonError(w, "failed to list scans", http.StatusInternalServerError)
+		return
+	}
+
+	if scans == nil {
+		scans = []scanRow{}
+	}
+
+	type scanResp struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		StartedAt   string `json:"started_at"`
+		CompletedAt string `json:"completed_at"`
+	}
+
+	result := make([]scanResp, 0, len(scans))
+	for _, s := range scans {
+		rsp := scanResp{ID: s.ID, Status: s.Status}
+		if s.StartedAt != nil {
+			rsp.StartedAt = s.StartedAt.Format(time.RFC3339)
+		}
+		if s.CompletedAt != nil {
+			rsp.CompletedAt = s.CompletedAt.Format(time.RFC3339)
+		}
+		result = append(result, rsp)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"scans": result,
+	})
+}
+
+func (g *Gateway) handleDiscoveryGetScan(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	scanID := extractParam(r.URL.Path, "/api/discovery/scans/")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var scan struct {
+		ID          string     `db:"id"`
+		Status      string     `db:"status"`
+		StartedAt   *time.Time `db:"started_at"`
+		CompletedAt *time.Time `db:"completed_at"`
+	}
+	if err := g.db.GetContext(ctx, &scan,
+		"SELECT id, status, started_at, completed_at FROM discovery_scans WHERE id=$1", scanID); err != nil {
+		jsonError(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"id":     scan.ID,
+		"status": scan.Status,
+	}
+	if scan.StartedAt != nil {
+		resp["started_at"] = scan.StartedAt.Format(time.RFC3339)
+	} else {
+		resp["started_at"] = ""
+	}
+	if scan.CompletedAt != nil {
+		resp["completed_at"] = scan.CompletedAt.Format(time.RFC3339)
+	} else {
+		resp["completed_at"] = ""
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (g *Gateway) handleDiscoveryGetResults(w http.ResponseWriter, r *http.Request) {
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	scanID := extractParam(r.URL.Path, "/api/discovery/scans/")
+	scanID = strings.TrimSuffix(scanID, "/results")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var results []struct {
+		ID       string `db:"id"`
+		Address  string `db:"address"`
+		Port     int    `db:"port"`
+		Type     string `db:"type"`
+		Status   string `db:"status"`
+	}
+	if err := g.db.SelectContext(ctx, &results,
+		"SELECT id, address, port, type, status FROM discovery_results WHERE scan_id=$1", scanID); err != nil {
+		g.logger.Error("Failed to get discovery results", "error", err)
+		jsonError(w, "failed to get results", http.StatusInternalServerError)
+		return
+	}
+
+	if results == nil {
+		results = []struct {
+			ID       string `db:"id"`
+			Address  string `db:"address"`
+			Port     int    `db:"port"`
+			Type     string `db:"type"`
+			Status   string `db:"status"`
+		}{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"results": results,
+	})
+}
+
+func (g *Gateway) handleDiscoveryTestCredentials(w http.ResponseWriter, r *http.Request) {
+	jsonError(w, "not implemented", http.StatusNotImplemented)
+}
+
+func (g *Gateway) handleDiscoveryImport(w http.ResponseWriter, r *http.Request) {
+	jsonError(w, "not implemented", http.StatusNotImplemented)
+}
+
 func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Request) {
 	cameraID := extractParam(r.URL.Path, "/api/cameras/")
 	cameraID = strings.TrimSuffix(cameraID, "/config")
@@ -1813,6 +2013,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.posProxy.ServeHTTP(w, r)
 		}))(w, r)
+	case path == "/api/discovery/scan" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleDiscoveryScan))(w, r)
+	case path == "/api/discovery/scans" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscoveryListScans))(w, r)
+	case strings.HasPrefix(path, "/api/discovery/scans/") && strings.HasSuffix(path, "/results") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscoveryGetResults))(w, r)
+	case strings.HasPrefix(path, "/api/discovery/scans/") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscoveryGetScan))(w, r)
+	case path == "/api/discovery/test-credentials" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscoveryTestCredentials))(w, r)
+	case path == "/api/discovery/import" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleDiscoveryImport))(w, r)
 	case strings.HasPrefix(path, "/api/discovery/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscovery))(w, r)
 	case strings.HasPrefix(path, "/api/federation/"):
