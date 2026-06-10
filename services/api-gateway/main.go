@@ -27,6 +27,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
+	"github.com/dam-vms/dam/pkg/onvif"
 	"github.com/sony/gobreaker"
 	"golang.org/x/crypto/acme/autocert"
 	"google.golang.org/grpc"
@@ -1542,48 +1543,158 @@ func (g *Gateway) handleDiscoveryGetResults(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	scanID := extractParam(r.URL.Path, "/api/discovery/scans/")
-	scanID = strings.TrimSuffix(scanID, "/results")
+	path := strings.TrimPrefix(r.URL.Path, "/api/discovery/scans/")
+	scanID := strings.TrimSuffix(path, "/results")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var results []struct {
-		ID       string `db:"id"`
-		Address  string `db:"address"`
-		Port     int    `db:"port"`
-		Type     string `db:"type"`
-		Status   string `db:"status"`
+	type resultRow struct {
+		IPAddress    string  `db:"ip_address"`
+		Manufacturer *string `db:"manufacturer"`
+		Model        *string `db:"model"`
+		SerialNumber *string `db:"serial_number"`
 	}
+
+	var results []resultRow
 	if err := g.db.SelectContext(ctx, &results,
-		"SELECT id, address, port, type, status FROM discovery_results WHERE scan_id=$1", scanID); err != nil {
+		`SELECT ip_address, manufacturer, model, serial_number
+		 FROM discovery_results WHERE scan_id=$1 ORDER BY created_at ASC`,
+		scanID); err != nil {
 		g.logger.Error("Failed to get discovery results", "error", err)
 		jsonError(w, "failed to get results", http.StatusInternalServerError)
 		return
 	}
 
 	if results == nil {
-		results = []struct {
-			ID       string `db:"id"`
-			Address  string `db:"address"`
-			Port     int    `db:"port"`
-			Type     string `db:"type"`
-			Status   string `db:"status"`
-		}{}
+		results = []resultRow{}
+	}
+
+	type deviceResp struct {
+		IP           string `json:"ip"`
+		Manufacturer string `json:"manufacturer"`
+		Model        string `json:"model"`
+		SerialNumber string `json:"serial_number"`
+		Onvif        bool   `json:"onvif"`
+		Rtsp         bool   `json:"rtsp"`
+	}
+
+	devices := make([]deviceResp, 0, len(results))
+	for _, r := range results {
+		d := deviceResp{IP: r.IPAddress, Onvif: true, Rtsp: true}
+		if r.Manufacturer != nil {
+			d.Manufacturer = *r.Manufacturer
+		}
+		if r.Model != nil {
+			d.Model = *r.Model
+		}
+		if r.SerialNumber != nil {
+			d.SerialNumber = *r.SerialNumber
+		}
+		devices = append(devices, d)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"results": results,
+		"devices": devices,
 	})
 }
 
 func (g *Gateway) handleDiscoveryTestCredentials(w http.ResponseWriter, r *http.Request) {
-	jsonError(w, "not implemented", http.StatusNotImplemented)
+	var req struct {
+		IP       string `json:"ip"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.IP == "" {
+		jsonError(w, "ip is required", http.StatusBadRequest)
+		return
+	}
+
+	deviceURL := "http://" + req.IP + ":80/onvif/device_service"
+	client := onvif.NewSOAPClient(5*time.Second, &onvif.Credentials{
+		Username: req.Username,
+		Password: req.Password,
+	})
+
+	info, err := onvif.GetDeviceInformation(r.Context(), client, deviceURL)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      false,
+			"manufacturer": "",
+			"model":        "",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"manufacturer": info.Manufacturer,
+		"model":        info.Model,
+	})
 }
 
 func (g *Gateway) handleDiscoveryImport(w http.ResponseWriter, r *http.Request) {
-	jsonError(w, "not implemented", http.StatusNotImplemented)
+	if g.db == nil {
+		jsonError(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	var req struct {
+		ScanID   string   `json:"scan_id"`
+		Devices  []string `json:"devices"`
+		SiteID   string   `json:"site_id"`
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	created := 0
+	failed := 0
+
+	for _, ip := range req.Devices {
+		connURL := "rtsp://" + ip + ":554"
+		if req.Username != "" {
+			connURL = "rtsp://" + req.Username + ":" + req.Password + "@" + ip + ":554"
+		}
+		_, err := g.cameraSvc.CreateCamera(ctx, &damv1.CreateCameraRequest{
+			SiteId:        req.SiteID,
+			Name:          ip,
+			ConnectionUrl: connURL,
+			OnvifUsername: req.Username,
+			OnvifPassword: req.Password,
+		})
+		if err != nil {
+			g.logger.Error("Failed to import camera", "ip", ip, "error", err)
+			failed++
+		} else {
+			created++
+			if req.ScanID != "" {
+				g.db.ExecContext(ctx,
+					"UPDATE discovery_results SET imported=true, imported_at=NOW() WHERE scan_id=$1 AND ip_address=$2",
+					req.ScanID, ip)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"created": created,
+		"failed":  failed,
+	})
 }
 
 func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Request) {
