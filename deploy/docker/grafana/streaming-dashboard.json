@@ -1,0 +1,45 @@
+{
+  "title": "EVMS Streaming Pipeline",
+  "uid": "evms-streaming",
+  "version": 1,
+  "schemaVersion": 36,
+  "timezone": "utb",
+  "panels": [
+    {
+      "title": "Stream Bitrate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{
+        "expr": "vms_stream_bitrate_bps",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Frames Processed (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{
+        "expr": "sum(rate(vms_frames_processed_total[5m])) by (camera_id)",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Recording Write Duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(vms_segment_write_duration_seconds_bucket[5m])) by (le, camera_id))",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Stream Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{
+        "expr": "vms_stream_latency_ms",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    }
+  ]
+}

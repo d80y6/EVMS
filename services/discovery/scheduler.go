@@ -74,8 +74,9 @@ func (s *Scheduler) checkDueScans(ctx context.Context) {
 			Ports:   []int{80, 554, 8080},
 		}
 
+		siteID := site.ID
 		_, err := s.orchestrator.StartScan(ctx, ScanRequest{
-			SiteID:  site.ID,
+			SiteID:  &siteID,
 			Methods: cfg.Methods,
 			Subnets: cfg.Subnets,
 			Ports:   cfg.Ports,

@@ -1,7 +1,6 @@
 package common
 
 import (
-	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -59,10 +58,12 @@ func TestMustEncryptWithKey(t *testing.T) {
 func TestMustEncryptWithoutKey(t *testing.T) {
 	os.Unsetenv(EncryptionKeyEnv)
 
-	result := MustEncrypt("secret")
-	if result != "secret" {
-		t.Error("MustEncrypt should return plaintext when key is missing")
-	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("MustEncrypt should panic when key is missing")
+		}
+	}()
+	MustEncrypt("secret")
 }
 
 func TestMustDecryptEmpty(t *testing.T) {
@@ -78,10 +79,12 @@ func TestMustDecryptEmpty(t *testing.T) {
 func TestMustDecryptFailsGracefully(t *testing.T) {
 	os.Unsetenv(EncryptionKeyEnv)
 
-	result := MustDecrypt("some-encoded-data")
-	if result != "some-encoded-data" {
-		t.Errorf("MustDecrypt should return input on failure, got %q", result)
-	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("MustDecrypt should panic when key is missing")
+		}
+	}()
+	MustDecrypt("some-encoded-data")
 }
 
 func TestMustEncryptDecryptRoundTrip(t *testing.T) {
@@ -100,18 +103,15 @@ func TestMustEncryptDecryptRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMustEncryptLogsWarning(t *testing.T) {
+func TestMustEncryptPanicsWithoutKey(t *testing.T) {
 	os.Unsetenv(EncryptionKeyEnv)
 
-	var logBuf strings.Builder
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("MustEncrypt should panic when key is missing")
+		}
+	}()
 	MustEncrypt("test")
-
-	if !strings.Contains(logBuf.String(), "encryption failed") {
-		t.Error("expected warning log when encryption fails")
-	}
 }
 
 func TestGetEncryptionKey(t *testing.T) {

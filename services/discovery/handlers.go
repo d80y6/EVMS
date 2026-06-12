@@ -41,10 +41,14 @@ func (h *ScanHandler) handleCreateScan(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	siteID, err := uuid.Parse(req.SiteID)
-	if err != nil {
-		jsonError(w, "invalid site_id", http.StatusBadRequest)
-		return
+	var siteID *uuid.UUID
+	if req.SiteID != "" {
+		parsed, err := uuid.Parse(req.SiteID)
+		if err != nil {
+			jsonError(w, "invalid site_id", http.StatusBadRequest)
+			return
+		}
+		siteID = &parsed
 	}
 	if len(req.Methods) == 0 {
 		req.Methods = []string{"ws-discovery"}

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"log/slog"
 	"os"
 )
 
@@ -86,8 +85,7 @@ func Decrypt(encoded string) ([]byte, error) {
 func MustEncrypt(plaintext string) string {
 	encrypted, err := Encrypt([]byte(plaintext))
 	if err != nil {
-		slog.Warn("encryption failed, storing plaintext", "error", err)
-		return plaintext
+		panic("MustEncrypt failed: " + err.Error())
 	}
 	return encrypted
 }
@@ -98,8 +96,7 @@ func MustDecrypt(encoded string) string {
 	}
 	decrypted, err := Decrypt(encoded)
 	if err != nil {
-		slog.Warn("decryption failed, returning raw data", "error", err)
-		return encoded
+		panic("MustDecrypt failed: " + err.Error())
 	}
 	return string(decrypted)
 }

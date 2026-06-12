@@ -2,17 +2,17 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
-    VitePWA({
+    mode === 'production' && VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico'],
       manifest: {
-        name: 'DAM VMS',
-        short_name: 'VMS',
+        name: 'EVMS - Enterprise Video Management',
+        short_name: 'EVMS',
         description: 'Enterprise Video Management System',
-        theme_color: '#1a1a2e',
+        theme_color: '#0f3460',
         background_color: '#1a1a2e',
         display: 'standalone',
         orientation: 'any',
@@ -45,4 +45,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

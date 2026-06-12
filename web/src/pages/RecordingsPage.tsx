@@ -55,6 +55,7 @@ export default function RecordingsPage() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setIsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleCamera = (id: string) => {
@@ -68,12 +69,20 @@ export default function RecordingsPage() {
   };
 
   const [exporting, setExporting] = useState(false);
+  const [exportStart, setExportStart] = useState(() => {
+    const d = new Date(Date.now() - 3600000);
+    return d.toISOString().slice(0, 16);
+  });
+  const [exportEnd, setExportEnd] = useState(() => {
+    const d = new Date();
+    return d.toISOString().slice(0, 16);
+  });
 
   const handleExport = async () => {
     const cameraId = selectedCamera;
     if (!cameraId) return;
-    const start = new Date(Date.now() - 3600000).toISOString();
-    const end = new Date().toISOString();
+    const start = new Date(exportStart).toISOString();
+    const end = new Date(exportEnd).toISOString();
     setExporting(true);
     try {
       const result = await api.exportRecording(cameraId, start, end, true);
@@ -266,7 +275,7 @@ export default function RecordingsPage() {
         events={events.map(e => ({ timestamp: e.event_time, type: e.object_type }))}
       />
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm text-slate-400">Camera:</label>
         <select
           value={selectedCamera}
@@ -277,10 +286,23 @@ export default function RecordingsPage() {
             <option key={cam.id} value={cam.id}>{cam.name}</option>
           ))}
         </select>
+        <input
+          type="datetime-local"
+          value={exportStart}
+          onChange={(e) => setExportStart(e.target.value)}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        />
+        <span className="text-xs text-slate-600">to</span>
+        <input
+          type="datetime-local"
+          value={exportEnd}
+          onChange={(e) => setExportEnd(e.target.value)}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        />
         <button
           onClick={handleExport}
           disabled={exporting}
-          className="bg-green-700 hover:bg-green-600 disabled:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ml-auto"
+          className="bg-green-700 hover:bg-green-600 disabled:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
         >
           {exporting ? 'Exporting...' : 'Export with SHA-256'}
         </button>

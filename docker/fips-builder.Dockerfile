@@ -17,7 +17,7 @@ COPY . .
 ENV CGO_ENABLED=1
 ENV GOEXPERIMENT=opensslcrypto
 RUN go build -tags fips -o /fips-verify ./cmd/fips.go
-RUN go build -tags fips -o /auth-service ./services/auth/main.go
+RUN go build -tags fips -o /auth-service ./services/auth/
 
 FROM debian:bullseye-slim
 RUN apt-get update && apt-get install -y \

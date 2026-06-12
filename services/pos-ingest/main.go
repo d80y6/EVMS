@@ -38,7 +38,7 @@ type POSTransaction struct {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("pos-ingest")
 	slog.SetDefault(logger)
 
 	if err := common.InitTelemetry("pos-ingest"); err != nil {

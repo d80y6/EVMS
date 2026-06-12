@@ -635,7 +635,7 @@ func (s *NotificationService) Close() error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("notification")
 	slog.SetDefault(logger)
 
 	if err := common.InitTelemetry("notification"); err != nil {

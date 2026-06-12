@@ -26,9 +26,6 @@ export default function ZonesPage() {
     direction: 'any',
     enabled: true,
   });
-  const [zoneEvents, setZoneEvents] = useState<any[]>([]);
-  const [showEvents, setShowEvents] = useState<string | null>(null);
-
   const fetchZones = () => {
     setLoading(true);
     api.getZones(tab)
@@ -37,6 +34,7 @@ export default function ZonesPage() {
       .finally(() => setLoading(false));
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetchZones(); }, [tab]);
 
   const resetForm = () => {
@@ -82,6 +80,7 @@ export default function ZonesPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to toggle zone');
     }
+    fetchZones();
   };
 
   const handleDelete = async (id: string) => {
@@ -107,16 +106,6 @@ export default function ZonesPage() {
       enabled: zone.enabled ?? true,
     });
     setShowCreate(true);
-  };
-
-  const handleViewEvents = async (id: string) => {
-    try {
-      const data = await api.getZoneEvents(id);
-      setZoneEvents(data.events || []);
-      setShowEvents(id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load events');
-    }
   };
 
   return (
@@ -249,8 +238,6 @@ export default function ZonesPage() {
                     <div className="flex gap-2">
                       <button onClick={() => handleEdit(zone)}
                         className="text-xs px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors">Edit</button>
-                      <button onClick={() => handleViewEvents(zone.id)}
-                        className="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors">Events</button>
                       <button onClick={() => handleDelete(zone.id)}
                         className="text-xs px-2 py-1 bg-red-600 hover:bg-red-500 text-white rounded transition-colors">Delete</button>
                     </div>
@@ -262,24 +249,6 @@ export default function ZonesPage() {
         )}
       </div>
 
-      {/* Zone Events Modal */}
-      {showEvents && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto space-y-4">
-            <div className="flex items-center justify-between">
-              <h4 className="text-sm font-medium text-slate-300">Zone Events</h4>
-              <button onClick={() => setShowEvents(null)} className="text-xs text-slate-500 hover:text-slate-300">Close</button>
-            </div>
-            {zoneEvents.length === 0 && <p className="text-sm text-slate-500">No recent events.</p>}
-            {zoneEvents.map((evt: any, i: number) => (
-              <div key={i} className="bg-slate-800 rounded-lg p-3 text-xs space-y-1">
-                <div className="text-slate-300">{evt.object_type || evt.object_class}</div>
-                <div className="text-slate-500">{evt.camera_id} - {evt.event_time ? new Date(evt.event_time).toLocaleString() : '-'}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

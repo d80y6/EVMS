@@ -1,0 +1,78 @@
+{{- if .Values.vault.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+    spec:
+      serviceAccountName: vault
+      containers:
+      - name: vault
+        image: hashicorp/vault:1.15
+        args: ["server", "-dev", "-dev-root-token-id=root"]
+        env:
+        - name: VAULT_DEV_ROOT_TOKEN_ID
+          value: "root"
+        - name: VAULT_DEV_LISTEN_ADDRESS
+          value: "0.0.0.0:8200"
+        ports:
+        - containerPort: 8200
+          name: api
+        - containerPort: 8201
+          name: cluster
+        volumeMounts:
+        - name: vault-config
+          mountPath: /vault/config
+      volumes:
+      - name: vault-config
+        configMap:
+          name: vault-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: {{ .Values.global.namespace }}
+spec:
+  ports:
+  - port: 8200
+    name: api
+  - port: 8201
+    name: cluster
+  selector:
+    app.kubernetes.io/name: vault
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: {{ .Values.global.namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: {{ .Values.global.namespace }}
+data:
+  vault.hcl: |
+    ui = true
+    listener "tcp" {
+      address = "0.0.0.0:8200"
+      tls_disable = true
+    }
+    storage "file" {
+      path = "/vault/data"
+    }
+{{- end }}

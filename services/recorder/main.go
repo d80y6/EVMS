@@ -681,6 +681,29 @@ func (s *RecorderService) Start(ctx context.Context) error {
 		}
 	})))
 	mux.Handle("/retention-policies/", common.JWTAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/bulk") {
+			if r.Method == http.MethodPost {
+				handleBulkRetentionUpdate(recorder.policyManager)(w, r)
+			} else {
+				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		if strings.HasSuffix(path, "/global") {
+			if r.Method == http.MethodPut || r.Method == http.MethodPost {
+				handleUpdateGlobalRetention(recorder.policyManager)(w, r)
+			} else if r.Method == http.MethodGet {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"retention_days":        recorder.config.RetentionDays,
+					"archive_enabled":       false,
+					"archive_after_days":    90,
+				})
+			} else {
+				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			handleGetRetentionPolicy(recorder.policyManager)(w, r)
@@ -732,7 +755,7 @@ func (s *RecorderService) Start(ctx context.Context) error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("recorder")
 	slog.SetDefault(logger)
 
 	if err := common.InitTelemetry("recorder"); err != nil {

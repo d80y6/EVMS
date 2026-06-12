@@ -32,12 +32,26 @@ export default function ForensicsPage() {
     setter(arr.includes(item) ? arr.filter((i) => i !== item) : [...arr, item]);
   };
 
+  const handleSelectResult = async (result: any) => {
+    setSelectedResult(result);
+    if (result?.track_id) {
+      try {
+        const data = await api.getTrackPath(result.track_id);
+        setTrackPaths(data.track || []);
+      } catch {
+        setTrackPaths([]);
+      }
+    } else {
+      setTrackPaths([]);
+    }
+  };
+
   const handleSearch = async () => {
     setLoading(true);
     setError(null);
     try {
       const data = await api.forensicSearch({
-        camera_ids: selectedCameras.length > 0 ? selectedCameras : undefined,
+        cameras: selectedCameras.length > 0 ? selectedCameras : undefined,
         start_time: startTime ? new Date(startTime).toISOString() : undefined,
         end_time: endTime ? new Date(endTime).toISOString() : undefined,
         object_classes: objectClasses.length > 0 ? objectClasses : undefined,
@@ -48,7 +62,6 @@ export default function ForensicsPage() {
       });
       setResults(data.results || []);
       setTotal(data.total || 0);
-      setTrackPaths(data.track_paths || []);
       setSelectedResult(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed');
@@ -69,7 +82,7 @@ export default function ForensicsPage() {
         min_confidence: minConfidence,
       }, exportFormat);
       const a = document.createElement('a');
-      a.href = data.file_path;
+      a.href = data.file_path || '';
       a.download = `forensics-export.${exportFormat}`;
       a.click();
     } catch (err) {
@@ -182,7 +195,7 @@ export default function ForensicsPage() {
           {results.length > 0 && (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {results.map((r: any, i: number) => (
-                <button key={r.id || i} onClick={() => setSelectedResult(r)}
+                <button key={r.id || i} onClick={() => handleSelectResult(r)}
                   className={`bg-slate-900 border rounded-xl overflow-hidden text-left transition-colors hover:border-indigo-600 ${
                     selectedResult?.id === r.id ? 'border-indigo-500' : 'border-slate-800'
                   }`}>

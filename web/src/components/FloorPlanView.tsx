@@ -8,7 +8,7 @@ interface FloorPlanProps {
   onCameraClick: (id: string) => void
 }
 
-export function FloorPlanView({ imageUrl, cameras, siteId: _siteId, onCameraClick }: FloorPlanProps) {
+export function FloorPlanView({ imageUrl, cameras, onCameraClick }: FloorPlanProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({})
 

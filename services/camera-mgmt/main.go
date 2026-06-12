@@ -282,8 +282,8 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 	onvifUsername := sqlNullString(req.OnvifUsername)
 	onvifPassword := sqlNullString(encryptedPwd)
 	err := s.db.QueryRowContext(ctx,
-		"INSERT INTO cameras (site_id, name, connection_url, substream_url, ptz_protocol, retention_days, prerecord_seconds, onvif_username, onvif_password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-		req.SiteId, req.Name, req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays, prerecordSeconds, onvifUsername, onvifPassword).Scan(&id)
+		"INSERT INTO cameras (site_id, name, description, connection_url, substream_url, ptz_protocol, retention_days, prerecord_seconds, onvif_username, onvif_password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+		req.SiteId, req.Name, sqlNullString(req.Description), req.ConnectionUrl, req.SubstreamUrl, ptzProtocol, retentionDays, prerecordSeconds, onvifUsername, onvifPassword).Scan(&id)
 	if err != nil {
 		s.logger.Error("Failed to create camera", "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to create camera: %v", err)
@@ -312,8 +312,8 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 	onvifUsername := sqlNullString(req.OnvifUsername)
 	onvifPassword := sqlNullString(encryptedPwd)
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE cameras SET name = $1, description = $2, connection_url = $3, substream_url = $4, ptz_protocol = $5, retention_days = $6, prerecord_seconds = $7, config = $8, onvif_username = $9, onvif_password = $10, updated_at = NOW() WHERE id = $11",
-		req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, prerecordSeconds, req.Config, onvifUsername, onvifPassword, req.Id)
+		"UPDATE cameras SET site_id = COALESCE(NULLIF($1, '')::uuid, site_id), name = $2, description = $3, connection_url = $4, substream_url = $5, ptz_protocol = $6, retention_days = $7, prerecord_seconds = $8, config = COALESCE(NULLIF($9, '')::jsonb, config), onvif_username = $10, onvif_password = $11, updated_at = NOW() WHERE id = $12",
+		req.SiteId, req.Name, req.Description, req.ConnectionUrl, req.SubstreamUrl, req.PtzProtocol, req.RetentionDays, prerecordSeconds, req.Config, onvifUsername, onvifPassword, req.Id)
 	if err != nil {
 		s.logger.Error("Failed to update camera", "error", err, "id", req.Id)
 		return nil, status.Errorf(codes.Internal, "failed to update camera: %v", err)
@@ -709,7 +709,7 @@ func sqlNullString(s string) interface{} {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("camera-mgmt")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

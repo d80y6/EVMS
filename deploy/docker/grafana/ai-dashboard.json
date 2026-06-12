@@ -1,0 +1,36 @@
+{
+  "title": "EVMS AI Pipeline",
+  "uid": "evms-ai",
+  "version": 1,
+  "schemaVersion": 36,
+  "timezone": "utc",
+  "panels": [
+    {
+      "title": "Inference Duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(vms_inference_duration_seconds_bucket[5m])) by (le, camera_id, model))",
+        "legendFormat": "{{ camera_id }} - {{ model }}"
+      }]
+    },
+    {
+      "title": "Frames Processed by Model (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{
+        "expr": "sum(rate(vms_frames_processed_total{type=\"ai\"}[5m])) by (camera_id)",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    },
+    {
+      "title": "Detections Per Second",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "targets": [{
+        "expr": "rate(vms_frames_processed_total{type=\"detection\"}[5m])",
+        "legendFormat": "{{ camera_id }}"
+      }]
+    }
+  ]
+}

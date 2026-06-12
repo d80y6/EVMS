@@ -165,6 +165,15 @@ groups:
           summary: "High memory usage on {{ $labels.instance }}"
           description: "Memory usage is {{ $value | humanize1024 }}."
 
+      - alert: HighLogErrorRate
+        expr: rate(evms_log_error_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High log error rate"
+          description: "Error log rate is {{ $value }} errors/second across all services for 5m"
+
       - alert: CircuitBreakerOpen
         expr: vms_circuit_breaker_state == 1
         for: 1m

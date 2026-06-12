@@ -10,14 +10,23 @@ interface CameraCardProps {
   ptzProtocol: string;
 }
 
-export default function CameraCard({ cameraId, name, status, ptzProtocol }: CameraCardProps) {
+export default function CameraCard({
+  cameraId,
+  name,
+  status,
+  ptzProtocol,
+}: CameraCardProps) {
   const [ptzVisible, setPtzVisible] = useState(false);
   const { activeType, setActiveType } = useStreamSelector(cameraId);
 
   return (
     <div className="space-y-3">
-      <div className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group">
+      <div
+        className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group"
+        onMouseEnter={() => setPtzVisible(true)}
+      >
         <CameraView cameraId={cameraId} streamType={activeType} />
+
         {ptzProtocol !== 'none' && (
           <PtzOverlay
             cameraId={cameraId}
@@ -26,6 +35,7 @@ export default function CameraCard({ cameraId, name, status, ptzProtocol }: Came
           />
         )}
       </div>
+
       <div className="flex justify-between items-center px-1">
         <div className="flex items-center gap-2">
           <div
@@ -37,11 +47,25 @@ export default function CameraCard({ cameraId, name, status, ptzProtocol }: Came
           />
           <h3 className="text-sm font-bold text-slate-200">{name}</h3>
         </div>
+
         <div className="flex items-center gap-2">
-          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">H.264</span>
-          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">1080P</span>
+          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">
+            H.264
+          </span>
+
+          <span className="text-[10px] px-2 py-0.5 bg-slate-800 text-slate-400 rounded-md font-bold border border-slate-700">
+            1080P
+          </span>
+
           <button
-            onClick={() => setActiveType(activeType === 'main' ? 'sub' : 'main')}
+            onClick={() =>
+              setActiveType(activeType === 'main' ? 'sub' : 'main')
+            }
+            aria-label={
+              activeType === 'main'
+                ? 'Switch to standard definition'
+                : 'Switch to high definition'
+            }
             className={`text-[10px] px-2 py-0.5 rounded-md font-bold border transition-colors ${
               activeType === 'main'
                 ? 'bg-blue-600 text-white border-blue-500'

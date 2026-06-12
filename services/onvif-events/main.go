@@ -397,7 +397,7 @@ func (s *OnvifEventsService) runSubscription(sub *subscription) {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("onvif-events")
 	slog.SetDefault(logger)
 
 	if err := common.InitTelemetry("onvif-events"); err != nil {

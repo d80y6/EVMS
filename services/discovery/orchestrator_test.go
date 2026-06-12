@@ -97,8 +97,9 @@ func TestOrchestrator_StartAndComplete(t *testing.T) {
 		},
 	}
 	o := NewScanOrchestrator(store, scanners, testLogger())
+	sid1 := uuid.New()
 	scan, err := o.StartScan(context.Background(), ScanRequest{
-		SiteID: uuid.New(), Methods: []string{"mock"}, Subnets: []string{"local"},
+		SiteID: &sid1, Methods: []string{"mock"}, Subnets: []string{"local"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,8 +129,9 @@ func TestOrchestrator_Deduplication(t *testing.T) {
 		},
 	}
 	o := NewScanOrchestrator(store, scanners, testLogger())
+	sid2 := uuid.New()
 	o.StartScan(context.Background(), ScanRequest{
-		SiteID: uuid.New(), Methods: []string{"mock"}, Subnets: []string{"local"},
+		SiteID: &sid2, Methods: []string{"mock"}, Subnets: []string{"local"},
 	})
 	time.Sleep(500 * time.Millisecond)
 
@@ -148,8 +150,9 @@ func TestOrchestrator_Cancellation(t *testing.T) {
 		"slow": &mockScanner{name: "slow", results: nil},
 	}
 	o := NewScanOrchestrator(store, scanners, testLogger())
+	sid3 := uuid.New()
 	scan, _ := o.StartScan(context.Background(), ScanRequest{
-		SiteID: uuid.New(), Methods: []string{"slow"}, Subnets: []string{"local"},
+		SiteID: &sid3, Methods: []string{"slow"}, Subnets: []string{"local"},
 	})
 	if err := o.CancelScan(context.Background(), scan.ID); err != nil {
 		t.Fatal(err)

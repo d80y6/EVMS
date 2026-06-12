@@ -19,32 +19,42 @@ export default function WebhooksPage() {
   const [url, setUrl] = useState('');
   const [eventTypes, setEventTypes] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
-    api.listWebhooks().then(d => setWebhooks(d.webhooks || [])).catch(() => {}).finally(() => setLoading(false));
+    setError(null);
+    api.listWebhooks().then(d => setWebhooks(d.webhooks || [])).catch(err => setError(err instanceof Error ? err.message : 'Failed to load webhooks')).finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, []);
 
   const handleSave = async () => {
-    const data = { name, url, event_types: eventTypes.split(',').map(s => s.trim()).filter(Boolean) };
-    if (editing) {
-      await api.updateWebhook(editing.id, data);
-    } else {
-      await api.createWebhook(data);
+    try {
+      const data = { name, url, event_types: eventTypes.split(',').map(s => s.trim()).filter(Boolean) };
+      if (editing) {
+        await api.updateWebhook(editing.id, data);
+      } else {
+        await api.createWebhook(data);
+      }
+      setShowForm(false);
+      setEditing(null);
+      setName('');
+      setUrl('');
+      setEventTypes('');
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save webhook');
     }
-    setShowForm(false);
-    setEditing(null);
-    setName('');
-    setUrl('');
-    setEventTypes('');
-    load();
   };
 
   const handleDelete = async (id: string) => {
-    await api.deleteWebhook(id);
-    load();
+    try {
+      await api.deleteWebhook(id);
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete webhook');
+    }
   };
 
   const handleEdit = (wh: Webhook) => {
@@ -82,6 +92,12 @@ export default function WebhooksPage() {
               Cancel
             </button>
           </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">
+          {error}
         </div>
       )}
 

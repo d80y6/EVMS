@@ -15,7 +15,7 @@ import (
 
 type ScanRecord struct {
 	ID          uuid.UUID  `db:"id" json:"id"`
-	SiteID      uuid.UUID  `db:"site_id" json:"site_id"`
+	SiteID      *uuid.UUID `db:"site_id" json:"site_id"`
 	Status      string     `db:"status" json:"status"`
 	Methods     []string   `db:"methods" json:"methods"`
 	Subnets     []string   `db:"subnets" json:"subnets"`
@@ -31,7 +31,7 @@ type ScanRecord struct {
 type ResultRecord struct {
 	ID           uuid.UUID              `db:"id" json:"id"`
 	ScanID       uuid.UUID              `db:"scan_id" json:"scan_id"`
-	SiteID       uuid.UUID              `db:"site_id" json:"site_id"`
+	SiteID       *uuid.UUID             `db:"site_id" json:"site_id"`
 	IPAddress    string                 `db:"ip_address" json:"ip_address"`
 	Port         *int                   `db:"port" json:"port"`
 	XAddr        *string                `db:"xaddr" json:"xaddr"`

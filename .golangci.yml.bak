@@ -1,0 +1,15 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - prealloc
+    - durationcheck
+    - bodyclose
+    - noctx
+    - wastedassign

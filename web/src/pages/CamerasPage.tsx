@@ -1,170 +1,472 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+
 import { api, Camera } from '../api/client';
 
-export default function CamerasPage() {
-  const [cameras, setCameras] = useState<Camera[]>([]);
-  const [sites, setSites] = useState<{ id: string; name: string; location: string }[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [showDialog, setShowDialog] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [form, setForm] = useState({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
+import CameraGrid from '../components/cameras/CameraGrid';
+import CameraCardView from '../components/cameras/CameraCardView';
+import CameraDialog from '../components/cameras/CameraDialog';
+import CameraDeleteDialog from '../components/cameras/CameraDeleteDialog';
+import CameraBulkActions from '../components/cameras/CameraBulkActions';
+import CameraFilters from '../components/cameras/CameraFilters';
+import CameraDetailsDrawer from '../components/cameras/CameraDetailsDrawer';
+import CameraDiscoveryWizard from '../components/cameras/CameraDiscoveryWizard';
+import ViewModeToggle, {
+  CameraViewMode,
+} from '../components/cameras/ViewModeToggle';
 
-  const fetchData = async () => {
+interface Site {
+  id: string;
+  name: string;
+  location: string;
+}
+
+type StatusFilter =
+  | 'all'
+  | 'online'
+  | 'offline';
+
+export default function CamerasPage() {
+  const [loading, setLoading] =
+    useState(true);
+
+  const [refreshing, setRefreshing] =
+    useState(false);
+
+  const [error, setError] =
+    useState<string | null>(null);
+
+  const [cameras, setCameras] =
+    useState<Camera[]>([]);
+
+  const [sites, setSites] =
+    useState<Site[]>([]);
+
+  const [selected, setSelected] =
+    useState<string[]>([]);
+
+  const [search, setSearch] =
+    useState('');
+
+  const [siteFilter, setSiteFilter] =
+    useState('');
+
+  const [statusFilter, setStatusFilter] =
+    useState<StatusFilter>('all');
+
+  const [viewMode, setViewMode] =
+    useState<CameraViewMode>('table');
+
+  const [dialogOpen, setDialogOpen] =
+    useState(false);
+
+  const [editingCamera, setEditingCamera] =
+    useState<Camera | null>(null);
+
+  const [detailsOpen, setDetailsOpen] =
+    useState(false);
+
+  const [detailsCamera, setDetailsCamera] =
+    useState<Camera | null>(null);
+
+  const [discoveryOpen, setDiscoveryOpen] =
+    useState(false);
+
+  const [deleteOpen, setDeleteOpen] =
+    useState(false);
+
+  const [deleteTarget, setDeleteTarget] =
+    useState<Camera | null>(null);
+
+  const [deleting, setDeleting] =
+    useState(false);
+
+  const loadData = async (
+    silent = false
+  ) => {
     try {
-      const [camData, sitesData] = await Promise.all([api.listCameras(), api.getSites()]);
-      setCameras(camData);
-      setSites(sitesData.sites || []);
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      const [cameraData, siteData] =
+        await Promise.all([
+          api.listCameras(),
+          api.getSites(),
+        ]);
+
+      setCameras(cameraData);
+      setSites(siteData.sites || []);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Failed to load cameras'
+      );
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => {
+    void loadData();
+  }, []);
 
-  const handleCreate = async () => {
-    try {
-      await api.createCamera(form);
-      setShowDialog(false);
-      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
-      await fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create camera');
+  const filteredCameras =
+    useMemo(() => {
+      return cameras.filter(
+        (camera) => {
+          const matchesSearch =
+            !search ||
+            camera.name
+              .toLowerCase()
+              .includes(
+                search.toLowerCase()
+              );
+
+          const matchesSite =
+            !siteFilter ||
+            camera.site_id ===
+              siteFilter;
+
+          const matchesStatus =
+            statusFilter === 'all' ||
+            camera.status ===
+              statusFilter;
+
+          return (
+            matchesSearch &&
+            matchesSite &&
+            matchesStatus
+          );
+        }
+      );
+    }, [
+      cameras,
+      search,
+      siteFilter,
+      statusFilter,
+    ]);
+
+  const toggleSelect = (
+    id: string
+  ) => {
+    setSelected((prev) =>
+      prev.includes(id)
+        ? prev.filter(
+            (v) => v !== id
+          )
+        : [...prev, id]
+    );
+  };
+
+  const toggleSelectAll = () => {
+    if (
+      selected.length ===
+      filteredCameras.length
+    ) {
+      setSelected([]);
+      return;
     }
+
+    setSelected(
+      filteredCameras.map(
+        (camera) => camera.id
+      )
+    );
   };
 
-  const handleUpdate = async () => {
-    if (!editing) return;
-    try {
-      await api.updateCamera(editing, form);
-      setEditing(null);
-      setForm({ site_id: '', name: '', connection_url: '', substream_url: '', ptz_protocol: 'none', retention_days: 30, onvif_username: '', onvif_password: '' });
-      await fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update camera');
-    }
+  const handleAdd = () => {
+    setEditingCamera(null);
+    setDialogOpen(true);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this camera?')) return;
-    try {
-      await api.deleteCamera(id);
-      await fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete camera');
-    }
+  const handleEdit = (
+    camera: Camera
+  ) => {
+    setEditingCamera(camera);
+    setDialogOpen(true);
   };
 
-  const openEdit = (cam: Camera) => {
-    setEditing(cam.id);
-    setForm({ site_id: cam.site_id, name: cam.name, connection_url: cam.connection_url, substream_url: cam.substream_url || '', ptz_protocol: cam.ptz_protocol, retention_days: cam.retention_days, onvif_username: cam.onvif_username || '', onvif_password: '' });
-    setShowDialog(true);
+  const handleDetails = (
+    camera: Camera
+  ) => {
+    setDetailsCamera(camera);
+    setDetailsOpen(true);
   };
 
-  if (loading) return <div className="p-4 text-slate-400">Loading cameras...</div>;
+  const handleDelete = (
+    camera: Camera
+  ) => {
+    setDeleteTarget(camera);
+    setDeleteOpen(true);
+  };
+
+  const confirmDelete =
+    async () => {
+      if (!deleteTarget) {
+        return;
+      }
+
+      try {
+        setDeleting(true);
+
+        await api.deleteCamera(
+          deleteTarget.id
+        );
+
+        await loadData(true);
+
+        setDeleteOpen(false);
+        setDeleteTarget(null);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Delete failed'
+        );
+      } finally {
+        setDeleting(false);
+      }
+    };
+
+  const handleBulkDelete =
+    async () => {
+      await Promise.all(
+        selected.map((id) =>
+          api.deleteCamera(id)
+        )
+      );
+
+      setSelected([]);
+
+      await loadData(true);
+    };
+
+  if (loading) {
+    return (
+      <div className="p-6 text-slate-400">
+        Loading cameras...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
+
+      {/* Header */}
+
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-slate-200">Cameras</h2>
-        <button onClick={() => { setEditing(null); setShowDialog(true); }}
-          className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors">+ Add Camera</button>
+
+        <div>
+          <h1 className="text-xl font-semibold text-slate-200">
+            Cameras
+          </h1>
+
+          <p className="text-sm text-slate-500">
+            Camera inventory and
+            device management
+          </p>
+        </div>
+
+        <div className="flex gap-2">
+
+          <ViewModeToggle
+            value={viewMode}
+            onChange={
+              setViewMode
+            }
+          />
+
+          <button
+            onClick={() =>
+              loadData(true)
+            }
+            className="px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm"
+          >
+            {refreshing
+              ? 'Refreshing...'
+              : 'Refresh'}
+          </button>
+
+          <button
+            onClick={() =>
+              setDiscoveryOpen(
+                true
+              )
+            }
+            className="px-3 py-2 rounded bg-green-600 hover:bg-green-500 text-white text-sm"
+          >
+            Discovery
+          </button>
+
+          <button
+            onClick={
+              handleAdd
+            }
+            className="px-3 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-sm"
+          >
+            + Add Camera
+          </button>
+
+        </div>
+
       </div>
 
-      {error && <div className="bg-red-900/20 border border-red-800 rounded-xl p-4"><p className="text-sm text-red-400">{error}</p></div>}
-
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        {cameras.length === 0 && <p className="p-6 text-sm text-slate-500">No cameras configured.</p>}
-        {cameras.length > 0 && (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-400 border-b border-slate-800 text-left">
-                <th className="p-3">Name</th><th className="p-3">Site</th><th className="p-3">Status</th><th className="p-3">PTZ</th><th className="p-3">Retention</th><th className="p-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cameras.map(cam => (
-                <tr key={cam.id} className="border-b border-slate-800 hover:bg-slate-800/50">
-                  <td className="p-3 text-slate-300">{cam.name}</td>
-                  <td className="p-3 text-slate-300">{cam.site_id}</td>
-                  <td className="p-3"><span className={`px-2 py-0.5 rounded text-xs ${cam.status === 'online' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>{cam.status}</span></td>
-                  <td className="p-3 text-slate-300">{cam.ptz_protocol || 'none'}</td>
-                  <td className="p-3 text-slate-300">{cam.retention_days}d</td>
-                  <td className="p-3 flex gap-2">
-                    <button onClick={() => openEdit(cam)} className="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors">Edit</button>
-                    <button onClick={() => handleDelete(cam.id)} className="text-xs px-2 py-1 bg-red-600 hover:bg-red-500 text-white rounded transition-colors">Delete</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {showDialog && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-md space-y-4">
-            <h3 className="text-sm font-medium text-slate-300">{editing ? 'Edit Camera' : 'Add Camera'}</h3>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Site</label>
-              <select value={form.site_id} onChange={e => setForm({ ...form, site_id: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300">
-                <option value="">Select site</option>
-                {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Name</label>
-              <input type="text" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Connection URL</label>
-              <input type="text" value={form.connection_url} onChange={e => setForm({ ...form, connection_url: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Substream URL</label>
-              <input type="text" value={form.substream_url} onChange={e => setForm({ ...form, substream_url: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">PTZ Protocol</label>
-              <select value={form.ptz_protocol} onChange={e => setForm({ ...form, ptz_protocol: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300">
-                <option value="none">None</option>
-                <option value="onvif">ONVIF</option>
-                <option value="pelco_d">Pelco D</option>
-                <option value="pelco_p">Pelco P</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">Retention Days</label>
-              <input type="number" value={form.retention_days} onChange={e => setForm({ ...form, retention_days: parseInt(e.target.value) || 30 })} min={1} max={365}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">ONVIF Username</label>
-              <input type="text" value={form.onvif_username} onChange={e => setForm({ ...form, onvif_username: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" placeholder="admin" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-500 block mb-1">ONVIF Password</label>
-              <input type="password" value={form.onvif_password} onChange={e => setForm({ ...form, onvif_password: e.target.value })}
-                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" placeholder="ONVIF device password" />
-            </div>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowDialog(false)}
-                className="text-xs px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors">Cancel</button>
-              <button onClick={editing ? handleUpdate : handleCreate} disabled={!form.name}
-                className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white rounded transition-colors">{editing ? 'Update' : 'Create'}</button>
-            </div>
-          </div>
+      {error && (
+        <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">
+          {error}
         </div>
       )}
+
+      <CameraFilters
+        search={search}
+        siteFilter={siteFilter}
+        statusFilter={
+          statusFilter
+        }
+        sites={sites}
+        onSearchChange={
+          setSearch
+        }
+        onSiteChange={
+          setSiteFilter
+        }
+        onStatusChange={
+          setStatusFilter
+        }
+      />
+
+      <CameraBulkActions
+        selectedCount={
+          selected.length
+        }
+        onDelete={
+          handleBulkDelete
+        }
+        onClearSelection={() =>
+          setSelected([])
+        }
+      />
+
+      {viewMode ===
+      'table' ? (
+        <CameraGrid
+          cameras={
+            filteredCameras
+          }
+          sites={sites}
+          selected={selected}
+          onSelect={
+            toggleSelect
+          }
+          onSelectAll={
+            toggleSelectAll
+          }
+          onEdit={
+            handleEdit
+          }
+          onDelete={
+            handleDelete
+          }
+          onDetails={
+            handleDetails
+          }
+        />
+      ) : (
+        <CameraCardView
+          cameras={
+            filteredCameras
+          }
+          sites={sites}
+          selected={selected}
+          onSelect={
+            toggleSelect
+          }
+          onEdit={
+            handleEdit
+          }
+          onDelete={
+            handleDelete
+          }
+          onDetails={
+            handleDetails
+          }
+        />
+      )}
+
+      <CameraDialog
+        open={dialogOpen}
+        camera={
+          editingCamera
+        }
+        sites={sites}
+        onClose={() =>
+          setDialogOpen(
+            false
+          )
+        }
+        onSaved={async () => {
+          await loadData(
+            true
+          );
+        }}
+      />
+
+      <CameraDeleteDialog
+        open={deleteOpen}
+        deleting={deleting}
+        title="Delete Camera"
+        message={
+          deleteTarget
+            ? `Delete "${deleteTarget.name}"?`
+            : ''
+        }
+        onConfirm={
+          confirmDelete
+        }
+        onClose={() => {
+          setDeleteOpen(
+            false
+          );
+          setDeleteTarget(
+            null
+          );
+        }}
+      />
+
+      <CameraDetailsDrawer
+        open={detailsOpen}
+        camera={
+          detailsCamera
+        }
+        onClose={() =>
+          setDetailsOpen(
+            false
+          )
+        }
+      />
+
+      <CameraDiscoveryWizard
+        open={
+          discoveryOpen
+        }
+        sites={sites}
+        onClose={() =>
+          setDiscoveryOpen(
+            false
+          )
+        }
+        onImported={async () => {
+          await loadData(
+            true
+          );
+        }}
+      />
+
     </div>
   );
 }

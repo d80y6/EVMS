@@ -20,6 +20,7 @@ import (
 
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
 type ExportRequest struct {
@@ -117,7 +118,8 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := fmt.Sprintf("concat=%d", len(segments))
 	if req.Watermark {
-		filter += ",drawtext=text='%{localtime} | Camera: " + req.CameraID + "':fontsize=24:fontcolor=white:x=10:y=10"
+		safeCameraID := strings.NewReplacer("'", "\\'", ":", "\\:", "]", "\\]", "(", "\\(", ")", "\\)").Replace(req.CameraID)
+		filter += ",drawtext=text='%{localtime} | Camera: " + safeCameraID + "':fontsize=24:fontcolor=white:x=10:y=10"
 	}
 	args = append(args, "-filter_complex", filter, "-c:v", "libx264", "-preset", "fast", outputPath)
 
@@ -160,7 +162,7 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("export")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

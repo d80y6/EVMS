@@ -29,12 +29,12 @@ type PasswordPolicy struct {
 
 func DefaultPasswordPolicy() PasswordPolicy {
 	return PasswordPolicy{
-		MinLength:          8,
+		MinLength:          12,
 		RequireUppercase:   true,
 		RequireLowercase:   true,
 		RequireDigit:       true,
 		RequireSpecial:     true,
-		PasswordHistory:    5,
+		PasswordHistory:    24,
 		PasswordExpiryDays: 90,
 		MaxFailedAttempts:  5,
 		LockoutMinutes:     30,
@@ -191,7 +191,7 @@ func (s *AuthService) recordPasswordHistory(userID, passwordHash string) error {
 	return err
 }
 
-func (s *AuthService) isAccountLocked(username string) (bool, time.Duration, error) {
+func (s *AuthService) isAccountLocked(key string) (bool, time.Duration, error) {
 	lockoutMinutes := s.config.PasswordPolicy.LockoutMinutes
 	if lockoutMinutes <= 0 {
 		lockoutMinutes = 30
@@ -202,7 +202,7 @@ func (s *AuthService) isAccountLocked(username string) (bool, time.Duration, err
 		`SELECT COUNT(*) FROM failed_login_attempts
 		 WHERE username = $1
 		 AND attempted_at > NOW() - ($2 || ' minutes')::interval`,
-		username, fmt.Sprintf("%d", lockoutMinutes))
+		key, fmt.Sprintf("%d", lockoutMinutes))
 	if err != nil {
 		return false, 0, err
 	}
@@ -213,7 +213,7 @@ func (s *AuthService) isAccountLocked(username string) (bool, time.Duration, err
 			`SELECT MIN(attempted_at) FROM failed_login_attempts
 			 WHERE username = $1
 			 AND attempted_at > NOW() - ($2 || ' minutes')::interval`,
-			username, fmt.Sprintf("%d", lockoutMinutes))
+			key, fmt.Sprintf("%d", lockoutMinutes))
 		if err != nil {
 			return true, time.Duration(lockoutMinutes) * time.Minute, nil
 		}
@@ -227,14 +227,14 @@ func (s *AuthService) isAccountLocked(username string) (bool, time.Duration, err
 	return false, 0, nil
 }
 
-func (s *AuthService) recordFailedAttempt(username string) {
+func (s *AuthService) recordFailedAttempt(key string) {
 	s.db.Exec(
-		`INSERT INTO failed_login_attempts (username) VALUES ($1)`, username)
+		`INSERT INTO failed_login_attempts (username) VALUES ($1)`, key)
 }
 
-func (s *AuthService) clearFailedAttempts(username string) {
+func (s *AuthService) clearFailedAttempts(key string) {
 	s.db.Exec(
-		`DELETE FROM failed_login_attempts WHERE username = $1`, username)
+		`DELETE FROM failed_login_attempts WHERE username = $1`, key)
 }
 
 func (s *AuthService) checkPasswordExpiry(userID string) (bool, error) {
@@ -322,11 +322,13 @@ func (s *AuthService) handleChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if req.CurrentPassword != "" {
-		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
-			jsonError(w, "current password is incorrect", http.StatusUnauthorized)
-			return
-		}
+	if req.CurrentPassword == "" {
+		jsonError(w, "current password is required", http.StatusBadRequest)
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
+		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
+		return
 	}
 
 	// Validate against password policy

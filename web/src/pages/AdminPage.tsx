@@ -75,7 +75,7 @@ export default function AdminPage() {
 
   const handleDeactivate = async (userId: string) => {
     try {
-      await api.deleteUser(userId);
+      await api.updateUser(userId, { role: 'viewer' });
       fetchUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to deactivate user');
@@ -456,7 +456,8 @@ export default function AdminPage() {
                 <button onClick={async () => {
                   if (!siteName) return;
                   await api.createSite(siteName, siteLocation);
-                  setSites(prev => [...prev, { id: '', name: siteName, location: siteLocation }]);
+                  const freshSites = await api.getSites();
+                  setSites(freshSites.sites || []);
                   setShowSiteDialog(false); setSiteName(''); setSiteLocation('');
                 }} disabled={!siteName}
                   className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white rounded transition-colors">Create</button>

@@ -65,8 +65,9 @@ func TestCreateAndGetScan(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	id := uuid.New()
+	siteID1 := uuid.New()
 	scan := &ScanRecord{
-		ID: id, SiteID: uuid.New(), Status: "pending",
+		ID: id, SiteID: &siteID1, Status: "pending",
 		Methods: []string{"ws-discovery"}, Ports: []int{80, 554},
 	}
 	if err := store.CreateScan(ctx, scan); err != nil {
@@ -85,7 +86,8 @@ func TestUpdateScanStatus(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	id := uuid.New()
-	store.CreateScan(ctx, &ScanRecord{ID: id, SiteID: uuid.New(), Status: "pending", Methods: []string{"test"}})
+	siteID2 := uuid.New()
+	store.CreateScan(ctx, &ScanRecord{ID: id, SiteID: &siteID2, Status: "pending", Methods: []string{"test"}})
 	errMsg := "something went wrong"
 	if err := store.UpdateScanStatus(ctx, id, "failed", 5, &errMsg); err != nil {
 		t.Fatal(err)
@@ -106,11 +108,13 @@ func TestInsertAndGetResults(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	scanID := uuid.New()
-	store.CreateScan(ctx, &ScanRecord{ID: scanID, SiteID: uuid.New(), Status: "completed", Methods: []string{"test"}})
+	siteID3 := uuid.New()
+	siteID4 := uuid.New()
+	store.CreateScan(ctx, &ScanRecord{ID: scanID, SiteID: &siteID3, Status: "completed", Methods: []string{"test"}})
 	resultID := uuid.New()
 	xaddr := "http://10.0.0.1/onvif"
 	result := &ResultRecord{
-		ID: resultID, ScanID: scanID, SiteID: uuid.New(),
+		ID: resultID, ScanID: scanID, SiteID: &siteID4,
 		IPAddress: "10.0.0.1", XAddr: &xaddr,
 		Capabilities: map[string]interface{}{"ptz": true, "media": true},
 	}
@@ -132,11 +136,11 @@ func TestInsertAndGetResults(t *testing.T) {
 func TestGetScansPagination(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	siteID := uuid.New()
+	siteID6 := uuid.New()
 	for i := 0; i < 5; i++ {
-		store.CreateScan(ctx, &ScanRecord{ID: uuid.New(), SiteID: siteID, Status: "completed", Methods: []string{"test"}})
+		store.CreateScan(ctx, &ScanRecord{ID: uuid.New(), SiteID: &siteID6, Status: "completed", Methods: []string{"test"}})
 	}
-	scans, total, err := store.GetScans(ctx, &siteID, 1, 3)
+	scans, total, err := store.GetScans(ctx, &siteID6, 1, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +156,14 @@ func TestMarkImported(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	scanID := uuid.New()
-	store.CreateScan(ctx, &ScanRecord{ID: scanID, SiteID: uuid.New(), Status: "completed", Methods: []string{"test"}})
+	siteID7 := uuid.New()
+	siteID8 := uuid.New()
+	siteID9 := uuid.New()
+	store.CreateScan(ctx, &ScanRecord{ID: scanID, SiteID: &siteID7, Status: "completed", Methods: []string{"test"}})
 	id1, id2 := uuid.New(), uuid.New()
 	xaddr := "http://10.0.0.1/onvif"
-	store.InsertResult(ctx, &ResultRecord{ID: id1, ScanID: scanID, SiteID: uuid.New(), IPAddress: "10.0.0.1", XAddr: &xaddr})
-	store.InsertResult(ctx, &ResultRecord{ID: id2, ScanID: scanID, SiteID: uuid.New(), IPAddress: "10.0.0.2"})
+	store.InsertResult(ctx, &ResultRecord{ID: id1, ScanID: scanID, SiteID: &siteID8, IPAddress: "10.0.0.1", XAddr: &xaddr})
+	store.InsertResult(ctx, &ResultRecord{ID: id2, ScanID: scanID, SiteID: &siteID9, IPAddress: "10.0.0.2"})
 	if err := store.MarkImported(ctx, []uuid.UUID{id1}); err != nil {
 		t.Fatal(err)
 	}

@@ -46,7 +46,11 @@ func TestWebRTCOffer_NoAuthReturns401(t *testing.T) {
 
 func TestWebRTCOffer_MissingCameraID(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
-	defer os.Unsetenv("JWT_SECRET")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := &WebRTCService{logger: logger}
@@ -65,7 +69,11 @@ func TestWebRTCOffer_MissingCameraID(t *testing.T) {
 
 func TestWebRTCOffer_AuthFlowWithContext(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
-	defer os.Unsetenv("JWT_SECRET")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
 
 	token := generateTestJWT("testuser", "viewer")
 
@@ -90,15 +98,19 @@ func TestWebRTCOffer_AuthFlowWithContext(t *testing.T) {
 	}
 }
 
-func TestWebRTCOffer_TokenInQueryParam(t *testing.T) {
+func TestWebRTCOffer_TokenInQueryParamRejected(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
-	defer os.Unsetenv("JWT_SECRET")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
 
 	token := generateTestJWT("testuser", "viewer")
 
-	var capturedCtx context.Context
+	innerCalled := false
 	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedCtx = r.Context()
+		innerCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -108,17 +120,21 @@ func TestWebRTCOffer_TokenInQueryParam(t *testing.T) {
 
 	middleware(rr, req)
 
-	username := capturedCtx.Value(common.UserKey)
-	if username == nil {
-		t.Error("expected username in context after middleware with query param token")
-	} else if username.(string) != "testuser" {
-		t.Errorf("username = %q, want %q", username, "testuser")
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+	if innerCalled {
+		t.Error("inner handler should not be called when token is in query param")
 	}
 }
 
 func TestWebRTCOffer_AuthMiddlewareCalledByRoute(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
-	defer os.Unsetenv("JWT_SECRET")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := &WebRTCService{logger: logger}
@@ -147,7 +163,11 @@ func TestWebRTCOffer_AuthMiddlewareCalledByRoute(t *testing.T) {
 
 func TestWebRTCService_ContextKeysFromAuth(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
-	defer os.Unsetenv("JWT_SECRET")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
 
 	token := generateTestJWT("admin-user", "admin")
 

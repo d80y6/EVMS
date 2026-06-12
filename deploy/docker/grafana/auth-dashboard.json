@@ -1,0 +1,36 @@
+{
+  "title": "EVMS Auth Dashboard",
+  "uid": "evms-auth",
+  "version": 1,
+  "schemaVersion": 36,
+  "timezone": "utc",
+  "panels": [
+    {
+      "title": "Login Success Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{
+        "expr": "rate(vms_http_requests_errors_total{method=~\"POST\",path=~\"/login\"}[5m])",
+        "legendFormat": "Login errors"
+      }]
+    },
+    {
+      "title": "Token Issuance Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{
+        "expr": "rate(vms_http_request_duration_seconds_count{method=\"POST\",path=\"/token\"}[5m])",
+        "legendFormat": "Token requests"
+      }]
+    },
+    {
+      "title": "Auth Latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(vms_http_request_duration_seconds_bucket{path=~\"/login|/token|/refresh\"}[5m])) by (le))",
+        "legendFormat": "p95 auth latency"
+      }]
+    }
+  ]
+}

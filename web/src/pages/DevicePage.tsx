@@ -99,7 +99,7 @@ export default function DevicePage() {
         <div className="bg-slate-900 p-4 rounded-lg">
           <h3 className="text-sm font-medium mb-2">Capabilities</h3>
           <div className="flex flex-wrap gap-2">
-            {Object.entries(caps).filter(([_, v]) => v === true).map(([k]) => (
+            {Object.entries(caps).filter(([, v]) => v === true).map(([k]) => (
               <span key={k} className="text-[10px] px-2 py-0.5 bg-indigo-900/50 text-indigo-300 rounded">{k}</span>
             ))}
           </div>

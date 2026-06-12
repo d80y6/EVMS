@@ -225,7 +225,7 @@ func (s *PlaybackService) audioContentType(path string) string {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("playback")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

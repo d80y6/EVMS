@@ -11,7 +11,7 @@ import (
 )
 
 type ScanRequest struct {
-	SiteID    uuid.UUID
+	SiteID    *uuid.UUID
 	Methods   []string
 	Subnets   []string
 	Ports     []int

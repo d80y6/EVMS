@@ -1,0 +1,86 @@
+{{- if .Values.services.modelRegistry.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-registry
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: model-registry
+spec:
+  replicas: {{ .Values.services.modelRegistry.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: model-registry
+  template:
+    metadata:
+      labels:
+        app: model-registry
+    spec:
+      containers:
+      - name: model-registry
+        image: {{ include "evms.image" (dict "image" .Values.services.modelRegistry.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.modelRegistry.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: NATS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: NATS_URL
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
+        resources:
+          {{- toYaml .Values.services.modelRegistry.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-registry
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: model-registry
+spec:
+  selector:
+    app: model-registry
+  ports:
+  - protocol: TCP
+    port: {{ .Values.services.modelRegistry.port }}
+    targetPort: {{ .Values.services.modelRegistry.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

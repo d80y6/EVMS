@@ -364,7 +364,7 @@ func (s *ThumbnailService) generateThumbnail(cameraID string, ts time.Time) erro
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("thumbnails")
 	slog.SetDefault(logger)
 
 	if err := common.InitTelemetry("thumbnails"); err != nil {

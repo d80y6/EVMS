@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { useSyncPlayback } from '../hooks/useSyncPlayback';
-import { authUrl } from '../api/client';
+
 
 interface SyncPlaybackViewProps {
   cameraId: string;
@@ -13,7 +13,7 @@ export default function SyncPlaybackView({ cameraId, cameraName, sync }: SyncPla
   const lastSrcRef = useRef<string>('');
 
   useEffect(() => {
-    const src = authUrl(`/api/playback/${cameraId}?start=${sync.state.currentTime}`);
+    const src = `/api/playback/${cameraId}?start=${sync.state.currentTime}`;
     if (videoRef.current && src !== lastSrcRef.current) {
       lastSrcRef.current = src;
       videoRef.current.src = src;

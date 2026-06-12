@@ -130,6 +130,7 @@ func NewWebRTCService(ctx context.Context, config WebRTCConfig, logger *slog.Log
 	}
 	cameraCC, err := grpc.NewClient(config.CameraSvcAddr,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.CallContentSubtype("json")),
 		grpc.WithUnaryInterceptor(tenantUnaryInterceptor),
 	)
 	if err != nil {
@@ -443,7 +444,7 @@ func (s *WebRTCService) Start(ctx context.Context) error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("webrtc")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

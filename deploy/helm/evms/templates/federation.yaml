@@ -1,0 +1,83 @@
+{{- if .Values.services.federation.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: federation
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: federation
+spec:
+  replicas: {{ .Values.services.federation.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: federation
+  template:
+    metadata:
+      labels:
+        app: federation
+    spec:
+      containers:
+      - name: federation
+        image: {{ include "evms.image" (dict "image" .Values.services.federation.image "Values" .Values "global" .Values.global) }}
+        ports:
+        - containerPort: {{ .Values.services.federation.port }}
+        - containerPort: 2112
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 2112
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: db-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: evms-secrets
+              key: jwt-secret
+        - name: METRICS_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: evms-config
+              key: METRICS_ADDR
+        - name: FEDERATION_PORT
+          value: ":{{ .Values.services.federation.port }}"
+        resources:
+          {{- toYaml .Values.services.federation.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: federation
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "evms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: federation
+spec:
+  selector:
+    app: federation
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: {{ .Values.services.federation.port }}
+  - protocol: TCP
+    port: 2112
+    targetPort: 2112
+  type: ClusterIP
+{{- end }}

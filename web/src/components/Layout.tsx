@@ -34,6 +34,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCamerasSub, setShowCamerasSub] = useState(false);
   const [showMonitoringSub, setShowMonitoringSub] = useState(false);
+  const [showMapsSub, setShowMapsSub] = useState(false);
   const selectedSite = searchParams.get('site') || '';
 
   useEffect(() => {
@@ -55,7 +56,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 font-sans selection:bg-indigo-500/30">
       <div className="flex h-screen">
-        <aside className="w-64 border-r border-slate-800 flex flex-col">
+        <aside id="app-sidebar" className="w-64 border-r border-slate-800 flex flex-col">
           <div className="p-6 pb-4">
             <div className="flex items-center gap-3 px-2">
               <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-bold text-lg">D</div>
@@ -148,6 +149,19 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             )}
           </div>
 
+          <button onClick={() => setShowMapsSub(!showMapsSub)}
+            className="flex items-center gap-3 px-4 py-2 rounded-md text-sm font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition-colors">
+            <span className="w-5 text-center text-xs">{showMapsSub ? '▾' : '▸'}</span>
+            Maps & GIS
+          </button>
+          {showMapsSub && (
+            <div className="flex flex-col gap-0.5 ml-4">
+              <NavLink to="/map" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
+                <span className="w-4 text-center">🗺</span>Map
+              </NavLink>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
             <h3 className="text-[10px] uppercase tracking-widest text-slate-600 px-2 pb-2 font-medium">Sites</h3>
             {sites.length === 0 && (
@@ -201,7 +215,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </aside>
 
         <main className="flex-1 flex flex-col">
-          <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-950/50 backdrop-blur-md sticky top-0 z-10">
+          <header id="app-header" className="h-16 border-b border-slate-800 px-8 flex items-center justify-between bg-slate-950/50 backdrop-blur-md sticky top-0 z-10">
             <div className="flex items-center gap-4">
               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-widest">
                 Global Operations Center

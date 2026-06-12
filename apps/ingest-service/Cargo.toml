@@ -118,6 +118,7 @@ strip = true
 lto = true
 codegen-units = 1
 
-[[bench]]
-name = "rtp_buffer_bench"
-harness = false
+# FIXME: bench file missing
+#[[bench]]
+#name = "rtp_buffer_bench"
+#harness = false

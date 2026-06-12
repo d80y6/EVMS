@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api, fetchCSRFToken } from '../api/client';
+import React, { createContext, useContext, useState, useCallback } from 'react';
+import { api, fetchCSRFToken, setAuthToken, getAuthToken } from '../api/client';
 
 function parseJWT(token: string): { username: string; role: string } | null {
   try {
@@ -46,7 +46,7 @@ const AuthContext = createContext<AuthContextType>({
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('auth_token'));
+  const [token, setToken] = useState<string | null>(() => getAuthToken());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mfaRequired, setMFARequired] = useState(false);
@@ -56,14 +56,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const username = claims?.username || '';
   const role = claims?.role || 'viewer';
 
-  useEffect(() => {
-    if (token) {
-      localStorage.setItem('auth_token', token);
-      fetchCSRFToken();
-    } else {
-      localStorage.removeItem('auth_token');
-    }
-  }, [token]);
+  const doSetToken = useCallback((newToken: string | null) => {
+    setAuthToken(newToken);
+    setToken(newToken);
+  }, []);
 
   const login = useCallback(async (loginUsername: string, password: string) => {
     setIsLoading(true);
@@ -75,7 +71,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setMFAToken(res.mfa_token || null);
         return;
       }
-      setToken(res.token);
+      if (res.token) {
+        doSetToken(res.token);
+      }
+      await fetchCSRFToken();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Login failed';
       setError(msg);
@@ -83,7 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [doSetToken]);
 
   const verifyMFA = useCallback(async (code: string) => {
     setIsLoading(true);
@@ -91,7 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await api.verifyMFA(code);
       if (res.token) {
-        setToken(res.token);
+        doSetToken(res.token);
         setMFARequired(false);
         setMFAToken(null);
       }
@@ -102,7 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [doSetToken]);
 
   const cancelMFA = useCallback(() => {
     setMFARequired(false);
@@ -111,10 +110,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    setToken(null);
+    doSetToken(null);
     setMFARequired(false);
     setMFAToken(null);
-  }, []);
+  }, [doSetToken]);
 
   return (
     <AuthContext.Provider
@@ -138,6 +137,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   return useContext(AuthContext);
 }

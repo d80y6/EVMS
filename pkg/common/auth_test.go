@@ -59,7 +59,9 @@ func TestJWTAuthMiddleware(t *testing.T) {
 
 	t.Run("invalid token returns 401", func(t *testing.T) {
 		os.Setenv("JWT_SECRET", "test-secret")
+		ReloadJWTKey()
 		defer os.Unsetenv("JWT_SECRET")
+		defer ReloadJWTKey()
 
 		handler := JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			t.Error("next handler should not be called")
@@ -78,6 +80,8 @@ func TestJWTAuthMiddleware(t *testing.T) {
 func TestValidateJWT(t *testing.T) {
 	t.Run("no JWT_SECRET returns error", func(t *testing.T) {
 		os.Unsetenv("JWT_SECRET")
+		ReloadJWTKey()
+		defer ReloadJWTKey()
 		_, err := ValidateJWT("some-token")
 		if err == nil {
 			t.Error("expected error when JWT_SECRET not set")
@@ -86,7 +90,9 @@ func TestValidateJWT(t *testing.T) {
 
 	t.Run("valid token with correct secret", func(t *testing.T) {
 		os.Setenv("JWT_SECRET", "test-secret-key-for-jwt")
+		ReloadJWTKey()
 		defer os.Unsetenv("JWT_SECRET")
+		defer ReloadJWTKey()
 
 		claims, err := ValidateJWT("some-token")
 		if err == nil {
@@ -102,6 +108,8 @@ func TestValidateJWT(t *testing.T) {
 func TestGetJWTKey(t *testing.T) {
 	t.Run("returns empty when env not set", func(t *testing.T) {
 		os.Unsetenv("JWT_SECRET")
+		ReloadJWTKey()
+		defer ReloadJWTKey()
 		key := getJWTKey()
 		if len(key) != 0 {
 			t.Errorf("expected empty key, got %d bytes", len(key))
@@ -110,7 +118,9 @@ func TestGetJWTKey(t *testing.T) {
 
 	t.Run("returns key when env is set", func(t *testing.T) {
 		os.Setenv("JWT_SECRET", "my-secret-key")
+		ReloadJWTKey()
 		defer os.Unsetenv("JWT_SECRET")
+		defer ReloadJWTKey()
 
 		key := getJWTKey()
 		if string(key) != "my-secret-key" {
@@ -118,20 +128,23 @@ func TestGetJWTKey(t *testing.T) {
 		}
 	})
 
-	t.Run("does not cache empty key", func(t *testing.T) {
+	t.Run("reloads after env change", func(t *testing.T) {
 		os.Unsetenv("JWT_SECRET")
+		ReloadJWTKey()
 
 		key1 := getJWTKey()
 		if len(key1) != 0 {
-			t.Fatal("expected empty key on first call")
+			t.Fatal("expected empty key after reload with no env")
 		}
 
-		os.Setenv("JWT_SECRET", "set-after-first-call")
+		os.Setenv("JWT_SECRET", "set-after-reload")
+		ReloadJWTKey()
 		defer os.Unsetenv("JWT_SECRET")
+		defer ReloadJWTKey()
 
 		key2 := getJWTKey()
-		if string(key2) != "set-after-first-call" {
-			t.Errorf("expected newly set key, got %q", string(key2))
+		if string(key2) != "set-after-reload" {
+			t.Errorf("expected 'set-after-reload', got %q", string(key2))
 		}
 	})
 }
@@ -148,7 +161,9 @@ func TestExtractClaims(t *testing.T) {
 
 func TestJWTAuthMiddleware_InjectsClaims(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-for-context-test")
+	ReloadJWTKey()
 	defer os.Unsetenv("JWT_SECRET")
+	defer ReloadJWTKey()
 
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
 		Username: "testuser",
@@ -188,9 +203,11 @@ func TestJWTAuthMiddleware_InjectsClaims(t *testing.T) {
 	}
 }
 
-func TestJWTAuthMiddleware_TokenInQueryParam(t *testing.T) {
+func TestJWTAuthMiddleware_TokenInQueryParamRejected(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-query-param")
+	ReloadJWTKey()
 	defer os.Unsetenv("JWT_SECRET")
+	defer ReloadJWTKey()
 
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
 		Username: "queryuser",
@@ -204,9 +221,7 @@ func TestJWTAuthMiddleware_TokenInQueryParam(t *testing.T) {
 		t.Fatalf("failed to sign test token: %v", err)
 	}
 
-	var capturedCtx context.Context
 	handler := JWTAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		capturedCtx = r.Context()
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -214,21 +229,16 @@ func TestJWTAuthMiddleware_TokenInQueryParam(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
-	if got := TenantFromContext(capturedCtx); got != "tenant-456" {
-		t.Errorf("TenantFromContext = %q, want 'tenant-456'", got)
-	}
-	if got := UserFromContext(capturedCtx); got != "queryuser" {
-		t.Errorf("UserFromContext = %q, want 'queryuser'", got)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 
 func TestJWTAuthMiddleware_ValidTokenNoClaims(t *testing.T) {
 	os.Setenv("JWT_SECRET", "test-secret-no-claims")
+	ReloadJWTKey()
 	defer os.Unsetenv("JWT_SECRET")
+	defer ReloadJWTKey()
 
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &Claims{
 		RegisteredClaims: jwt.RegisteredClaims{

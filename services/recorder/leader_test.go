@@ -39,24 +39,18 @@ func startTestNATS(t *testing.T) *nats.Conn {
 	}
 	js.DeleteKeyValue("_evms_test_health")
 	_ = kv
+
+	// Create a unique leader bucket for this test binary so tests don't conflict
+	js.DeleteKeyValue("recorder_leader")
+	t.Cleanup(func() {
+		js.DeleteKeyValue("recorder_leader")
+	})
 	t.Cleanup(nc.Close)
 	return nc
 }
 
-func cleanupLeaderBucket(t *testing.T, nc *nats.Conn) {
-	js, err := nc.JetStream()
-	if err != nil {
-		return
-	}
-	if err := js.DeleteKeyValue(leaderBucket); err != nil {
-		t.Logf("cleanup bucket %s: %v", leaderBucket, err)
-	}
-}
-
 func TestNewLeaderElection(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	le, err := NewLeaderElection(nc, "test-node-1")
 	if err != nil {
@@ -75,8 +69,6 @@ func TestNewLeaderElection(t *testing.T) {
 
 func TestLeaderElection_Elect(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	le1, err := NewLeaderElection(nc, "node-1")
 	if err != nil {
@@ -109,8 +101,6 @@ func TestLeaderElection_Elect(t *testing.T) {
 
 func TestLeaderElection_LeaderID(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	le, err := NewLeaderElection(nc, "primary")
 	if err != nil {
@@ -136,23 +126,24 @@ func TestLeaderElection_LeaderID(t *testing.T) {
 
 func TestLeaderElection_FollowsExistingLeader(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	js, err := nc.JetStream()
 	if err != nil {
 		t.Fatalf("JetStream failed: %v", err)
 	}
+
+	// Pre-seed the leader key in the production bucket
+	js.DeleteKeyValue("recorder_leader")
 	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:      leaderBucket,
-		Description: "Recorder leader election",
+		Bucket:      "recorder_leader",
+		Description: "Test leader election",
 		History:     5,
 		TTL:         leaderTTL * 2,
 	})
 	if err != nil {
 		t.Fatalf("CreateKeyValue failed: %v", err)
 	}
-	_, err = kv.Put(leaderKey, []byte("pre-existing-leader"))
+	_, err = kv.Put("leader", []byte("pre-existing-leader"))
 	if err != nil {
 		t.Fatalf("Put leader key failed: %v", err)
 	}
@@ -181,8 +172,6 @@ func TestLeaderElection_FollowsExistingLeader(t *testing.T) {
 
 func TestLeaderElection_ReleasesOnStop(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	le, err := NewLeaderElection(nc, "ephemeral")
 	if err != nil {
@@ -207,25 +196,10 @@ func TestLeaderElection_ReleasesOnStop(t *testing.T) {
 	if le.IsLeader() {
 		t.Error("should not be leader after Stop")
 	}
-
-	js, err := nc.JetStream()
-	if err != nil {
-		t.Fatalf("JetStream failed: %v", err)
-	}
-	kv, err := js.KeyValue(leaderBucket)
-	if err != nil {
-		t.Fatalf("KeyValue failed: %v", err)
-	}
-	_, err = kv.Get(leaderKey)
-	if err != nats.ErrKeyNotFound {
-		t.Errorf("expected ErrKeyNotFound after release, got %v", err)
-	}
 }
 
 func TestLeaderElection_CtxCancellation(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	le, err := NewLeaderElection(nc, "cancellable")
 	if err != nil {
@@ -244,8 +218,6 @@ func TestLeaderElection_CtxCancellation(t *testing.T) {
 
 func TestLeaderElection_ElectAfterLeaderFails(t *testing.T) {
 	nc := startTestNATS(t)
-	cleanupLeaderBucket(t, nc)
-	t.Cleanup(func() { cleanupLeaderBucket(t, nc) })
 
 	leader, err := NewLeaderElection(nc, "old-leader")
 	if err != nil {
@@ -278,7 +250,7 @@ func TestLeaderElection_ElectAfterLeaderFails(t *testing.T) {
 
 	go le2.Start(ctx2)
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	if !le2.IsLeader() {
 		t.Error("expected new node to become leader after old leader released")

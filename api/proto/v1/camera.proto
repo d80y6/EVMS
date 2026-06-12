@@ -13,6 +13,11 @@ service CameraService {
   rpc UpdateCamera(UpdateCameraRequest) returns (Camera);
   rpc DeleteCamera(DeleteCameraRequest) returns (DeleteCameraResponse);
   rpc StreamStatus(StreamStatusRequest) returns (StreamStatusResponse);
+  rpc ListSites(ListSitesRequest) returns (ListSitesResponse);
+  rpc CreateSite(CreateSiteRequest) returns (Site);
+  rpc UpdateSite(UpdateSiteRequest) returns (Site);
+  rpc DeleteSite(DeleteSiteRequest) returns (DeleteSiteResponse);
+  rpc SmartSearch(SmartSearchRequest) returns (SmartSearchResponse);
 }
 
 message Camera {
@@ -23,8 +28,14 @@ message Camera {
   string connection_url = 5;
   string substream_url = 6;
   string status = 7;
-  string onvif_username = 8;
-  google.protobuf.Timestamp created_at = 9;
+  string ptz_protocol = 8;
+  int32 retention_days = 9;
+  int32 prerecord_seconds = 10;
+  string onvif_data = 11;
+  string onvif_username = 12;
+  string onvif_password = 13;
+  string config = 14;
+  google.protobuf.Timestamp created_at = 15;
 }
 
 message ListCamerasRequest {
@@ -42,14 +53,29 @@ message GetCameraRequest {
 message CreateCameraRequest {
   string site_id = 1;
   string name = 2;
-  string connection_url = 3;
-  string substream_url = 4;
+  string description = 3;
+  string connection_url = 4;
+  string substream_url = 5;
+  string ptz_protocol = 6;
+  int32 retention_days = 7;
+  int32 prerecord_seconds = 8;
+  string onvif_username = 9;
+  string onvif_password = 10;
 }
 
 message UpdateCameraRequest {
   string id = 1;
-  string name = 2;
-  string description = 3;
+  string site_id = 2;
+  string name = 3;
+  string description = 4;
+  string connection_url = 5;
+  string substream_url = 6;
+  string ptz_protocol = 7;
+  int32 retention_days = 8;
+  int32 prerecord_seconds = 9;
+  string onvif_username = 10;
+  string onvif_password = 11;
+  string config = 12;
 }
 
 message DeleteCameraRequest {
@@ -68,4 +94,48 @@ message StreamStatusResponse {
   string status = 1;
   double bitrate = 2;
   double fps = 3;
+}
+
+message ListSitesRequest {}
+message ListSitesResponse { repeated Site sites = 1; }
+message Site {
+  string id = 1;
+  string name = 2;
+  string location = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+message CreateSiteRequest {
+  string name = 1;
+  string location = 2;
+}
+message UpdateSiteRequest {
+  string id = 1;
+  string name = 2;
+  string location = 3;
+}
+message DeleteSiteRequest { string id = 1; }
+message DeleteSiteResponse { bool success = 1; }
+
+message SmartSearchRequest {
+  string camera_id = 1;
+  string object_type = 2;
+  double min_confidence = 3;
+  string start_time = 4;
+  string end_time = 5;
+  int32 limit = 6;
+  string bounding_box = 7;
+}
+message SmartSearchResult {
+  string id = 1;
+  string camera_id = 2;
+  string event_time = 3;
+  string object_type = 4;
+  double confidence = 5;
+  string bounding_box = 6;
+  string track_id = 7;
+  string thumbnail = 8;
+}
+message SmartSearchResponse {
+  repeated SmartSearchResult results = 1;
+  int32 total = 2;
 }

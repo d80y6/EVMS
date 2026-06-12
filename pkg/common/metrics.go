@@ -2,9 +2,11 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,6 +37,7 @@ var (
 	NATSConnectionsOpen   = newGauge("vms_nats_connections_open", "Number of open NATS connections")
 	GRPCRequestDuration   = newHistogramVec("vms_grpc_request_duration_seconds", "gRPC request latency", []string{"method", "status"})
 	HTTPRequestDuration   = newHistogramVec("vms_http_request_duration_seconds", "HTTP request latency", []string{"method", "path", "status"})
+	ErrorCounter          = newCounterVec("vms_http_requests_errors_total", "Total number of HTTP request errors", []string{"method", "path"})
 
 	// Resource metrics
 	DiskUsageBytes        = newGaugeVec("vms_disk_usage_bytes", "Disk usage in bytes", []string{"path", "type"})
@@ -80,7 +83,22 @@ func newHistogramVec(name, help string, labels []string) *prometheus.HistogramVe
 	return h
 }
 
+func ObserveWithTrace(obs prometheus.Observer, val float64, traceID string) {
+	if traceID == "" {
+		obs.Observe(val)
+		return
+	}
+	if eo, ok := obs.(prometheus.ExemplarObserver); ok {
+		eo.ObserveWithExemplar(val, prometheus.Labels{"trace_id": traceID})
+		return
+	}
+	obs.Observe(val)
+}
+
 func StartMetricsServer(addr string) {
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -117,4 +135,38 @@ func StartResourceMonitor(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func normalizePath(path string) string {
+	parts := strings.Split(strings.TrimRight(path, "/"), "/")
+	for i, p := range parts {
+		if len(p) == 36 && strings.Count(p, "-") == 4 {
+			parts[i] = ":id"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func HTTPREDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		duration := time.Since(start).Seconds()
+		path := normalizePath(r.URL.Path)
+		HTTPRequestDuration.WithLabelValues(r.Method, path, fmt.Sprintf("%d", sw.status/100*100)).Observe(duration)
+		if sw.status >= 500 {
+			ErrorCounter.WithLabelValues(r.Method, path).Inc()
+		}
+	})
 }

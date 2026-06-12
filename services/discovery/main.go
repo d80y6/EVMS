@@ -159,7 +159,7 @@ func (s *DiscoveryService) Shutdown(ctx context.Context) error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("discovery")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

@@ -74,7 +74,7 @@ CREATE POLICY tenant_isolation ON bookmarks FOR ALL
 -- legal_holds: tenant via cameras -> sites
 ALTER TABLE legal_holds ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON legal_holds FOR ALL
-    USING (camera_id IN (SELECT id FROM cameras WHERE site_id IN (SELECT id FROM sites WHERE tenant_id = current_setting('app.tenant_id', true)::UUID)));
+    USING (camera_id::text IN (SELECT id::text FROM cameras WHERE site_id IN (SELECT id FROM sites WHERE tenant_id = current_setting('app.tenant_id', true)::UUID)));
 
 -- crowd_heatmaps: tenant via cameras -> sites
 ALTER TABLE crowd_heatmaps ENABLE ROW LEVEL SECURITY;

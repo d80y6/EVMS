@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
@@ -9,8 +10,6 @@ import (
 )
 
 const (
-	leaderBucket  = "recorder_leader"
-	leaderKey     = "leader"
 	leaderTTL     = 10 * time.Second
 	heartbeatFreq = 3 * time.Second
 )
@@ -21,8 +20,8 @@ type LeaderElection struct {
 
 func NewLeaderElection(nc *nats.Conn, id string) (*LeaderElection, error) {
 	impl, err := common.NewLeaderElection(nc, id,
-		common.WithLeaderBucket(leaderBucket),
-		common.WithLeaderKey(leaderKey),
+		common.WithLeaderBucket("recorder_leader"),
+		common.WithLeaderKey("leader"),
 		common.WithLeaderTTL(leaderTTL*2),
 		common.WithLeaderHeartbeat(heartbeatFreq),
 	)
@@ -30,6 +29,10 @@ func NewLeaderElection(nc *nats.Conn, id string) (*LeaderElection, error) {
 		return nil, err
 	}
 	return &LeaderElection{impl: impl}, nil
+}
+
+func leaderBucket(id string) string {
+	return fmt.Sprintf("recorder_leader_%s", id)
 }
 
 func (l *LeaderElection) Start(ctx context.Context) { l.impl.Start(ctx) }

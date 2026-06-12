@@ -196,7 +196,45 @@ func handleListRetentionPolicies(pm *RetentionPolicyManager) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"policies": policies})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"policies":                policies,
+			"global_retention_days":    pm.logger.config.RetentionDays,
+			"global_archive_enabled":  false,
+			"global_archive_after_days": 90,
+		})
+	}
+}
+
+func handleBulkRetentionUpdate(pm *RetentionPolicyManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Policies []struct {
+				CameraID      string `json:"camera_id"`
+				RetentionDays int    `json:"retention_days"`
+			} `json:"policies"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		count := 0
+		for _, p := range req.Policies {
+			if p.CameraID == "" || p.RetentionDays <= 0 {
+				continue
+			}
+			if err := pm.UpsertPolicy(r.Context(), &PerCameraRetentionPolicy{
+				CameraID:      p.CameraID,
+				RetentionDays: p.RetentionDays,
+			}); err != nil {
+				pm.logger.logger.Error("Failed to bulk update retention", "camera_id", p.CameraID, "error", err)
+				continue
+			}
+			count++
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "count": count})
 	}
 }
 
@@ -314,6 +352,25 @@ func handleDeleteRetentionPolicy(pm *RetentionPolicyManager) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	}
+}
+
+func handleUpdateGlobalRetention(pm *RetentionPolicyManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RetentionDays    *int  `json:"retention_days"`
+			ArchiveEnabled   *bool `json:"archive_enabled"`
+			ArchiveAfterDays *int  `json:"archive_after_days"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.RetentionDays != nil && *req.RetentionDays > 0 {
+			pm.logger.config.RetentionDays = *req.RetentionDays
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}
 }
 

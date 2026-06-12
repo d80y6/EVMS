@@ -78,6 +78,16 @@ func (rl *ipRateLimiter) cleanup(interval time.Duration) {
 	}
 }
 
+func getSecret(key string) string {
+	if v := os.Getenv(key + "_FILE"); v != "" {
+		data, err := os.ReadFile(v)
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return os.Getenv(key)
+}
+
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -109,19 +119,19 @@ func DefaultAuthConfig() AuthConfig {
 	return AuthConfig{
 		HTTPAddr:    ":8081",
 		DBURL:       os.Getenv("DB_URL"),
-		JWTSecret:   []byte(os.Getenv("JWT_SECRET")),
-		TokenExpiry: 24 * time.Hour,
+		JWTSecret:   []byte(getSecret("JWT_SECRET")),
+		TokenExpiry: 1 * time.Hour,
 
 		LDAPEnabled:  os.Getenv("LDAP_ENABLED") == "true",
 		LDAPHost:     common.GetEnv("LDAP_HOST", "localhost"),
 		LDAPPort:     389,
 		LDAPBaseDN:   common.GetEnv("LDAP_BASE_DN", "dc=example,dc=com"),
 		LDAPBindDN:   common.GetEnv("LDAP_BIND_DN", ""),
-		LDAPPassword: os.Getenv("LDAP_PASSWORD"),
+		LDAPPassword: getSecret("LDAP_PASSWORD"),
 		LDAPFilter:   common.GetEnv("LDAP_FILTER", "(uid=%s)"),
 
 		PasswordPolicy: policy,
-		SessionLimit:   5,
+		SessionLimit:   20,
 	}
 }
 
@@ -223,7 +233,8 @@ type AuthService struct {
 	db               *sqlx.DB
 	config           AuthConfig
 	healthHandler    *common.HealthHandler
-	loginRateLimiter *ipRateLimiter
+	loginRateLimiter    *ipRateLimiter
+	refreshRateLimiter  *ipRateLimiter
 }
 
 // NewAuthService creates a new auth service instance
@@ -239,8 +250,8 @@ func NewAuthService(ctx context.Context, config AuthConfig, logger *slog.Logger)
 		return nil, fmt.Errorf("migrations failed: %w", err)
 	}
 
-	adminUser := common.GetEnv("ADMIN_USERNAME", "")
-	adminPass := common.GetEnv("ADMIN_PASSWORD", "")
+	adminUser := getSecret("ADMIN_USERNAME")
+	adminPass := getSecret("ADMIN_PASSWORD")
 	if adminUser != "" && adminPass != "" {
 		var count int
 		if err := db.Get(&count, "SELECT COUNT(*) FROM users"); err == nil && count == 0 {
@@ -262,11 +273,15 @@ func NewAuthService(ctx context.Context, config AuthConfig, logger *slog.Logger)
 	rl := newIPRateLimiter(20, 1*time.Minute)
 	go rl.cleanup(5 * time.Minute)
 
+	refreshRL := newIPRateLimiter(20, 1*time.Minute)
+	go refreshRL.cleanup(5 * time.Minute)
+
 	return &AuthService{
-		logger:           logger,
-		db:               db,
-		config:           config,
-		loginRateLimiter: rl,
+		logger:              logger,
+		db:                  db,
+		config:              config,
+		loginRateLimiter:    rl,
+		refreshRateLimiter:  refreshRL,
 	}, nil
 }
 
@@ -309,19 +324,19 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check account lockout
-	locked, remaining, err := s.isAccountLocked(req.Username)
+	locked, _, err := s.isAccountLocked(clientIP + ":" + req.Username)
 	if err != nil {
 		s.logger.Warn("Failed to check account lockout", "error", err)
 	}
 	if locked {
-		jsonError(w, fmt.Sprintf("account locked, try again in %.0f minutes", remaining.Minutes()), http.StatusTooManyRequests)
+		jsonError(w, "account temporarily unavailable", http.StatusTooManyRequests)
 		return
 	}
 
 	token, refreshToken, mfaRequired, err := s.authenticateUser(r.Context(), req.Username, req.Password, r)
 	if err != nil {
 		s.logger.Warn("Authentication failed", "username", req.Username, "error", err)
-		s.recordFailedAttempt(req.Username)
+		s.recordFailedAttempt(clientIP + ":" + req.Username)
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -329,6 +344,15 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	resp := LoginResponse{Token: token}
 	if refreshToken != "" {
 		resp.RefreshToken = refreshToken
+		http.SetCookie(w, &http.Cookie{
+			Name:     "refresh_token",
+			Value:    refreshToken,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   false,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   7 * 24 * 3600,
+		})
 	}
 	if mfaRequired {
 		resp.MFARequired = true
@@ -343,6 +367,11 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // authenticateUser validates credentials and returns a JWT token
 func (s *AuthService) authenticateUser(ctx context.Context, username, password string, r *http.Request) (string, string, bool, error) {
+	ipAddress := r.RemoteAddr
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		ipAddress = strings.Split(forwarded, ",")[0]
+	}
+	clientKey := ipAddress + ":" + username
 	var user *User
 	var err error
 
@@ -377,7 +406,7 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 	var mfaSettings MFASettings
 	err = s.db.Get(&mfaSettings, "SELECT enabled FROM mfa_settings WHERE user_id = $1 AND enabled = true", user.ID)
 	if err == nil && mfaSettings.Enabled {
-		s.clearFailedAttempts(username)
+		s.clearFailedAttempts(clientKey)
 		mfaToken, err := s.generateToken(*user)
 		if err != nil {
 			return "", "", false, fmt.Errorf("failed to generate MFA token: %w", err)
@@ -385,7 +414,7 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 		return mfaToken, "", true, nil
 	}
 
-	s.clearFailedAttempts(username)
+	s.clearFailedAttempts(clientKey)
 
 	// Generate JWT
 	token, err := s.generateToken(*user)
@@ -394,10 +423,6 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 	}
 
 	// Create session with refresh token
-	ipAddress := r.RemoteAddr
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		ipAddress = strings.Split(forwarded, ",")[0]
-	}
 	userAgent := r.Header.Get("User-Agent")
 
 	refreshToken, err := s.createSession(user.ID, ipAddress, userAgent)
@@ -540,6 +565,17 @@ func (s *AuthService) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// IP-based rate limiting
+	clientIP := r.RemoteAddr
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		clientIP = strings.Split(forwarded, ",")[0]
+	}
+	if !s.refreshRateLimiter.Allow(clientIP) {
+		s.logger.Warn("Token refresh rate limit exceeded", "ip", clientIP)
+		jsonError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
 	var req refreshTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -595,6 +631,15 @@ func (s *AuthService) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   7 * 24 * 3600,
+	})
 	json.NewEncoder(w).Encode(refreshTokenResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
@@ -995,7 +1040,7 @@ func (s *AuthService) Start(ctx context.Context) error {
 	mux.HandleFunc("/auth/mfa/enroll", s.authMiddleware(s.handleMFAEnroll))
 	mux.HandleFunc("/auth/mfa/verify", s.authMiddleware(s.handleMFAVerify))
 	mux.HandleFunc("/auth/mfa/status", s.authMiddleware(s.handleMFAStatus))
-	mux.HandleFunc("/auth/mfa/recovery", s.handleMFARecovery)
+	mux.HandleFunc("/auth/mfa/recovery", s.authMiddleware(s.handleMFARecovery))
 
 	// SSO endpoints
 	mux.HandleFunc("/auth/sso/providers", s.handleSSOProviders)
@@ -1078,7 +1123,7 @@ func (s *AuthService) Start(ctx context.Context) error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("auth")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

@@ -1022,7 +1022,7 @@ func (s *EventProcessor) Close() error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("event-proc")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

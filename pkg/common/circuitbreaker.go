@@ -92,6 +92,21 @@ func NATSTLSOptions() []nats.Option {
 	return opts
 }
 
+func NATSAuthOptions() []nats.Option {
+	username := os.Getenv("NATS_USERNAME")
+	password := os.Getenv("NATS_PASSWORD")
+	token := os.Getenv("NATS_TOKEN")
+	var opts []nats.Option
+	if token != "" {
+		opts = append(opts, nats.Token(token))
+		slog.Info("NATS token auth configured")
+	} else if username != "" {
+		opts = append(opts, nats.UserInfo(username, password))
+		slog.Info("NATS user auth configured", "username", username)
+	}
+	return opts
+}
+
 func ConnectNATSWithCircuitBreaker(url string, cb *gobreaker.CircuitBreaker, opts ...nats.Option) (*nats.Conn, error) {
 	defaultOpts := []nats.Option{
 		nats.RetryOnFailedConnect(true),

@@ -1,5 +1,12 @@
-import { useState, useRef, useEffect, type FormEvent } from 'react';
-import { api, Camera } from '../api/client';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Search,
+  RefreshCw,
+  Camera,
+  Target,
+} from 'lucide-react';
+
+import { api } from '../api/client';
 
 interface SearchResult {
   id: string;
@@ -11,344 +18,475 @@ interface SearchResult {
   thumbnail: string;
 }
 
-interface FaceDetectionResult {
-  id: string;
-  camera_id: string;
-  event_time: string;
-  name: string;
-  confidence: number;
-  bounding_box: any;
-  watchlisted: boolean;
-}
-
 export default function SearchPage() {
-  const [cameras, setCameras] = useState<Camera[]>([]);
-  const [cameraId, setCameraId] = useState('');
-  const [objectType, setObjectType] = useState('');
-  const [plateText, setPlateText] = useState('');
-  const [faceName, setFaceName] = useState('');
-  const [faceResults, setFaceResults] = useState<FaceDetectionResult[]>([]);
-  const [minConfidence, setMinConfidence] = useState(0.5);
-  const [startTime, setStartTime] = useState('');
-  const [endTime, setEndTime] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [total, setTotal] = useState(0);
-  const [isSearching, setIsSearching] = useState(false);
-  const [hasSearched, setHasSearched] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [drawing, setDrawing] = useState(false);
-  const [region, setRegion] = useState<{x1: number; y1: number; x2: number; y2: number} | null>(null);
-  const drawingRef = useRef(false);
-  const regionRef = useRef<{x1: number; y1: number; x2: number; y2: number} | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] =
+    useState(false);
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!drawing) return;
-    drawingRef.current = true;
-    const rect = containerRef.current!.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    regionRef.current = { x1: x, y1: y, x2: x, y2: y };
-    setRegion({ x1: x, y1: y, x2: x, y2: y });
+  const [results, setResults] =
+    useState<SearchResult[]>(
+      []
+    );
 
-    const handleMouseMove = (e: globalThis.MouseEvent) => {
-      if (!drawingRef.current || !regionRef.current || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      regionRef.current = { ...regionRef.current, x2: (e.clientX - rect.left) / rect.width, y2: (e.clientY - rect.top) / rect.height };
-      setRegion({ ...regionRef.current });
+  const [selected, setSelected] =
+    useState<SearchResult | null>(
+      null
+    );
+
+  const [objectType, setObjectType] =
+    useState('');
+
+  const [cameraId, setCameraId] =
+    useState('');
+
+  const [minConfidence, setMinConfidence] =
+    useState(0.5);
+
+  const [startTime, setStartTime] =
+    useState('');
+
+  const [endTime, setEndTime] =
+    useState('');
+
+  const [error, setError] =
+    useState<string | null>(null);
+
+  const [searched, setSearched] = useState(false);
+
+  const executeSearch =
+    async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        const response =
+          await api.smartSearch({
+            camera_id:
+              cameraId || undefined,
+            object_type:
+              objectType || undefined,
+            min_confidence:
+              minConfidence,
+            start_time:
+              startTime || undefined,
+            end_time:
+              endTime || undefined,
+          });
+
+        setResults(
+          response.results || []
+        );
+        setSearched(true);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Search failed'
+        );
+      } finally {
+        setLoading(false);
+      }
     };
-
-    const handleMouseUp = () => {
-      drawingRef.current = false;
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  };
 
   useEffect(() => {
-    api.getCameras()
-      .then((data) => setCameras(data.cameras || []))
-      .catch(() => {});
+    void executeSearch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSearch = async (e: FormEvent) => {
-    e.preventDefault();
-    setIsSearching(true);
-    setHasSearched(true);
-    setError(null);
-    try {
-      if (objectType === 'face') {
-        const faceParams: { camera_id?: string; name?: string; start_time?: string; end_time?: string; limit?: number } = { limit: 100 };
-        if (cameraId) faceParams.camera_id = cameraId;
-        if (faceName) faceParams.name = faceName;
-        if (startTime) faceParams.start_time = new Date(startTime).toISOString();
-        if (endTime) faceParams.end_time = new Date(endTime).toISOString();
-        const data = await api.getFacialDetections(faceParams);
-        setFaceResults(data.results || []);
-        setTotal(data.results?.length || 0);
-        setResults([]);
-        return;
-      }
-      const params: { camera_id?: string; object_type?: string; min_confidence?: number; start_time?: string; end_time?: string; limit?: number; bounding_box?: string; metadata?: string } = {};
-      if (cameraId) params.camera_id = cameraId;
-      if (objectType && objectType !== 'face') params.object_type = objectType;
-      if (plateText) params.metadata = JSON.stringify({ plate: plateText });
-      if (minConfidence > 0) params.min_confidence = minConfidence;
-      if (startTime) params.start_time = new Date(startTime).toISOString();
-      if (endTime) params.end_time = new Date(endTime).toISOString();
-      if (region) params.bounding_box = `${region.x1},${region.y1},${region.x2},${region.y2}`;
-      params.limit = 100;
-
-      const data = await api.smartSearch(params);
-      setResults(data.results);
-      setTotal(data.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed');
-      setResults([]);
-      setTotal(0);
-    } finally {
-      setIsSearching(false);
-    }
-  };
+  const stats =
+    useMemo(() => {
+      return {
+        total:
+          results.length,
+        uniqueCameras:
+          new Set(
+            results.map(
+              (
+                r
+              ) =>
+                r.camera_id
+            )
+          ).size,
+        avgConfidence:
+          results.length
+            ? (
+                results.reduce(
+                  (
+                    sum,
+                    r
+                  ) =>
+                    sum +
+                    r.confidence,
+                  0
+                ) /
+                results.length
+              ).toFixed(2)
+            : '0',
+      };
+    }, [results]);
 
   return (
-    <div className="max-w-5xl space-y-6">
-      <h2 className="text-lg font-semibold text-slate-200">Smart Search</h2>
+    <div className="space-y-6">
 
-      <form onSubmit={handleSearch} className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-          <div className="space-y-1.5">
-            <label className="text-xs text-slate-500">Camera</label>
-            <select
-              value={cameraId}
-              onChange={(e) => setCameraId(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="">All Cameras</option>
-              {cameras.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
+      {/* Header */}
 
-          <div className="space-y-1.5">
-            <label className="text-xs text-slate-500">Object Type</label>
-            <select
-              value={objectType}
-              onChange={(e) => setObjectType(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="">All Objects</option>
-              <option value="person">Person</option>
-              <option value="vehicle">Vehicle</option>
-              <option value="car">Car</option>
-              <option value="truck">Truck</option>
-              <option value="bicycle">Bicycle</option>
-              <option value="animal">Animal</option>
-              <option value="license_plate">License Plate</option>
-              <option value="face">Face</option>
-            </select>
-          </div>
+      <div className="flex justify-between items-center">
 
-          {objectType === 'face' ? (
-            <div className="space-y-1.5">
-              <label className="text-xs text-slate-500">Face Name</label>
-              <input
-                type="text"
-                value={faceName}
-                onChange={(e) => setFaceName(e.target.value)}
-                placeholder="e.g. John Doe"
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <label className="text-xs text-slate-500">Plate Text</label>
-              <input
-                type="text"
-                value={plateText}
-                onChange={(e) => setPlateText(e.target.value)}
-                placeholder="e.g. ABC123"
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          )}
-          <div className="space-y-1.5">
-            <label className="text-xs text-slate-500">Start Time</label>
-            <input
-              type="datetime-local"
-              value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
+        <div>
 
-          <div className="space-y-1.5">
-            <label className="text-xs text-slate-500">End Time</label>
-            <input
-              type="datetime-local"
-              value={endTime}
-              onChange={(e) => setEndTime(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
+          <h1 className="text-2xl font-bold text-slate-200">
+            Smart Search
+          </h1>
+
+          <p className="text-slate-500">
+            Search AI detections
+            and forensic events
+          </p>
+
         </div>
 
-        <div className="flex items-center gap-4 mb-4">
-          <label className="flex items-center gap-2 text-xs text-slate-500">
-            <input
-              type="checkbox"
-              checked={drawing}
-              onChange={(e) => {
-                setDrawing(e.target.checked);
-                if (!e.target.checked) setRegion(null);
-              }}
-              className="rounded bg-slate-800 border-slate-700"
-            />
-            Draw motion region
-          </label>
-          {region && (
-            <span className="text-xs text-slate-600">
-              Region: ({region.x1.toFixed(3)}, {region.y1.toFixed(3)}) → ({region.x2.toFixed(3)}, {region.y2.toFixed(3)})
-            </span>
-          )}
+        <button
+          onClick={() =>
+            void executeSearch()
+          }
+          className="px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 flex gap-2 items-center"
+        >
+          <RefreshCw
+            size={16}
+          />
+          Refresh
+        </button>
+
+      </div>
+
+      {error && (
+        <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">
+          {error}
         </div>
+      )}
 
-        {drawing && (
-          <div
-            ref={containerRef}
-            onMouseDown={handleMouseDown}
-            className="relative w-full h-48 bg-slate-800 border-2 border-dashed border-red-500 rounded-lg mb-4 cursor-crosshair overflow-hidden"
-          >
-            <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-600 pointer-events-none">
-              Click and drag to select a region
-            </div>
-            {region && (
-              <div
-                className="absolute border-2 border-red-500 bg-red-500/20"
-                style={{
-                  left: `${Math.min(region.x1, region.x2) * 100}%`,
-                  top: `${Math.min(region.y1, region.y2) * 100}%`,
-                  width: `${Math.abs(region.x2 - region.x1) * 100}%`,
-                  height: `${Math.abs(region.y2 - region.y1) * 100}%`,
-                }}
-              />
-            )}
-          </div>
-        )}
+      {/* Stats */}
 
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3">
-            <label className="text-xs text-slate-500">Min Confidence: {Math.round(minConfidence * 100)}%</label>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={minConfidence}
-              onChange={(e) => setMinConfidence(parseFloat(e.target.value))}
-              className="w-24 h-1.5 bg-slate-700 rounded-full appearance-none cursor-pointer accent-indigo-500"
-            />
-          </div>
+      <div className="grid md:grid-cols-3 gap-4">
+
+        <StatCard
+          icon={Target}
+          title="Results"
+          value={stats.total}
+        />
+
+        <StatCard
+          icon={Camera}
+          title="Cameras"
+          value={
+            stats.uniqueCameras
+          }
+        />
+
+        <StatCard
+          icon={Search}
+          title="Avg Confidence"
+          value={
+            stats.avgConfidence
+          }
+        />
+
+      </div>
+
+      {/* Filters */}
+
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+
+        <div className="grid md:grid-cols-5 gap-4">
+
+          <input
+            placeholder="Object Type"
+            value={
+              objectType
+            }
+            onChange={(e) =>
+              setObjectType(
+                e.target.value
+              )
+            }
+            className="bg-slate-800 border border-slate-700 rounded px-3 py-2"
+          />
+
+          <input
+            placeholder="Camera ID"
+            value={
+              cameraId
+            }
+            onChange={(e) =>
+              setCameraId(
+                e.target.value
+              )
+            }
+            className="bg-slate-800 border border-slate-700 rounded px-3 py-2"
+          />
+
+          <input
+            type="datetime-local"
+            value={
+              startTime
+            }
+            onChange={(e) =>
+              setStartTime(
+                e.target.value
+              )
+            }
+            className="bg-slate-800 border border-slate-700 rounded px-3 py-2"
+          />
+
+          <input
+            type="datetime-local"
+            value={
+              endTime
+            }
+            onChange={(e) =>
+              setEndTime(
+                e.target.value
+              )
+            }
+            className="bg-slate-800 border border-slate-700 rounded px-3 py-2"
+          />
 
           <button
-            type="submit"
-            disabled={isSearching}
-            className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            onClick={() =>
+              void executeSearch()
+            }
+            disabled={
+              loading
+            }
+            className="bg-indigo-600 hover:bg-indigo-500 rounded px-4 py-2 text-white"
           >
-            {isSearching ? 'Searching...' : 'Search'}
+            Search
           </button>
 
-          {hasSearched && (
-            <span className="text-xs text-slate-500">{total} results</span>
-          )}
         </div>
-      </form>
 
-      {error && <div className="bg-red-900/20 border border-red-800 rounded-xl p-4"><p className="text-sm text-red-400">{error}</p></div>}
+        <div className="mt-4">
 
-      {hasSearched && results.length === 0 && faceResults.length === 0 && (
-        <div className="flex items-center justify-center h-32">
-          <p className="text-slate-500 text-sm">No matching events found.</p>
+          <label className="block text-sm text-slate-500 mb-2">
+            Minimum Confidence
+          </label>
+
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={
+              minConfidence
+            }
+            onChange={(e) =>
+              setMinConfidence(
+                Number(
+                  e.target.value
+                )
+              )
+            }
+            className="w-full"
+          />
+
+          <div className="text-sm text-slate-400 mt-1">
+            {minConfidence}
+          </div>
+
         </div>
-      )}
 
-      {objectType === 'face' && faceResults.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-800 text-slate-500 uppercase text-xs tracking-wider">
-                <th className="text-left pb-3 pr-4 pl-4 pt-3">Time</th>
-                <th className="text-left pb-3 pr-4 pt-3">Camera</th>
-                <th className="text-left pb-3 pr-4 pt-3">Name</th>
-                <th className="text-left pb-3 pr-4 pt-3">Confidence</th>
-                <th className="text-left pb-3 pr-4 pt-3">Watchlisted</th>
-              </tr>
-            </thead>
-            <tbody>
-              {faceResults.map((r) => (
-                <tr key={r.id} className="border-b border-slate-800/50 text-slate-300">
-                  <td className="py-3 pr-4 pl-4">{new Date(r.event_time).toLocaleString()}</td>
-                  <td className="py-3 pr-4">{r.camera_id}</td>
-                  <td className="py-3 pr-4">{r.name || 'Unknown'}</td>
-                  <td className="py-3 pr-4">
-                    <span className={`font-medium ${
-                      r.confidence >= 0.8 ? 'text-green-400' : r.confidence >= 0.5 ? 'text-yellow-400' : 'text-slate-400'
-                    }`}>
-                      {(r.confidence * 100).toFixed(0)}%
-                    </span>
-                  </td>
-                  <td className="py-3 pr-4">
-                    {r.watchlisted ? (
-                      <span className="text-xs text-red-400 font-medium">WATCHLISTED</span>
-                    ) : (
-                      <span className="text-xs text-slate-600">—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      </div>
+
+      {/* Loading indicator */}
+      {loading && (
+        <div className="flex items-center justify-center py-8 text-slate-400">
+          <RefreshCw className="animate-spin mr-2" size={16} />
+          Searching...
         </div>
       )}
 
-      {results.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-800 text-slate-500 uppercase text-xs tracking-wider">
-                <th className="text-left pb-3 pr-4 pl-4 pt-3">Time</th>
-                <th className="text-left pb-3 pr-4 pt-3">Camera</th>
-                <th className="text-left pb-3 pr-4 pt-3">Object</th>
-                <th className="text-left pb-3 pr-4 pt-3">Confidence</th>
-                <th className="text-left pb-3 pr-4 pt-3">Track ID</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((r) => (
-                <tr key={r.id} className="border-b border-slate-800/50 text-slate-300">
-                  <td className="py-3 pr-4 pl-4">{new Date(r.event_time).toLocaleString()}</td>
-                  <td className="py-3 pr-4">{r.camera_id}</td>
-                  <td className="py-3 pr-4 capitalize">{r.object_type}</td>
-                  <td className="py-3 pr-4">
-                    <span className={`font-medium ${
-                      r.confidence >= 0.8 ? 'text-green-400' : r.confidence >= 0.5 ? 'text-yellow-400' : 'text-slate-400'
-                    }`}>
-                      {(r.confidence * 100).toFixed(0)}%
-                    </span>
-                  </td>
-                  <td className="py-3 pr-4">
-                    <span className="text-xs text-slate-500 font-mono">{r.track_id?.slice(0, 8) || '-'}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* Empty state */}
+      {!loading && searched && results.length === 0 && (
+        <div className="h-96 flex items-center justify-center text-slate-500">
+          <div className="text-center space-y-2">
+            <Search className="mx-auto" size={32} />
+            <p>No results found. Try adjusting your search filters.</p>
+          </div>
         </div>
       )}
+
+      {/* Results */}
+      {results.length > 0 && <>
+      <div className="grid xl:grid-cols-3 gap-6">
+
+        <div className="xl:col-span-1">
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+
+            <div className="px-4 py-3 border-b border-slate-800">
+              Results
+            </div>
+
+            <div className="max-h-[700px] overflow-auto">
+
+              {results.map(
+                (result) => (
+                  <button
+                    key={
+                      result.id
+                    }
+                    onClick={() =>
+                      setSelected(
+                        result
+                      )
+                    }
+                    className={`w-full text-left p-4 border-b border-slate-800 hover:bg-slate-800/40 ${
+                      selected?.id ===
+                      result.id
+                        ? 'bg-indigo-900/20'
+                        : ''
+                    }`}
+                  >
+
+                    <div className="font-medium text-slate-200">
+                      {
+                        result.object_type
+                      }
+                    </div>
+
+                    <div className="text-xs text-slate-500 mt-1">
+                      {
+                        result.event_time
+                      }
+                    </div>
+
+                  </button>
+                )
+              )}
+
+            </div>
+
+          </div>
+
+        </div>
+
+        <div className="xl:col-span-2">
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+
+            {!selected ? (
+              <div className="h-96 flex items-center justify-center text-slate-500">
+                Select result
+              </div>
+            ) : (
+              <div className="space-y-4">
+
+                {selected.thumbnail && (
+                  <img
+                    src={
+                      selected.thumbnail
+                    }
+                    alt=""
+                    className="w-full max-h-96 object-contain rounded-lg border border-slate-800"
+                  />
+                )}
+
+                <InfoRow
+                  label="Event ID"
+                  value={
+                    selected.id
+                  }
+                />
+
+                <InfoRow
+                  label="Camera"
+                  value={
+                    selected.camera_id
+                  }
+                />
+
+                <InfoRow
+                  label="Object"
+                  value={
+                    selected.object_type
+                  }
+                />
+
+                <InfoRow
+                  label="Confidence"
+                  value={String(
+                    selected.confidence
+                  )}
+                />
+
+                <InfoRow
+                  label="Track"
+                  value={
+                    selected.track_id
+                  }
+                />
+
+                <InfoRow
+                  label="Time"
+                  value={
+                    selected.event_time
+                  }
+                />
+
+              </div>
+            )}
+
+          </div>
+
+        </div>
+
+      </div>
+      </>}
+
+    </div>
+  );
+}
+
+function StatCard({
+  icon: Icon,
+  title,
+  value,
+}: {
+  icon: any;
+  title: string;
+  value: string | number;
+}) {
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+      <div className="flex justify-between">
+        <div>
+          <div className="text-sm text-slate-500">
+            {title}
+          </div>
+          <div className="text-2xl font-bold text-slate-200 mt-2">
+            {value}
+          </div>
+        </div>
+        <Icon className="text-indigo-400" />
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex justify-between border-b border-slate-800 py-2">
+      <span className="text-slate-500">
+        {label}
+      </span>
+      <span className="text-slate-200">
+        {value}
+      </span>
     </div>
   );
 }

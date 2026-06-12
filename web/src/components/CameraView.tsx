@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { api, authUrl, getCSRFToken } from '../api/client';
+import { api, getCSRFToken, getAuthToken } from '../api/client';
 
 interface CameraViewProps {
   cameraId: string;
   streamType?: string;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [];
 const RECONNECT_DELAY = 5000;
 
 export default function CameraView({ cameraId, streamType }: CameraViewProps) {
@@ -26,7 +25,7 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
       .then((data) => {
         const valid = data.thumbnails.filter(t => t.url);
         if (valid.length > 0) {
-          setThumbnailUrl(authUrl(`/api${valid[valid.length - 1].url}`));
+            setThumbnailUrl(`/api${valid[valid.length - 1].url}`);
         }
       })
       .catch(() => {});
@@ -44,12 +43,15 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
     setStatus('connecting');
 
     try {
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection();
       pcRef.current = pc;
 
       pc.ontrack = (event) => {
+        setStreamReady(true);
         if (videoRef.current) {
-          videoRef.current.srcObject = event.streams[0];
+          const stream = event.streams[0] || new MediaStream([event.track]);
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
         }
       };
 
@@ -65,7 +67,7 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
       await pc.setLocalDescription(offer);
 
       const streamParam = streamType && streamType !== 'main' ? `&stream_type=${streamType}` : '';
-      const token = localStorage.getItem('auth_token');
+      const token = getAuthToken();
       const csrfToken = getCSRFToken();
       const response = await fetch(`/api/webrtc/offer?camera_id=${cameraId}${streamParam}`, {
         method: 'POST',
@@ -124,6 +126,7 @@ export default function CameraView({ cameraId, streamType }: CameraViewProps) {
         autoPlay
         playsInline
         muted
+        onLoadedMetadata={() => setStreamReady(true)}
         onCanPlay={() => setStreamReady(true)}
         className={streamReady ? 'block w-full h-full object-cover' : 'invisible w-full h-full object-cover'}
       />

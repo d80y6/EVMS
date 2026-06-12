@@ -193,7 +193,7 @@ func (s *MetadataService) Close() error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("metadata")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

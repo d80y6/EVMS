@@ -17,43 +17,69 @@ export default function SettingsPage() {
   const [tourSteps, setTourSteps] = useState<TourStep[]>([{ camera_id: '', preset_token: '', dwell_seconds: 5 }]);
   const [floorPlanImage, setFloorPlanImage] = useState<string | null>(null);
   const [floorPlanSiteId, setFloorPlanSiteId] = useState<string>('default');
+  const [pageLoading, setPageLoading] = useState(true);
+  const [pageError, setPageError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
+
+  const handleChangePassword = async () => {
+    setChangingPassword(true);
+    setPasswordMessage('');
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setPasswordMessage('Password updated successfully');
+      setPasswordSuccess(true);
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (err) {
+      setPasswordMessage(err instanceof Error ? err.message : 'Failed to change password');
+      setPasswordSuccess(false);
+    } finally {
+      setChangingPassword(false);
+    }
+  };
 
   useEffect(() => {
-    api.getCameras()
-      .then((data) => {
+    setPageLoading(true);
+    setPageError(null);
+    Promise.all([
+      api.getCameras().then((data) => {
         if (data.cameras && data.cameras.length > 0) {
           setCameras(data.cameras);
           const ret: Record<string, number> = {};
           data.cameras.forEach((c) => { ret[c.id] = c.retention_days; });
           setRetentions(ret);
         }
-      })
-      .catch(() => {});
-    api.listTours()
-      .then((data) => setTours(data.tours || []))
-      .catch(() => {});
+      }).catch((err) => {
+        setPageError(err instanceof Error ? err.message : 'Failed to load cameras');
+      }),
+      api.listTours().then((data) => setTours(data.tours || [])).catch(() => {}),
+    ]).finally(() => setPageLoading(false));
   }, []);
 
   const handleStartTour = async (id: string) => {
     try {
       await api.startTour(id);
       setTours((prev) => prev.map((t) => t.id === id ? { ...t, enabled: true } : t));
-    } catch {}
+    } catch { /* Non-critical */ }
   };
 
   const handleStopTour = async (id: string) => {
     try {
       await api.stopTour(id);
       setTours((prev) => prev.map((t) => t.id === id ? { ...t, enabled: false } : t));
-    } catch {}
+    } catch { /* Non-critical */ }
   };
 
   const handleDeleteTour = async (id: string) => {
     try {
       await api.deleteTour(id);
       setTours((prev) => prev.filter((t) => t.id !== id));
-    } catch {}
+    } catch { /* Non-critical */ }
   };
 
   const handleCreateTour = async () => {
@@ -64,7 +90,7 @@ export default function SettingsPage() {
       setTourName('');
       setTourInterval(10);
       setTourSteps([{ camera_id: '', preset_token: '', dwell_seconds: 5 }]);
-    } catch {}
+    } catch { /* Non-critical */ }
   };
 
   const addStep = () => {
@@ -93,6 +119,14 @@ export default function SettingsPage() {
     }
   };
 
+  if (pageLoading) {
+    return <div className="p-6 text-slate-400">Loading settings...</div>;
+  }
+
+  if (pageError) {
+    return <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">{pageError}</div>;
+  }
+
   return (
     <div className="max-w-2xl space-y-8">
       <h2 className="text-lg font-semibold text-slate-200">Settings</h2>
@@ -102,6 +136,28 @@ export default function SettingsPage() {
         <div className="text-sm text-slate-300 space-y-1">
           <p><span className="text-slate-500">Username:</span> {username}</p>
           <p><span className="text-slate-500">Role:</span> <span className="uppercase tracking-wider text-xs">{role}</span></p>
+        </div>
+        <div className="border-t border-slate-800 pt-4 space-y-3">
+          <h4 className="text-xs font-medium text-slate-500">Change Password</h4>
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-[10px] text-slate-600 block mb-1">Current Password</label>
+              <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-600 block mb-1">New Password</label>
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-300" />
+            </div>
+            <div className="flex items-end">
+              <button onClick={handleChangePassword} disabled={!currentPassword || !newPassword || changingPassword}
+                className="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white rounded transition-colors">
+                {changingPassword ? 'Changing...' : 'Update Password'}
+              </button>
+            </div>
+          </div>
+          {passwordMessage && <p className={`text-xs ${passwordSuccess ? 'text-green-400' : 'text-red-400'}`}>{passwordMessage}</p>}
         </div>
       </div>
 
@@ -372,7 +428,7 @@ export default function SettingsPage() {
             imageUrl={floorPlanImage}
             cameras={cameras.filter(c => c.site_id === floorPlanSiteId)}
             siteId={floorPlanSiteId}
-            onCameraClick={(_id) => {}}
+            onCameraClick={() => {}}
           />
         )}
 

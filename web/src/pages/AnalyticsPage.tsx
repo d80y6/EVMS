@@ -26,12 +26,8 @@ export default function AnalyticsPage() {
   }, []);
 
   const handleFaceSearch = async () => {
-    try {
-      const data = await api.getFacialDetections({ name: faceName || undefined, limit: 50 });
-      setFaceResults(data.results || []);
-    } catch {
-      setError('Failed to search faces');
-    }
+    setError('Facial detection API is not currently available');
+    setFaceResults([]);
   };
 
   useEffect(() => {

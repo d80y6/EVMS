@@ -43,6 +43,7 @@ type ListCamerasResponse struct {
 type CreateCameraRequest struct {
 	SiteId           string
 	Name             string
+	Description      string
 	ConnectionUrl    string
 	SubstreamUrl     string
 	PtzProtocol      string
@@ -58,6 +59,7 @@ type GetCameraRequest struct {
 
 type UpdateCameraRequest struct {
 	Id               string
+	SiteId           string
 	Name             string
 	Description      string
 	ConnectionUrl    string

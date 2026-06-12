@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -26,6 +28,50 @@ const (
 	RoleKey   contextKey = "role"
 	UserIDKey contextKey = "user_id"
 )
+
+var (
+	jwtKey    []byte
+	jwtKeys   map[string][]byte
+	activeKid string
+	keyMu     sync.RWMutex
+)
+
+func loadJWTKeys() {
+	keyMu.Lock()
+	defer keyMu.Unlock()
+
+	jwtKey = []byte(os.Getenv("JWT_SECRET"))
+	jwtKeys = nil
+	activeKid = ""
+
+	keysEnv := os.Getenv("JWT_SECRET_KEYS")
+	if keysEnv == "" {
+		return
+	}
+
+	jwtKeys = make(map[string][]byte)
+	for _, pair := range strings.Split(keysEnv, ",") {
+		pair = strings.TrimSpace(pair)
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		kid := strings.TrimSpace(parts[0])
+		keyData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
+		if err != nil {
+			continue
+		}
+		jwtKeys[kid] = keyData
+	}
+
+	activeKid = os.Getenv("JWT_ACTIVE_KID")
+	if activeKid == "" {
+		for kid := range jwtKeys {
+			activeKid = kid
+			break
+		}
+	}
+}
 
 func TenantFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(TenantKey).(string); ok {
@@ -76,6 +122,7 @@ func NewJSONCodec() *JSONCodec { return &JSONCodec{} }
 
 func init() {
 	encoding.RegisterCodec(NewJSONCodec())
+	loadJWTKeys()
 }
 
 func GetEnv(key, defaultValue string) string {
@@ -86,13 +133,38 @@ func GetEnv(key, defaultValue string) string {
 }
 
 func CheckJWTSecret() {
-	if os.Getenv("JWT_SECRET") == "" {
-		panic("JWT_SECRET environment variable is not set")
+	keyMu.RLock()
+	hasKey := len(jwtKey) > 0 || len(jwtKeys) > 0
+	keyMu.RUnlock()
+	if !hasKey {
+		panic("JWT_SECRET or JWT_SECRET_KEYS environment variable is not set")
 	}
 }
 
 func getJWTKey() []byte {
-	return []byte(os.Getenv("JWT_SECRET"))
+	keyMu.RLock()
+	defer keyMu.RUnlock()
+	return jwtKey
+}
+
+func ReloadJWTKey() {
+	loadJWTKeys()
+}
+
+func RotateJWTKey(newKey string) error {
+	if newKey == "" {
+		return errors.New("JWT key cannot be empty")
+	}
+	keyMu.Lock()
+	defer keyMu.Unlock()
+
+	kid := uuid.New().String()[:8]
+	if jwtKeys == nil {
+		jwtKeys = make(map[string][]byte)
+	}
+	jwtKeys[kid] = []byte(newKey)
+	activeKid = kid
+	return nil
 }
 
 type Claims struct {
@@ -102,18 +174,69 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-func ValidateJWT(tokenString string) (*Claims, error) {
-	key := getJWTKey()
-	if len(key) == 0 {
-		return nil, errors.New("JWT_SECRET not set")
+func SignJWT(claims *Claims) (string, error) {
+	keyMu.RLock()
+	if jwtKeys != nil {
+		kid := activeKid
+		key, ok := jwtKeys[kid]
+		keyMu.RUnlock()
+		if !ok || len(key) == 0 {
+			return "", errors.New("no active JWT signing key")
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		token.Header["kid"] = kid
+		return token.SignedString(key)
 	}
 
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+	singleKey := jwtKey
+	keyMu.RUnlock()
+	if len(singleKey) == 0 {
+		return "", errors.New("JWT_SECRET not set")
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(singleKey)
+}
+
+func ValidateJWT(tokenString string) (*Claims, error) {
+	keyMu.RLock()
+	hasMultiKeys := jwtKeys != nil
+
+	var keyFunc jwt.Keyfunc
+	if hasMultiKeys {
+		keysCopy := make(map[string][]byte, len(jwtKeys))
+		for k, v := range jwtKeys {
+			keysCopy[k] = v
 		}
-		return getJWTKey(), nil
-	})
+		keyMu.RUnlock()
+		keyFunc = func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			kid, ok := token.Header["kid"].(string)
+			if !ok || kid == "" {
+				return nil, errors.New("token missing kid header")
+			}
+			key, ok := keysCopy[kid]
+			if !ok {
+				return nil, fmt.Errorf("unknown kid: %s", kid)
+			}
+			return key, nil
+		}
+	} else {
+		singleKey := jwtKey
+		keyMu.RUnlock()
+		if len(singleKey) == 0 {
+			return nil, errors.New("JWT_SECRET not set")
+		}
+		keyFunc = func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return singleKey, nil
+		}
+	}
+
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, keyFunc)
 
 	if err != nil {
 		return nil, err
@@ -129,12 +252,6 @@ func ValidateJWT(tokenString string) (*Claims, error) {
 func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			authHeader = r.URL.Query().Get("token")
-			if authHeader != "" {
-				r.URL.RawQuery = ""
-			}
-		}
 
 		if authHeader == "" {
 			http.Error(w, "Authorization header required", http.StatusUnauthorized)

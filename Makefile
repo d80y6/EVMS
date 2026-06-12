@@ -26,46 +26,50 @@ build: \
 	build-api-gateway \
 	build-export \
 	build-audit \
-	build-blur
+	build-blur \
+	build-federation
 
 build-auth:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/auth-service ./services/auth/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/auth-service ./services/auth/
 
 build-camera-mgmt:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/camera-mgmt ./services/camera-mgmt/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/camera-mgmt ./services/camera-mgmt/
 
 build-recorder:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/recorder-service ./services/recorder/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/recorder-service ./services/recorder/
 
 build-playback:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/playback-service ./services/playback/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/playback-service ./services/playback/
 
 build-webrtc:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/webrtc-service ./services/webrtc/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/webrtc-service ./services/webrtc/
 
 build-camera-control:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/camera-control ./services/camera-control/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/camera-control ./services/camera-control/
 
 build-thumbnails:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/thumbnails ./services/thumbnails/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/thumbnails ./services/thumbnails/
 
 build-discovery:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/discovery ./services/discovery/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/discovery ./services/discovery/
 
 build-event-proc:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/event-proc ./services/event-proc/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/event-proc ./services/event-proc/
 
 build-api-gateway:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/api-gateway ./services/api-gateway/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/api-gateway ./services/api-gateway/
 
 build-export:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/export-service ./services/export/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/export-service ./services/export/
 
 build-audit:
-	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/audit-service ./services/audit/main.go
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/audit-service ./services/audit/
 
 build-blur:
 	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/blur-worker ./services/ai-worker/blur.go
+
+build-federation:
+	$(GO) build $(LDFLAGS) -o $(BINARY_DIR)/federation ./services/federation/main.go
 
 clean:
 	rm -rf $(BINARY_DIR)/
@@ -98,10 +102,10 @@ fips-test: fips-build
 
 # Development helpers
 dev-auth:
-	$(GO) run ./services/auth/main.go
+	$(GO) run ./services/auth/
 
 dev-recorder:
-	$(GO) run ./services/recorder/main.go
+	$(GO) run ./services/recorder/
 
 dev-gateway:
 	$(GO) run ./services/api-gateway/main.go

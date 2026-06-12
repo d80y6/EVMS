@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -45,13 +46,15 @@ func InitTelemetry(serviceName string) error {
 		return err
 	}
 
+	sampler := samplerFromEnv()
+
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter,
 			sdktrace.WithBatchTimeout(5*time.Second),
 			sdktrace.WithMaxExportBatchSize(512),
 		),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(sampler),
 	)
 
 	otel.SetTracerProvider(tp)
@@ -78,4 +81,14 @@ func ShutdownTelemetry() {
 
 func Tracer(name string) trace.Tracer {
 	return otel.Tracer(name)
+}
+
+func samplerFromEnv() sdktrace.Sampler {
+	ratio := 0.1
+	if arg := os.Getenv("OTEL_TRACES_SAMPLER_ARG"); arg != "" {
+		if f, err := strconv.ParseFloat(arg, 64); err == nil {
+			ratio = f
+		}
+	}
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 }

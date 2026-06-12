@@ -20,10 +20,6 @@ export default function ConfigPage() {
   const [showExport, setShowExport] = useState(false);
   const [exportData, setExportData] = useState('');
 
-  if (role !== 'admin') {
-    return <div className="flex items-center justify-center h-64"><p className="text-red-400">Access denied. Admin role required.</p></div>;
-  }
-
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -39,6 +35,10 @@ export default function ConfigPage() {
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [category]);
+
+  if (role !== 'admin') {
+    return <div className="flex items-center justify-center h-64"><p className="text-red-400">Access denied. Admin role required.</p></div>;
+  }
 
   const handleSave = async () => {
     setSaving(true);

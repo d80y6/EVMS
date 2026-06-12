@@ -30,10 +30,6 @@ export default function SsoPage() {
     enabled: true,
   });
 
-  if (role !== 'admin') {
-    return <div className="flex items-center justify-center h-64"><p className="text-red-400">Access denied. Admin role required.</p></div>;
-  }
-
   const fetchProviders = () => {
     setLoading(true);
     api.getSSOProviders()
@@ -43,6 +39,10 @@ export default function SsoPage() {
   };
 
   useEffect(() => { fetchProviders(); }, []);
+
+  if (role !== 'admin') {
+    return <div className="flex items-center justify-center h-64"><p className="text-red-400">Access denied. Admin role required.</p></div>;
+  }
 
   const resetForm = () => {
     setForm({ name: '', provider_type: 'oidc', client_id: '', client_secret: '', issuer_url: '', redirect_uri: '', enabled: true });

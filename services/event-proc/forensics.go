@@ -25,6 +25,7 @@ type ForensicsSearchParams struct {
 	QueryText     string   `json:"query_text"`
 	Limit         int      `json:"limit"`
 	Offset        int      `json:"offset"`
+	TenantID      string   `json:"-"`
 }
 
 type ForensicsResult struct {
@@ -105,6 +106,12 @@ func (s *ForensicsService) SearchByAttributes(params ForensicsSearchParams) ([]F
 		argIdx++
 	}
 
+	if params.TenantID != "" {
+		where += fmt.Sprintf(" AND camera_id IN (SELECT c.id FROM cameras c JOIN sites s ON c.site_id = s.id WHERE s.tenant_id = $%d)", argIdx)
+		args = append(args, params.TenantID)
+		argIdx++
+	}
+
 	limit := 100
 	offset := 0
 	if params.Limit > 0 && params.Limit <= 1000 {
@@ -170,7 +177,7 @@ func (s *ForensicsService) SearchByAttributes(params ForensicsSearchParams) ([]F
 	return results, total, nil
 }
 
-func (s *ForensicsService) SearchByVector(queryEmbedding []float32, limit int) ([]ForensicsResult, error) {
+func (s *ForensicsService) SearchByVector(queryEmbedding []float32, limit int, tenantID string) ([]ForensicsResult, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
@@ -180,16 +187,20 @@ func (s *ForensicsService) SearchByVector(queryEmbedding []float32, limit int) (
 		return nil, fmt.Errorf("marshal embedding: %w", err)
 	}
 
-	query := fmt.Sprintf(
-		`SELECT id, camera_id, event_time, COALESCE(track_id,'') as track_id,
+	query := `SELECT id, camera_id, event_time, COALESCE(track_id,'') as track_id,
 		        COALESCE(object_type,'') as object_type, confidence, bounding_box,
 		        1 - (embedding <=> $1::vector) as similarity
 		 FROM ai_events
-		 WHERE embedding IS NOT NULL
-		 ORDER BY embedding <=> $1::vector
-		 LIMIT $2`)
+		 WHERE embedding IS NOT NULL`
+	args := []interface{}{string(embJSON)}
+	if tenantID != "" {
+		query += fmt.Sprintf(" AND camera_id IN (SELECT c.id FROM cameras c JOIN sites s ON c.site_id = s.id WHERE s.tenant_id = $2)")
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY embedding <=> $1::vector LIMIT $3`
+	args = append(args, limit)
 
-	rows, err := s.db.Queryx(query, string(embJSON), limit)
+	rows, err := s.db.Queryx(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("vector search query: %w", err)
 	}
@@ -232,13 +243,21 @@ func (s *ForensicsService) SearchByVector(queryEmbedding []float32, limit int) (
 	return results, nil
 }
 
-func (s *ForensicsService) GetTrackPath(trackID string) ([]TrackPoint, error) {
-	query := `SELECT camera_id, event_time, bounding_box
-		FROM ai_events
-		WHERE track_id = $1
-		ORDER BY event_time ASC`
+func (s *ForensicsService) GetTrackPath(trackID string, tenantID string) ([]TrackPoint, error) {
+	query := `SELECT e.camera_id, e.event_time, e.bounding_box
+		FROM ai_events e`
+	args := []interface{}{trackID}
+	if tenantID != "" {
+		query += ` JOIN cameras c ON e.camera_id = c.id
+		JOIN sites s ON c.site_id = s.id
+		WHERE e.track_id = $1 AND s.tenant_id = $2`
+		args = append(args, tenantID)
+	} else {
+		query += ` WHERE e.track_id = $1`
+	}
+	query += ` ORDER BY e.event_time ASC`
 
-	rows, err := s.db.Queryx(query, trackID)
+	rows, err := s.db.Queryx(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("track path query: %w", err)
 	}
@@ -312,6 +331,9 @@ func (s *ForensicsService) HandleSearch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	tenantID, _ := r.Context().Value("tenant_id").(string)
+	params.TenantID = tenantID
+
 	results, total, err := s.SearchByAttributes(params)
 	if err != nil {
 		s.logger.Error("forensics search failed", "error", err)
@@ -350,7 +372,8 @@ func (s *ForensicsService) HandleVectorSearch(w http.ResponseWriter, r *http.Req
 		emb32[i] = float32(v)
 	}
 
-	results, err := s.SearchByVector(emb32, req.Limit)
+	tenantID, _ := r.Context().Value("tenant_id").(string)
+	results, err := s.SearchByVector(emb32, req.Limit, tenantID)
 	if err != nil {
 		s.logger.Error("vector search failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "vector search failed")
@@ -375,7 +398,8 @@ func (s *ForensicsService) HandleTrackPath(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	path, err := s.GetTrackPath(trackID)
+	tenantID, _ := r.Context().Value("tenant_id").(string)
+	path, err := s.GetTrackPath(trackID, tenantID)
 	if err != nil {
 		s.logger.Error("track path failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "track path query failed")
@@ -402,6 +426,9 @@ func (s *ForensicsService) HandleExport(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+
+	tenantID, _ := r.Context().Value("tenant_id").(string)
+	req.Params.TenantID = tenantID
 
 	results, _, err := s.SearchByAttributes(req.Params)
 	if err != nil {

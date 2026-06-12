@@ -26,7 +26,7 @@ export default function MapPage() {
       <div className="h-[calc(100vh-8rem)]">
         <MapView
           positions={positions}
-          onCameraClick={(id) => navigate(`/dashboard?camera=${id}`)}
+          onCameraClick={(id) => navigate(`/cameras?id=${id}`)}
           onPositionChange={canEdit ? savePosition : () => {}}
         />
       </div>

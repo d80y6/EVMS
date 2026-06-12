@@ -317,7 +317,7 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("audit")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

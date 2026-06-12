@@ -23,7 +23,7 @@ export function useMapCameras(siteId?: string) {
           if (parsed.map_position) {
             pos = parsed.map_position;
           }
-        } catch {}
+        } catch { /* ignore parse errors */ }
       }
       if (pos) {
         withPos.push({ cameraId: cam.id, name: cam.name, status: cam.status, lat: pos.lat, lng: pos.lng });
@@ -47,7 +47,7 @@ export function useMapCameras(siteId?: string) {
     const cam = await api.getCamera(cameraId);
     let config: Record<string, unknown> = {};
     if (cam.config) {
-      try { config = JSON.parse(cam.config); } catch {}
+      try { config = JSON.parse(cam.config); } catch { /* ignore parse errors */ }
     }
     config.map_position = { lat, lng };
     await api.updateCameraConfig(cameraId, config);

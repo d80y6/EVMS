@@ -1,81 +1,41 @@
-{{- if .Values.certManager.enabled }}
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: evms-internal-ca
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "evms.labels" . | nindent 4 }}
-spec:
-  selfSigned: {}
----
+{{- if .Values.internalCerts.enabled }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: evms-ca-certificate
+  name: nats-tls
   namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "evms.labels" . | nindent 4 }}
 spec:
-  isCA: true
-  commonName: evms-internal-ca
-  secretName: evms-internal-ca-tls
-  privateKey:
-    algorithm: ECDSA
-    size: 256
+  secretName: nats-tls
+  duration: 8760h
+  renewBefore: 720h
   issuerRef:
-    name: evms-internal-ca
+    name: internal-ca
     kind: Issuer
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: evms-issuer
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "evms.labels" . | nindent 4 }}
-spec:
-  ca:
-    secretName: evms-internal-ca-tls
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: nats-server-tls
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "evms.labels" . | nindent 4 }}
-spec:
-  secretName: nats-server-tls
-  commonName: nats
+  commonName: nats.{{ .Values.global.namespace }}.svc.cluster.local
   dnsNames:
-  - nats
-  - "*.nats.{{ .Values.global.namespace }}.svc"
-  - "nats.{{ .Values.global.namespace }}.svc"
+  - nats.{{ .Values.global.namespace }}.svc.cluster.local
+  - "*.nats.{{ .Values.global.namespace }}.svc.cluster.local"
   usages:
   - server auth
   - client auth
-  issuerRef:
-    name: evms-issuer
-    kind: Issuer
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: camera-mgmt-tls
+  name: grpc-tls
   namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "evms.labels" . | nindent 4 }}
 spec:
-  secretName: camera-mgmt-tls
-  commonName: camera-mgmt
+  secretName: grpc-tls
+  duration: 8760h
+  renewBefore: 720h
+  issuerRef:
+    name: internal-ca
+    kind: Issuer
+  commonName: "*.svc.cluster.local"
   dnsNames:
-  - camera-mgmt
-  - "camera-mgmt.{{ .Values.global.namespace }}.svc"
+  - "*.svc.cluster.local"
   usages:
   - server auth
   - client auth
-  issuerRef:
-    name: evms-issuer
-    kind: Issuer
+---
 {{- end }}

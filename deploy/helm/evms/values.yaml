@@ -313,6 +313,42 @@ services:
         cpu: 2000m
         memory: 512Mi
 
+  federation:
+    enabled: false
+    replicas: 1
+    image: damvms/federation
+    port: 8099
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+  reporting:
+    enabled: false
+    replicas: 1
+    image: damvms/reporting
+    port: 8098
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+  modelRegistry:
+    enabled: false
+    replicas: 1
+    image: damvms/model-registry
+    port: 8098
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
 ingress:
   enabled: false
   domain: ""
@@ -325,6 +361,10 @@ ingress:
 
 certManager:
   enabled: false
+  issuer:
+    enabled: false
+    email: admin@example.com
+    ingressClass: nginx
   clusterIssuer:
     name: letsencrypt-prod
     server: https://acme-v02.api.letsencrypt.org/directory
@@ -333,6 +373,15 @@ certManager:
       name: letsencrypt-prod-account-key
     solvers:
     - http01:
+
+internalCerts:
+  enabled: false
+vault:
+  enabled: false
+
+jaeger:
+  enabled: false
+
 otelCollector:
   enabled: true
   image: otel/opentelemetry-collector-contrib:latest
@@ -343,12 +392,9 @@ otelCollector:
     requests:
       cpu: 100m
       memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
-ingress:
-          class: nginx
+      limits:
+        cpu: 500m
+        memory: 512Mi
 
 backup:
   enabled: false
@@ -364,6 +410,11 @@ backup:
     file: ""
   verify:
     schedule: "0 3 * * 0"
+
+serviceMonitor:
+  enabled: false
+prometheusRule:
+  enabled: false
 
 podDisruptionBudgets:
   enabled: true

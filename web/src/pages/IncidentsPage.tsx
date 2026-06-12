@@ -31,6 +31,7 @@ export default function IncidentsPage() {
       .finally(() => setLoading(false));
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetchIncidents(); }, [filterStatus, filterSeverity]);
 
   const handleSelect = async (id: string) => {
