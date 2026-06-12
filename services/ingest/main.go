@@ -64,16 +64,17 @@ type DBCamera struct {
 	Status         string  `db:"status"`
 	OnvifUsername  *string `db:"onvif_username"`
 	OnvifPassword  *string `db:"onvif_password"`
+	Config         string  `db:"config"`
 }
 
-func negotiateRTSPURL(ctx context.Context, deviceURL string, username, password string) (string, error) {
+func negotiateRTSPURL(ctx context.Context, deviceURL string, username, password string, onvifPort ...int) (string, error) {
 	if username == "" || password == "" {
 		return deviceURL, nil
 	}
 
 	creds := &onvif.Credentials{Username: username, Password: password}
 	client := onvif.NewSOAPClient(15*time.Second, creds)
-	mediaURL := onvif.BuildMediaURL(deviceURL)
+	mediaURL := onvif.BuildMediaURL(deviceURL, onvifPort...)
 
 	profiles, err := onvif.GetProfiles(ctx, client, mediaURL)
 	if err != nil {
@@ -252,7 +253,7 @@ func (p *StreamProcessor) StartSupervisor(ctx context.Context) {
 	p.health.mu.Lock()
 	p.health.Running = true
 	p.health.Uptime = time.Now()
-	p.mu.Unlock()
+	p.health.mu.Unlock()
 
 	for {
 		start := time.Now()
@@ -715,7 +716,7 @@ func (s *IngestService) handleCameraHealth(w http.ResponseWriter, r *http.Reques
 func (s *IngestService) discoverCameras(ctx context.Context) {
 	var cameras []DBCamera
 	if err := s.db.SelectContext(ctx, &cameras,
-		"SELECT id, name, connection_url, status, onvif_username, onvif_password FROM cameras WHERE connection_url IS NOT NULL AND connection_URL != ''",
+		"SELECT id, name, connection_url, status, onvif_username, onvif_password, config FROM cameras WHERE connection_url IS NOT NULL AND connection_URL != ''",
 	); err != nil {
 		s.logger.Error("Failed to query cameras", "error", err)
 		return
@@ -744,11 +745,28 @@ func (s *IngestService) discoverCameras(ctx context.Context) {
 			password = *cam.OnvifPassword
 		}
 
-		rtspURL, err := negotiateRTSPURL(ctx, cam.ConnectionURL, username, password)
-		if err != nil {
-			s.logger.Warn("ONVIF negotiation failed, using direct RTSP URL",
-				"camera_id", cam.ID,
-				"error", err)
+		onvifPort := 0
+		skipONVIF := false
+		if cam.Config != "" {
+			var cfg struct {
+				OnvifPort int  `json:"onvif_port"`
+				IsOnvif   bool `json:"is_onvif"`
+			}
+			if err := json.Unmarshal([]byte(cam.Config), &cfg); err == nil {
+				onvifPort = cfg.OnvifPort
+				skipONVIF = !cfg.IsOnvif
+			}
+		}
+
+		rtspURL := cam.ConnectionURL
+		if !skipONVIF && onvifPort > 0 && username != "" && password != "" {
+			if negotiated, err := negotiateRTSPURL(ctx, cam.ConnectionURL, username, password, onvifPort); err == nil {
+				rtspURL = negotiated
+			} else {
+				s.logger.Warn("ONVIF negotiation failed, using direct RTSP URL",
+					"camera_id", cam.ID,
+					"error", err)
+			}
 		}
 
 		proc := NewStreamProcessor(CameraStreamConfig{
@@ -830,7 +848,7 @@ func (s *IngestService) Start(ctx context.Context) error {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("ingest")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

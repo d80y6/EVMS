@@ -1,6 +1,15 @@
 const API_BASE = '/api';
 
 let csrfToken: string | null = null;
+let authToken: string | null = null;
+
+export function setAuthToken(token: string | null) {
+  authToken = token;
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
 
 export function setCSRFToken(token: string) {
   csrfToken = token;
@@ -24,15 +33,8 @@ export async function fetchCSRFToken(): Promise<string> {
   return '';
 }
 
-export function authUrl(path: string): string {
-  const token = localStorage.getItem('auth_token');
-  if (!token) return path;
-  const sep = path.includes('?') ? '&' : '?';
-  return `${path}${sep}token=${encodeURIComponent(token)}`;
-}
-
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('auth_token');
+  const token = authToken;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
@@ -48,8 +50,33 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
 
-  if (res.status === 401) {
-    localStorage.removeItem('auth_token');
+  if (res.status === 401 && authToken) {
+    authToken = null;
+    try {
+      const refreshRes = await fetch(`${API_BASE}/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (refreshRes.ok) {
+        const data = await refreshRes.json();
+        if (data.token) {
+          authToken = data.token;
+          headers['Authorization'] = `Bearer ${data.token}`;
+          await fetchCSRFToken();
+          headers['X-CSRF-Token'] = csrfToken || '';
+          const retryRes = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
+          if (!retryRes.ok) {
+            const retryBody = await retryRes.text();
+            throw new Error(retryBody || `Request failed: ${retryRes.status}`);
+          }
+          return retryRes.json();
+        }
+      }
+    } catch {
+      // Refresh failed, redirect to login
+    }
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }
@@ -276,6 +303,24 @@ export interface DiscoveryImportResponse {
   failed: number;
 }
 
+export interface ForensicsResult {
+  event_id: string;
+  camera_id: string;
+  timestamp: string;
+  track_id: string;
+  class: string;
+  confidence: number;
+  bbox: number[];
+  thumbnail_url?: string;
+  metadata?: string;
+}
+
+export interface TrackPoint {
+  camera_id: string;
+  timestamp: string;
+  bbox: number[];
+}
+
 export interface Bookmark {
   id: string;
   camera_id: string;
@@ -314,12 +359,11 @@ export interface APIKey {
 
 export const apiClient = {
   fetch: (path: string, options?: RequestInit) => {
-    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = {
       ...(options?.headers as Record<string, string>),
     };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
     }
     return fetch(path, { ...options, headers });
   },
@@ -358,7 +402,7 @@ export const api = {
     request<{ events: AIEvent[] }>('/events'),
 
   getPlaybackUrl: (path: string) =>
-    authUrl(`${API_BASE}/playback/${path}`),
+    `${API_BASE}/playback/${path}`,
 
   ptzMove: (cameraId: string, direction: string, speed: number) =>
     request<{ status: string }>(`/cameras/${cameraId}/ptz/move`, {
@@ -392,7 +436,7 @@ export const api = {
   },
 
   getThumbnailUrl: (path: string) =>
-    authUrl(`${API_BASE}${path}`),
+    `${API_BASE}${path}`,
 
   getUsers: () =>
     request<{ users: { id: string; username: string; role: string; active: boolean; created_at: string }[] }>('/admin/users'),
@@ -605,7 +649,7 @@ export const api = {
     }),
 
   getFacialDetections: (params: {camera_id?: string; name?: string; start_time?: string; end_time?: string; limit?: number}) => {
-    const qs = Object.entries(params).filter(([_, v]) => v !== undefined && v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&');
+    const qs = Object.entries(params).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&');
     return request<any>(`/analytics/facial?${qs}`);
   },
 
@@ -626,13 +670,13 @@ export const api = {
     }),
 
   startTour: (id: string) =>
-    request<{ status: string }>(`/tours/${id}/start`, { method: 'POST' }),
+    request<{ status: string }>(`/tours/start?id=${encodeURIComponent(id)}`, { method: 'POST' }),
 
   stopTour: (id: string) =>
-    request<{ status: string }>(`/tours/${id}/stop`, { method: 'POST' }),
+    request<{ status: string }>(`/tours/stop?id=${encodeURIComponent(id)}`, { method: 'POST' }),
 
   deleteTour: (id: string) =>
-    request<{ status: string }>(`/tours/${id}`, { method: 'DELETE' }),
+    request<{ status: string }>(`/tours?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   getPOSTransactions: (params: { camera_id?: string; start_time?: string; end_time?: string; limit?: number }) => {
     const q = new URLSearchParams();
@@ -648,26 +692,37 @@ export const api = {
     request<{ estimates: { camera_id: string; camera_name: string; retention_days: number; daily_usage_gb: number; current_usage_gb: number; estimated_total_gb: number; days_remaining: number }[]; total_daily_gb: number; total_storage_gb: number }>('/storage/estimates'),
 
   // Camera CRUD
-  createCamera: (data: { site_id: string; name: string; connection_url: string; substream_url?: string; ptz_protocol?: string; retention_days?: number; onvif_username?: string; onvif_password?: string }) =>
+  createCamera: (data: {
+    site_id: string;
+    name: string;
+    connection_url: string;
+    substream_url?: string;
+    ptz_protocol?: string;
+    retention_days?: number;
+    onvif_username?: string;
+    onvif_password?: string;
+    config?: string;
+  }) =>
     request<Camera>('/cameras', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   updateCamera: (
-  id: string,
-  data: Partial<{
-    site_id: string;
-    name: string;
-    description: string;
-    connection_url: string;
-    substream_url: string;
-    ptz_protocol: string;
-    retention_days: number;
-    onvif_username: string;
-    onvif_password: string;
-  }>
-) =>
+    id: string,
+    data: Partial<{
+      site_id: string;
+      name: string;
+      description: string;
+      connection_url: string;
+      substream_url: string;
+      ptz_protocol: string;
+      retention_days: number;
+      onvif_username: string;
+      onvif_password: string;
+      config?: string;
+    }>
+  ) =>
     request<Camera>(`/cameras/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -731,7 +786,7 @@ export const api = {
       `/discovery/scans/${scanId}/import`, { method: 'POST', body: JSON.stringify(data) }),
 
   testOnvifCredentials: (data: { ip: string; port: number; username: string; password: string }) =>
-    request<{ success: boolean; error?: string }>('/discovery/credentials/test', { method: 'POST', body: JSON.stringify(data) }),
+    request<{ success: boolean; error?: string }>('/discovery/test-credentials', { method: 'POST', body: JSON.stringify(data) }),
 
   // New Discovery API
   startScan: (data: { subnet: string; site_id: string }) =>
@@ -887,36 +942,36 @@ export const api = {
 
   // Evidence
   getEvidenceCases: () =>
-    request<{cases: {id: string; name: string; case_number: string; description: string; tags: string[]; status: string; created_at: string; updated_at: string; item_count: number}[]}>('/evidence'),
+    request<{cases: {id: string; name: string; case_number: string; description: string; tags: string[]; status: string; created_at: string; updated_at: string; item_count: number}[]}>('/evidence/cases'),
 
   createEvidenceCase: (data: {name: string; case_number: string; description?: string; tags?: string[]}) =>
-    request<{id: string; status: string}>('/evidence', {
+    request<{id: string; status: string}>('/evidence/cases', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   getEvidenceCase: (id: string) =>
-    request<{id: string; name: string; case_number: string; description: string; tags: string[]; status: string; items: any[]; chain_of_custody: any[]; created_at: string; updated_at: string}>('/evidence/' + id),
+    request<{id: string; name: string; case_number: string; description: string; tags: string[]; status: string; items: any[]; chain_of_custody: any[]; created_at: string; updated_at: string}>('/evidence/cases/' + id),
 
   addEvidenceItem: (caseId: string, data: {name: string; file_path?: string; notes?: string; recording_id?: string; camera_id?: string; timestamp?: string}) =>
-    request<{id: string; status: string}>('/evidence/' + caseId + '/items', {
+    request<{id: string; status: string}>('/evidence/cases/' + caseId + '/items', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   shareEvidence: (caseId: string, data: {expires_at: string; email?: string}) =>
-    request<{share_url: string; status: string}>('/evidence/' + caseId + '/share', {
+    request<{share_url: string; status: string}>('/evidence/cases/' + caseId + '/share', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   exportEvidenceBundle: (caseId: string) =>
-    request<{file_path: string; size_bytes: number}>('/evidence/' + caseId + '/export', {
+    request<{file_path: string; size_bytes: number}>('/evidence/cases/' + caseId + '/export', {
       method: 'POST',
     }),
 
   deleteEvidenceCase: (id: string) =>
-    request<{status: string}>('/evidence/' + id, {
+    request<{status: string}>('/evidence/cases/' + id, {
       method: 'DELETE',
     }),
 
@@ -940,15 +995,15 @@ export const api = {
     request<any>('/incidents/' + id),
 
   updateIncidentStatus: (id: string, status: string) =>
-    request<{status: string}>('/incidents/' + id + '/status', {
+    request<{status: string}>('/incidents/' + id, {
       method: 'PUT',
       body: JSON.stringify({ status }),
     }),
 
   assignIncident: (id: string, userId: string) =>
-    request<{status: string}>('/incidents/' + id + '/assign', {
-      method: 'POST',
-      body: JSON.stringify({ user_id: userId }),
+    request<{status: string}>('/incidents/' + id, {
+      method: 'PUT',
+      body: JSON.stringify({ assigned_to: userId }),
     }),
 
   addIncidentNote: (id: string, content: string) =>
@@ -963,9 +1018,9 @@ export const api = {
     }),
 
   // Forensics
-  forensicSearch: (params: {camera_ids?: string[]; start_time?: string; end_time?: string; object_classes?: string[]; colors?: string[]; direction?: string; min_confidence?: number; limit?: number; offset?: number}) => {
+  forensicSearch: (params: {cameras?: string[]; start_time?: string; end_time?: string; object_classes?: string[]; colors?: string[]; direction?: string; min_confidence?: number; limit?: number; offset?: number}) => {
     const body: any = {};
-    if (params.camera_ids?.length) body.camera_ids = params.camera_ids;
+    if (params.cameras?.length) body.cameras = params.cameras;
     if (params.start_time) body.start_time = params.start_time;
     if (params.end_time) body.end_time = params.end_time;
     if (params.object_classes?.length) body.object_classes = params.object_classes;
@@ -974,7 +1029,7 @@ export const api = {
     if (params.min_confidence) body.min_confidence = params.min_confidence;
     if (params.limit) body.limit = params.limit;
     if (params.offset) body.offset = params.offset;
-    return request<{results: any[]; total: number; track_paths?: any[]}>('/forensics/search', {
+    return request<{results: ForensicsResult[]; total: number}>('/forensics/search', {
       method: 'POST',
       body: JSON.stringify(body),
     });
@@ -985,6 +1040,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...params, format }),
     }),
+
+  getTrackPath: (trackId: string) =>
+    request<{track: TrackPoint[]}>('/forensics/tracks/' + trackId),
 
   // Config
   getConfigCategories: () =>
@@ -1015,22 +1073,22 @@ export const api = {
 
   // Retention
   getRetentionPolicies: () =>
-    request<{policies: {camera_id: string; camera_name: string; retention_days: number; archive_enabled: boolean; archive_after_days: number; storage_class: string}[]; global_retention_days: number; global_archive_enabled: boolean; global_archive_after_days: number}>('/admin/retention'),
+    request<{policies: {camera_id: string; camera_name: string; retention_days: number; archive_enabled: boolean; archive_after_days: number; storage_class: string}[]; global_retention_days: number; global_archive_enabled: boolean; global_archive_after_days: number}>('/retention-policies'),
 
   updateRetentionPolicy: (cameraId: string, data: {retention_days?: number; archive_enabled?: boolean; archive_after_days?: number; storage_class?: string}) =>
-    request<{status: string}>('/admin/retention/' + cameraId, {
+    request<{status: string}>('/retention-policies/' + cameraId, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
 
   bulkUpdateRetention: (policies: {camera_id: string; retention_days: number}[]) =>
-    request<{status: string; count: number}>('/admin/retention/bulk', {
+    request<{status: string; count: number}>('/retention-policies/bulk', {
       method: 'POST',
       body: JSON.stringify({ policies }),
     }),
 
   updateGlobalRetention: (data: {retention_days?: number; archive_enabled?: boolean; archive_after_days?: number}) =>
-    request<{status: string}>('/admin/retention/global', {
+    request<{status: string}>('/retention-policies/global', {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
@@ -1065,65 +1123,77 @@ export const api = {
 
   // AI Zones
   getZones: (type?: string) => {
-    const q = type ? '?type=' + encodeURIComponent(type) : '';
-    return request<{zones: any[]}>('/admin/zones' + q);
+    const prefix = type && type !== 'intrusion' ? '/' + type.replace('_', '-') + '-zones' : '/intrusion-zones';
+    return request<{zones: any[]}>(prefix);
   },
 
-  createZone: (data: any) =>
-    request<{id: string; status: string}>('/admin/zones', {
+  createZone: (data: any) => {
+    const type = data.type || 'intrusion';
+    const prefix = type !== 'intrusion' ? '/' + type.replace('_', '-') + '-zones' : '/intrusion-zones';
+    const body: any = { name: data.name, polygon_points: data.coordinates, sensitivity: data.sensitivity, enabled: data.enabled };
+    if (data.direction) body.direction = data.direction;
+    if (data.dwell_time) body.dwell_time = data.dwell_time;
+    return request<{id: string; status: string}>(prefix, {
       method: 'POST',
-      body: JSON.stringify(data),
-    }),
+      body: JSON.stringify(body),
+    });
+  },
 
-  updateZone: (id: string, data: any) =>
-    request<{status: string}>('/admin/zones/' + id, {
+  updateZone: (id: string, data: any) => {
+    const type = data.type || 'intrusion';
+    const prefix = type !== 'intrusion' ? '/' + type.replace('_', '-') + '-zones' : '/intrusion-zones';
+    const body: any = { id, name: data.name, polygon_points: data.coordinates, sensitivity: data.sensitivity, enabled: data.enabled };
+    if (data.direction) body.direction = data.direction;
+    if (data.dwell_time) body.dwell_time = data.dwell_time;
+    return request<{status: string}>(prefix + '/' + id, {
       method: 'PUT',
-      body: JSON.stringify(data),
-    }),
+      body: JSON.stringify(body),
+    });
+  },
 
   deleteZone: (id: string) =>
-    request<{status: string}>('/admin/zones/' + id, {
+    request<{status: string}>('/intrusion-zones/' + id, {
       method: 'DELETE',
     }),
 
-  toggleZone: (id: string, enabled: boolean) =>
-    request<{status: string}>('/admin/zones/' + id + '/toggle', {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
-    }),
-
-  getZoneEvents: (id: string) =>
-    request<{events: any[]}>('/admin/zones/' + id + '/events'),
+  toggleZone: async (id: string, enabled: boolean) => {
+    const prefix = '/intrusion-zones';
+    const zone = await request<any>(prefix + '/' + id);
+    return request<{status: string}>(prefix + '/' + id, {
+      method: 'PUT',
+      body: JSON.stringify({ ...zone, id, enabled }),
+    });
+  },
 
   // Notification Channels
   getNotificationChannels: () =>
-    request<{channels: any[]}>('/admin/channels'),
+    request<{channels: any[]}>('/channels'),
 
   createNotificationChannel: (data: any) =>
-    request<{id: string; status: string}>('/admin/channels', {
+    request<{id: string; status: string}>('/channels', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
   updateNotificationChannel: (id: string, data: any) =>
-    request<{status: string}>('/admin/channels/' + id, {
+    request<{status: string}>('/channels/' + id, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
 
   deleteNotificationChannel: (id: string) =>
-    request<{status: string}>('/admin/channels/' + id, {
+    request<{status: string}>('/channels/' + id, {
       method: 'DELETE',
     }),
 
   testNotificationChannel: (id: string) =>
-    request<{status: string; message?: string}>('/admin/channels/' + id + '/test', {
+    request<{status: string; message?: string}>('/channels/' + id + '/test', {
       method: 'POST',
     }),
 
   getNotificationLogs: (channelId?: string) => {
     const q = channelId ? '?channel_id=' + encodeURIComponent(channelId) : '';
-    return request<{logs: any[]}>('/admin/channels/logs' + q);
+    return request<{logs: any[]}>('/notification-log' + q);
   },
 
   // Camera Details
@@ -1150,10 +1220,10 @@ export const api = {
 
   // CSRF
   getCSRFStatus: () =>
-    request<{token: string; enabled: boolean; created_at: string}>('/csrf/status'),
+    request<{token: string; enabled: boolean; created_at: string}>('/csrf-token'),
 
   regenerateCSRFToken: () =>
-    request<{token: string; status: string}>('/csrf/regenerate', {
+    request<{token: string; status: string}>('/csrf-token', {
       method: 'POST',
     }),
 };

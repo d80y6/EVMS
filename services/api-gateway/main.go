@@ -41,11 +41,16 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 }
 
 type rateLimiter struct {
-	mu      sync.Mutex
-	clients map[string]*clientLimit
-	rate    float64
-	burst   float64
-	cleanup time.Duration
+	mu         sync.Mutex
+	clients    map[string]*clientLimit
+	userLimits map[string]*clientLimit
+	rate       float64
+	burst      float64
+	userRate   float64
+	userBurst  float64
+	tenantRate float64
+	tenantBurst float64
+	cleanup    time.Duration
 }
 
 type clientLimit struct {
@@ -53,12 +58,24 @@ type clientLimit struct {
 	last   time.Time
 }
 
+// TODO: Implement Redis-backed rate limiter
+// func newRedisRateLimiter(addr string) *rateLimiter {
+// 	client := redis.NewClient(&redis.Options{Addr: addr})
+// 	_ = client
+// 	return newRateLimiter(100, 200, 10*time.Minute)
+// }
+
 func newRateLimiter(rate, burst int, cleanup time.Duration) *rateLimiter {
 	rl := &rateLimiter{
-		clients: make(map[string]*clientLimit),
-		rate:    float64(rate),
-		burst:   float64(burst),
-		cleanup: cleanup,
+		clients:     make(map[string]*clientLimit),
+		userLimits:  make(map[string]*clientLimit),
+		rate:        float64(rate),
+		burst:       float64(burst),
+		userRate:    300,
+		userBurst:   100,
+		tenantRate:  5000,
+		tenantBurst: 1000,
+		cleanup:     cleanup,
 	}
 	if cleanup > 0 {
 		go rl.cleanupLoop()
@@ -77,19 +94,24 @@ func (rl *rateLimiter) cleanupLoop() {
 				delete(rl.clients, ip)
 			}
 		}
+		for key, cl := range rl.userLimits {
+			if now.Sub(cl.last) > rl.cleanup*2 {
+				delete(rl.userLimits, key)
+			}
+		}
 		rl.mu.Unlock()
 	}
 }
 
-func (rl *rateLimiter) Allow(ip string) bool {
+func (rl *rateLimiter) Allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
-	cl, ok := rl.clients[ip]
+	cl, ok := rl.clients[key]
 	if !ok {
 		cl = &clientLimit{tokens: rl.burst, last: now}
-		rl.clients[ip] = cl
+		rl.clients[key] = cl
 	}
 
 	elapsed := now.Sub(cl.last).Seconds()
@@ -106,12 +128,77 @@ func (rl *rateLimiter) Allow(ip string) bool {
 	return false
 }
 
+func (rl *rateLimiter) AllowUser(userKey string) (bool, float64, time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cl, ok := rl.userLimits[userKey]
+	if !ok {
+		cl = &clientLimit{tokens: rl.userBurst, last: now}
+		rl.userLimits[userKey] = cl
+	}
+
+	elapsed := now.Sub(cl.last).Seconds()
+	cl.tokens += elapsed * rl.userRate
+	if cl.tokens > rl.userBurst {
+		cl.tokens = rl.userBurst
+	}
+	cl.last = now
+
+	remaining := cl.tokens
+	if cl.tokens >= 1 {
+		cl.tokens--
+		remaining = cl.tokens
+	}
+
+	resetAt := cl.last.Add(time.Duration((rl.userBurst - cl.tokens) / rl.userRate * float64(time.Second)))
+	return cl.tokens >= 0, remaining, time.Until(resetAt)
+}
+
+func (rl *rateLimiter) AllowTenant(tenantKey string) (bool, float64, time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cl, ok := rl.userLimits["tenant:"+tenantKey]
+	if !ok {
+		cl = &clientLimit{tokens: rl.tenantBurst, last: now}
+		rl.userLimits["tenant:"+tenantKey] = cl
+	}
+
+	elapsed := now.Sub(cl.last).Seconds()
+	cl.tokens += elapsed * rl.tenantRate
+	if cl.tokens > rl.tenantBurst {
+		cl.tokens = rl.tenantBurst
+	}
+	cl.last = now
+
+	remaining := cl.tokens
+	if cl.tokens >= 1 {
+		cl.tokens--
+		remaining = cl.tokens
+	}
+
+	resetAt := cl.last.Add(time.Duration((rl.tenantBurst - cl.tokens) / rl.tenantRate * float64(time.Second)))
+	return cl.tokens >= 0, remaining, time.Until(resetAt)
+}
+
+func extractClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return host
+}
+
 func (rl *rateLimiter) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
+		host := extractClientIP(r)
 		if !rl.Allow(host) {
 			jsonError(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
@@ -156,7 +243,7 @@ func (g *Gateway) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: false,
-		Secure:   false,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400,
 	})
@@ -184,6 +271,7 @@ type GatewayConfig struct {
 	ReportingURL      string
 	ModelRegistryURL string
 	DBURL              string
+	RedisURL           string
 	NATSURL            string
 	MetricsAddr        string
 	TLSEnabled         bool
@@ -212,6 +300,7 @@ func DefaultGatewayConfig() GatewayConfig {
 		ReportingURL:      common.GetEnv("REPORTING_URL", "http://reporting-service:8098"),
 		ModelRegistryURL: common.GetEnv("MODEL_REGISTRY_URL", "http://model-registry:8098"),
 		DBURL:              common.GetEnv("DB_URL", ""),
+		RedisURL:           common.GetEnv("REDIS_URL", ""),
 		NATSURL:            common.GetEnv("NATS_URL", "nats://nats:4222"),
 		MetricsAddr:        common.GetEnv("METRICS_ADDR", ":2112"),
 		TLSEnabled:         common.GetEnv("TLS_ENABLED", "false") == "true",
@@ -343,7 +432,8 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 
 	var nc *nats.Conn
 	if config.NATSURL != "" {
-		nc, err = nats.Connect(config.NATSURL)
+		natsOpts := common.NATSAuthOptions()
+		nc, err = nats.Connect(config.NATSURL, natsOpts...)
 		if err != nil {
 			logger.Warn("Failed to connect to NATS for plugin events", "error", err)
 		}
@@ -411,6 +501,7 @@ func NewGateway(config GatewayConfig, logger *slog.Logger) (*Gateway, error) {
 		reportingProxy:    makeProxy(reportingURL, cbReporting),
 		modelRegistryProxy: makeProxy(modelRegistryURL, cbModelRegistry),
 		nc:                 nc,
+		// TODO: if config.RedisURL != "" { use newRedisRateLimiter(config.RedisURL) } else { use in-memory }
 		rateLimiter:        newRateLimiter(100, 200, 10*time.Minute),
 		ipAllowlist:        ipAllowlist,
 		licenseValidator:   licenseValidator,
@@ -465,14 +556,6 @@ func (g *Gateway) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			authHeader = r.URL.Query().Get("token")
-			if authHeader != "" {
-				q := r.URL.Query()
-				q.Del("token")
-				r.URL.RawQuery = q.Encode()
-			}
-		}
-		if authHeader == "" {
 			jsonError(w, "authorization required", http.StatusUnauthorized)
 			return
 		}
@@ -503,14 +586,6 @@ func (g *Gateway) requireRole(minRole string) func(http.HandlerFunc) http.Handle
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				authHeader = r.URL.Query().Get("token")
-				if authHeader != "" {
-					q := r.URL.Query()
-					q.Del("token")
-					r.URL.RawQuery = q.Encode()
-				}
-			}
 			if authHeader == "" {
 				jsonError(w, "authorization required", http.StatusUnauthorized)
 				return
@@ -586,7 +661,6 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 			Status        string `json:"status"`
 			PtzProtocol   string `json:"ptz_protocol"`
 			RetentionDays int32  `json:"retention_days"`
-			OnvifUsername string `json:"onvif_username"`
 			Config        string `json:"config"`
 		}
 
@@ -602,7 +676,6 @@ func (g *Gateway) handleCameras(w http.ResponseWriter, r *http.Request) {
 				Status:        c.Status,
 				PtzProtocol:   c.PtzProtocol,
 				RetentionDays: c.RetentionDays,
-				OnvifUsername: c.OnvifUsername,
 				Config:        c.Config,
 			}
 		}
@@ -648,6 +721,7 @@ func (g *Gateway) handleListSites(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleCreateSite(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Name     string `json:"name"`
 		Location string `json:"location"`
@@ -687,6 +761,31 @@ func (g *Gateway) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (g *Gateway) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
+	siteID := strings.TrimPrefix(r.URL.Path, "/api/sites/")
+	siteID = strings.TrimSuffix(siteID, "/")
+	if siteID == "" {
+		jsonError(w, "site ID required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var resp damv1.DeleteSiteResponse
+	err := g.cameraCC.Invoke(ctx, "/dam_v1.CameraService/DeleteSite", &damv1.DeleteSiteRequest{Id: siteID}, &resp)
+	if err != nil {
+		g.logger.Error("Failed to delete site", "error", err, "id", siteID)
+		jsonError(w, "failed to delete site", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": resp.Success,
+	})
+}
+
 func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CameraID      string  `json:"camera_id"`
@@ -704,7 +803,18 @@ func (g *Gateway) handleSmartSearch(w http.ResponseWriter, r *http.Request) {
 		req.StartTime = r.URL.Query().Get("start_time")
 		req.EndTime = r.URL.Query().Get("end_time")
 		req.BoundingBox = r.URL.Query().Get("bounding_box")
+		if mc := r.URL.Query().Get("min_confidence"); mc != "" {
+			if v, err := strconv.ParseFloat(mc, 64); err == nil {
+				req.MinConfidence = v
+			}
+		}
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if v, err := strconv.ParseInt(l, 10, 32); err == nil {
+				req.Limit = int32(v)
+			}
+		}
 	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -780,20 +890,19 @@ func (g *Gateway) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		FileSize  int64     `json:"file_size" db:"file_size"`
 	}
 
-	var recordings []recording
-	var err error
-	if tenantID != "" {
-		err = g.db.SelectContext(ctx, &recordings,
-			`SELECT r.camera_id, r.start_time, r.end_time, r.file_path, r.file_size
-			 FROM recordings r
-			 JOIN cameras c ON r.camera_id = c.id
-			 JOIN sites s ON c.site_id = s.id
-			 WHERE s.tenant_id = $1
-			 ORDER BY r.start_time DESC LIMIT 100`, tenantID)
-	} else {
-		err = g.db.SelectContext(ctx, &recordings,
-			"SELECT camera_id, start_time, end_time, file_path, file_size FROM recordings ORDER BY start_time DESC LIMIT 100")
+	if tenantID == "" {
+		jsonError(w, "tenant isolation required", http.StatusForbidden)
+		return
 	}
+
+	var recordings []recording
+	err := g.db.SelectContext(ctx, &recordings,
+		`SELECT r.camera_id, r.start_time, r.end_time, r.file_path, r.file_size
+		 FROM recordings r
+		 JOIN cameras c ON r.camera_id = c.id
+		 JOIN sites s ON c.site_id = s.id
+		 WHERE s.tenant_id = $1
+		 ORDER BY r.start_time DESC LIMIT 100`, tenantID)
 	if err != nil {
 		g.logger.Error("Failed to query recordings", "error", err)
 		jsonError(w, "failed to query recordings", http.StatusInternalServerError)
@@ -826,20 +935,19 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 		EventTime  time.Time `json:"event_time" db:"event_time"`
 	}
 
-	var events []event
-	var err error
-	if tenantID != "" {
-		err = g.db.SelectContext(ctx, &events,
-			`SELECT e.id, e.camera_id, e.object_type, e.confidence, e.event_time
-			 FROM ai_events e
-			 JOIN cameras c ON e.camera_id = c.id
-			 JOIN sites s ON c.site_id = s.id
-			 WHERE s.tenant_id = $1
-			 ORDER BY e.event_time DESC LIMIT 100`, tenantID)
-	} else {
-		err = g.db.SelectContext(ctx, &events,
-			"SELECT id, camera_id, object_type, confidence, event_time FROM ai_events ORDER BY event_time DESC LIMIT 100")
+	if tenantID == "" {
+		jsonError(w, "tenant isolation required", http.StatusForbidden)
+		return
 	}
+
+	var events []event
+	err := g.db.SelectContext(ctx, &events,
+		`SELECT e.id, e.camera_id, e.object_type, e.confidence, e.event_time
+		 FROM ai_events e
+		 JOIN cameras c ON e.camera_id = c.id
+		 JOIN sites s ON c.site_id = s.id
+		 WHERE s.tenant_id = $1
+		 ORDER BY e.event_time DESC LIMIT 100`, tenantID)
 	if err != nil {
 		g.logger.Error("Failed to query events", "error", err)
 		jsonError(w, "failed to query events", http.StatusInternalServerError)
@@ -854,6 +962,25 @@ func (g *Gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handlePlayback(w http.ResponseWriter, r *http.Request) {
+	tenantID, _ := r.Context().Value(common.TenantKey).(string)
+	if tenantID == "" {
+		jsonError(w, "tenant isolation required", http.StatusForbidden)
+		return
+	}
+
+	if g.db != nil {
+		pathParts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/playback/"), "/", 2)
+		if len(pathParts) > 0 && pathParts[0] != "" {
+			var count int
+			err := g.db.GetContext(r.Context(),
+				"SELECT COUNT(*) FROM cameras c JOIN sites s ON c.site_id = s.id WHERE c.id = $1 AND s.tenant_id = $2",
+				pathParts[0], tenantID)
+			if err != nil || count == 0 {
+				jsonError(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+	}
 	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 	g.playbackProxy.ServeHTTP(w, r)
 }
@@ -925,7 +1052,6 @@ func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 		Status        string `json:"status"`
 		PtzProtocol   string `json:"ptz_protocol"`
 		RetentionDays int32  `json:"retention_days"`
-		OnvifUsername string `json:"onvif_username"`
 		Config        string `json:"config"`
 	}
 
@@ -940,12 +1066,12 @@ func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 		Status:        camera.Status,
 		PtzProtocol:   camera.PtzProtocol,
 		RetentionDays: camera.RetentionDays,
-		OnvifUsername: camera.OnvifUsername,
 		Config:        camera.Config,
 	})
 }
 
 func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		SiteID         string `json:"site_id"`
 		Name           string `json:"name"`
@@ -960,6 +1086,11 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 255 || strings.ContainsAny(req.Name, "<>") {
+		jsonError(w, "invalid camera name: must be non-empty, max 255 characters, no HTML tags", http.StatusBadRequest)
 		return
 	}
 
@@ -992,6 +1123,7 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 	cameraID := extractParam(r.URL.Path, "/api/cameras/")
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Name           string `json:"name"`
 		SiteID         string `json:"site_id"`
@@ -1005,6 +1137,11 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 255 || strings.ContainsAny(req.Name, "<>") {
+		jsonError(w, "invalid camera name: must be non-empty, max 255 characters, no HTML tags", http.StatusBadRequest)
 		return
 	}
 
@@ -1234,16 +1371,31 @@ func (g *Gateway) handleCameraNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	onvifPort := 80
+	onvifEnabled := true
+	if camera.Config != "" {
+		var cfg struct {
+			OnvifPort int  `json:"onvif_port"`
+			IsOnvif   bool `json:"is_onvif"`
+		}
+		if err := json.Unmarshal([]byte(camera.Config), &cfg); err == nil {
+			if cfg.OnvifPort > 0 {
+				onvifPort = cfg.OnvifPort
+			}
+			onvifEnabled = cfg.IsOnvif
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"hostname":     "",
-		"dns":          []string{},
-		"ntp":          []string{},
-		"interfaces":   interfaces,
-		"ip_address":   ipAddress,
-		"rtsp_port":    rtspPort,
-		"onvif_port":   80,
-		"http_port":    80,
-		"dhcp":         true,
+		"hostname":       "",
+		"dns":            []string{},
+		"ntp":            []string{},
+		"interfaces":     interfaces,
+		"ip_address":     ipAddress,
+		"rtsp_port":      rtspPort,
+		"onvif_port":     onvifPort,
+		"onvif_enabled":  onvifEnabled,
+		"http_port":      80,
+		"dhcp":           true,
 	})
 }
 
@@ -1262,15 +1414,26 @@ func (g *Gateway) handleCameraDiagnostics(w http.ResponseWriter, r *http.Request
 
 	reachable := camera.Status == "online"
 
+	onvifEnabled := true
+	if camera.Config != "" {
+		var cfg struct {
+			IsOnvif bool `json:"is_onvif"`
+		}
+		if err := json.Unmarshal([]byte(camera.Config), &cfg); err == nil {
+			onvifEnabled = cfg.IsOnvif
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"reachable":        reachable,
-		"onvif":            reachable,
-		"rtsp":             reachable,
-		"latency_ms":       0,
-		"last_error":       "",
-		"status":           camera.Status,
-		"uptime_pct":       99.5,
+		"reachable":      reachable,
+		"onvif":          onvifEnabled && reachable,
+		"onvif_enabled":  onvifEnabled,
+		"rtsp":           reachable,
+		"latency_ms":     0,
+		"last_error":     "",
+		"status":         camera.Status,
+		"uptime_pct":     99.5,
 		"response_time_ms": 45,
 	})
 }
@@ -1344,14 +1507,16 @@ func (g *Gateway) handleCameraOnvif(w http.ResponseWriter, r *http.Request) {
 
 	deviceURL := camera.ConnectionUrl
 	if strings.HasPrefix(deviceURL, "rtsp://") {
-		host := strings.TrimPrefix(deviceURL, "rtsp://")
-		if idx := strings.Index(host, "@"); idx != -1 {
-			host = host[idx+1:]
+		onvifPort := 80
+		if camera.Config != "" {
+			var cfg struct {
+				OnvifPort int `json:"onvif_port"`
+			}
+			if err := json.Unmarshal([]byte(camera.Config), &cfg); err == nil && cfg.OnvifPort > 0 {
+				onvifPort = cfg.OnvifPort
+			}
 		}
-		if idx := strings.Index(host, ":"); idx != -1 {
-			host = host[:idx]
-		}
-		deviceURL = "http://" + host + "/onvif/device_service"
+		deviceURL = onvif.BuildDeviceURL(camera.ConnectionUrl, onvifPort)
 	}
 
 	capabilities := map[string]interface{}{}
@@ -1376,7 +1541,6 @@ func (g *Gateway) handleCameraOnvif(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"username":            camera.OnvifUsername,
 		"capabilities":        capabilities,
 		"events_supported":    eventsSupported,
 		"analytics_supported": analyticsSupported,
@@ -1394,6 +1558,7 @@ func (g *Gateway) handleDiscoveryScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Subnet string `json:"subnet"`
 		SiteID string `json:"site_id"`
@@ -1453,14 +1618,19 @@ func (g *Gateway) handleDiscoveryListScans(w http.ResponseWriter, r *http.Reques
 
 	type scanRow struct {
 		ID          string     `db:"id"`
+		SiteID      string     `db:"site_id"`
 		Status      string     `db:"status"`
+		Methods     string     `db:"methods"`
+		Subnets     string     `db:"subnets"`
+		TotalFound  int        `db:"total_found"`
 		StartedAt   *time.Time `db:"started_at"`
 		CompletedAt *time.Time `db:"completed_at"`
+		CreatedAt   time.Time  `db:"created_at"`
 	}
 
 	var scans []scanRow
 	if err := g.db.SelectContext(ctx, &scans,
-		"SELECT id, status, started_at, completed_at FROM discovery_scans ORDER BY created_at DESC"); err != nil {
+		"SELECT id, site_id, status, methods, subnets, total_found, started_at, completed_at, created_at FROM discovery_scans ORDER BY created_at DESC"); err != nil {
 		g.logger.Error("Failed to list discovery scans", "error", err)
 		jsonError(w, "failed to list scans", http.StatusInternalServerError)
 		return
@@ -1472,14 +1642,23 @@ func (g *Gateway) handleDiscoveryListScans(w http.ResponseWriter, r *http.Reques
 
 	type scanResp struct {
 		ID          string `json:"id"`
+		SiteID      string `json:"site_id"`
 		Status      string `json:"status"`
+		Methods     string `json:"methods"`
+		Subnets     string `json:"subnets"`
+		TotalFound  int    `json:"total_found"`
 		StartedAt   string `json:"started_at"`
 		CompletedAt string `json:"completed_at"`
+		CreatedAt   string `json:"created_at"`
 	}
 
 	result := make([]scanResp, 0, len(scans))
 	for _, s := range scans {
-		rsp := scanResp{ID: s.ID, Status: s.Status}
+		rsp := scanResp{
+			ID: s.ID, SiteID: s.SiteID, Status: s.Status,
+			Methods: s.Methods, Subnets: s.Subnets, TotalFound: s.TotalFound,
+			CreatedAt: s.CreatedAt.Format(time.RFC3339),
+		}
 		if s.StartedAt != nil {
 			rsp.StartedAt = s.StartedAt.Format(time.RFC3339)
 		}
@@ -1492,6 +1671,9 @@ func (g *Gateway) handleDiscoveryListScans(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"scans": result,
+		"total": len(result),
+		"page":  1,
+		"per_page": len(result),
 	})
 }
 
@@ -1508,19 +1690,32 @@ func (g *Gateway) handleDiscoveryGetScan(w http.ResponseWriter, r *http.Request)
 
 	var scan struct {
 		ID          string     `db:"id"`
+		SiteID      string     `db:"site_id"`
 		Status      string     `db:"status"`
+		Methods     string     `db:"methods"`
+		Subnets     string     `db:"subnets"`
+		Ports       string     `db:"ports"`
+		TotalFound  int        `db:"total_found"`
+		Error       *string    `db:"error"`
 		StartedAt   *time.Time `db:"started_at"`
 		CompletedAt *time.Time `db:"completed_at"`
+		CreatedAt   time.Time  `db:"created_at"`
 	}
 	if err := g.db.GetContext(ctx, &scan,
-		"SELECT id, status, started_at, completed_at FROM discovery_scans WHERE id=$1", scanID); err != nil {
+		"SELECT id, site_id, status, methods, subnets, ports, total_found, error, started_at, completed_at, created_at FROM discovery_scans WHERE id=$1", scanID); err != nil {
 		jsonError(w, "scan not found", http.StatusNotFound)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"id":     scan.ID,
-		"status": scan.Status,
+		"id":          scan.ID,
+		"site_id":     scan.SiteID,
+		"status":      scan.Status,
+		"methods":     scan.Methods,
+		"subnets":     scan.Subnets,
+		"ports":       scan.Ports,
+		"total_found": scan.TotalFound,
+		"created_at":  scan.CreatedAt.Format(time.RFC3339),
 	}
 	if scan.StartedAt != nil {
 		resp["started_at"] = scan.StartedAt.Format(time.RFC3339)
@@ -1531,6 +1726,9 @@ func (g *Gateway) handleDiscoveryGetScan(w http.ResponseWriter, r *http.Request)
 		resp["completed_at"] = scan.CompletedAt.Format(time.RFC3339)
 	} else {
 		resp["completed_at"] = ""
+	}
+	if scan.Error != nil {
+		resp["error"] = *scan.Error
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1550,15 +1748,27 @@ func (g *Gateway) handleDiscoveryGetResults(w http.ResponseWriter, r *http.Reque
 	defer cancel()
 
 	type resultRow struct {
-		IPAddress    string  `db:"ip_address"`
-		Manufacturer *string `db:"manufacturer"`
-		Model        *string `db:"model"`
-		SerialNumber *string `db:"serial_number"`
+		ID           string            `db:"id"`
+		ScanID       string            `db:"scan_id"`
+		SiteID       string            `db:"site_id"`
+		IPAddress    string            `db:"ip_address"`
+		Port         *int              `db:"port"`
+		XAddr        *string           `db:"xaddr"`
+		Manufacturer *string           `db:"manufacturer"`
+		Model        *string           `db:"model"`
+		Firmware     *string           `db:"firmware"`
+		SerialNumber *string           `db:"serial_number"`
+		Hostname     *string           `db:"hostname"`
+		Capabilities *string           `db:"capabilities"`
+		IsNew        bool              `db:"is_new"`
+		AlreadyInDB  bool              `db:"already_in_db"`
+		Imported     bool              `db:"imported"`
+		CreatedAt    time.Time         `db:"created_at"`
 	}
 
-	var results []resultRow
-	if err := g.db.SelectContext(ctx, &results,
-		`SELECT ip_address, manufacturer, model, serial_number
+	var rows []resultRow
+	if err := g.db.SelectContext(ctx, &rows,
+		`SELECT id, scan_id, site_id, ip_address, port, xaddr, manufacturer, model, firmware, serial_number, hostname, capabilities, is_new, already_in_db, imported, created_at
 		 FROM discovery_results WHERE scan_id=$1 ORDER BY created_at ASC`,
 		scanID); err != nil {
 		g.logger.Error("Failed to get discovery results", "error", err)
@@ -1566,43 +1776,76 @@ func (g *Gateway) handleDiscoveryGetResults(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if results == nil {
-		results = []resultRow{}
+	if rows == nil {
+		rows = []resultRow{}
 	}
 
-	type deviceResp struct {
-		IP           string `json:"ip"`
-		Manufacturer string `json:"manufacturer"`
-		Model        string `json:"model"`
-		SerialNumber string `json:"serial_number"`
-		Onvif        bool   `json:"onvif"`
-		Rtsp         bool   `json:"rtsp"`
+	type resultResp struct {
+		ID           string                 `json:"id"`
+		ScanID       string                 `json:"scan_id"`
+		SiteID       string                 `json:"site_id"`
+		IPAddress    string                 `json:"ip_address"`
+		Port         *int                   `json:"port"`
+		XAddr        string                 `json:"xaddr"`
+		Manufacturer string                 `json:"manufacturer"`
+		Model        string                 `json:"model"`
+		Firmware     string                 `json:"firmware"`
+		SerialNumber string                 `json:"serial_number"`
+		Hostname     string                 `json:"hostname"`
+		Capabilities map[string]interface{} `json:"capabilities"`
+		IsNew        bool                   `json:"is_new"`
+		AlreadyInDB  bool                   `json:"already_in_db"`
+		Imported     bool                   `json:"imported"`
+		CreatedAt    string                 `json:"created_at"`
 	}
 
-	devices := make([]deviceResp, 0, len(results))
-	for _, r := range results {
-		d := deviceResp{IP: r.IPAddress, Onvif: true, Rtsp: true}
+	results := make([]resultResp, 0, len(rows))
+	for _, r := range rows {
+		resp := resultResp{
+			ID: r.ID, ScanID: r.ScanID, SiteID: r.SiteID,
+			IPAddress: r.IPAddress, Port: r.Port, IsNew: r.IsNew,
+			AlreadyInDB: r.AlreadyInDB, Imported: r.Imported,
+			CreatedAt: r.CreatedAt.Format(time.RFC3339),
+			Capabilities: make(map[string]interface{}),
+		}
+		if r.XAddr != nil {
+			resp.XAddr = *r.XAddr
+		}
 		if r.Manufacturer != nil {
-			d.Manufacturer = *r.Manufacturer
+			resp.Manufacturer = *r.Manufacturer
 		}
 		if r.Model != nil {
-			d.Model = *r.Model
+			resp.Model = *r.Model
+		}
+		if r.Firmware != nil {
+			resp.Firmware = *r.Firmware
 		}
 		if r.SerialNumber != nil {
-			d.SerialNumber = *r.SerialNumber
+			resp.SerialNumber = *r.SerialNumber
 		}
-		devices = append(devices, d)
+		if r.Hostname != nil {
+			resp.Hostname = *r.Hostname
+		}
+		if r.Capabilities != nil {
+			json.Unmarshal([]byte(*r.Capabilities), &resp.Capabilities)
+		}
+		results = append(results, resp)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"devices": devices,
+		"results":  results,
+		"total":    len(results),
+		"page":     1,
+		"per_page": len(results),
 	})
 }
 
 func (g *Gateway) handleDiscoveryTestCredentials(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		IP       string `json:"ip"`
+		Port     int    `json:"port"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
@@ -1616,7 +1859,11 @@ func (g *Gateway) handleDiscoveryTestCredentials(w http.ResponseWriter, r *http.
 		return
 	}
 
-	deviceURL := "http://" + req.IP + ":80/onvif/device_service"
+	if req.Port == 0 {
+		req.Port = 80
+	}
+
+	deviceURL := "http://" + req.IP + ":" + strconv.Itoa(req.Port) + "/onvif/device_service"
 	client := onvif.NewSOAPClient(5*time.Second, &onvif.Credentials{
 		Username: req.Username,
 		Password: req.Password,
@@ -1647,6 +1894,7 @@ func (g *Gateway) handleDiscoveryImport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		ScanID   string   `json:"scan_id"`
 		Devices  []string `json:"devices"`
@@ -1667,9 +1915,6 @@ func (g *Gateway) handleDiscoveryImport(w http.ResponseWriter, r *http.Request) 
 
 	for _, ip := range req.Devices {
 		connURL := "rtsp://" + ip + ":554"
-		if req.Username != "" {
-			connURL = "rtsp://" + req.Username + ":" + req.Password + "@" + ip + ":554"
-		}
 		_, err := g.cameraSvc.CreateCamera(ctx, &damv1.CreateCameraRequest{
 			SiteId:        req.SiteID,
 			Name:          ip,
@@ -1701,6 +1946,7 @@ func (g *Gateway) handleUpdateCameraConfig(w http.ResponseWriter, r *http.Reques
 	cameraID := extractParam(r.URL.Path, "/api/cameras/")
 	cameraID = strings.TrimSuffix(cameraID, "/config")
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Config json.RawMessage `json:"config"`
 	}
@@ -1829,6 +2075,7 @@ func (g *Gateway) handleAddAllowlist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "database not configured", http.StatusInternalServerError)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		CIDR        string `json:"cidr"`
 		Description string `json:"description"`
@@ -1883,8 +2130,23 @@ func (g *Gateway) licenseMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+}
+
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" {
+	setSecurityHeaders(w)
+	allowedOrigins := map[string]bool{
+		"http://localhost:5173":    true,
+		"http://localhost:3000":    true,
+		"https://localhost:5173":   true,
+		"https://localhost:3000":   true,
+	}
+	origin := r.Header.Get("Origin")
+	if allowedOrigins[origin] {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -1898,7 +2160,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
-		if path != "/api/login" && path != "/api/csrf-token" && !strings.HasPrefix(path, "/api/webhooks") {
+		if path != "/api/login" && path != "/api/csrf-token" && path != "/api/refresh" && !strings.HasPrefix(path, "/api/webhooks") {
 			headerToken := r.Header.Get("X-CSRF-Token")
 			cookie, err := r.Cookie("csrf_token")
 			if err != nil || cookie.Value == "" || subtle.ConstantTimeCompare([]byte(headerToken), []byte(cookie.Value)) != 1 {
@@ -1935,6 +2197,26 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraRecording))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/onvif") && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraOnvif))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/profiles"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/snapshot"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/stream-uri"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/video-sources"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/audio-sources"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.Contains(path, "/device/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.Contains(path, "/imaging/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.Contains(path, "/network/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.Contains(path, "/recording/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.Contains(path, "/analytics/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleCameraControl))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && !strings.Contains(path[len("/api/cameras/"):], "/") && r.Method == http.MethodGet:
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleGetCamera))(w, r)
 	case path == "/api/recordings" && r.Method == http.MethodGet:
@@ -1944,7 +2226,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.alertProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/webhooks"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.notificationProxy.ServeHTTP(w, r)
 		}))(w, r)
@@ -1976,6 +2258,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleListSites))(w, r)
 	case path == "/api/sites" && r.Method == http.MethodPost:
 		g.rateLimiter.rateLimitMiddleware(g.ipAllowlist.Middleware(g.requireRole("admin")(g.handleCreateSite)))(w, r)
+	case strings.HasPrefix(path, "/api/sites/") && r.Method == http.MethodDelete:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleDeleteSite))(w, r)
 	case path == "/api/search":
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleSmartSearch))(w, r)
 	case strings.HasPrefix(path, "/api/dewarp"):
@@ -2064,10 +2348,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.reportingProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/evidence"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
-			g.exportProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodDelete || r.Method == http.MethodPost || r.Method == http.MethodPut {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+				g.exportProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+				g.exportProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/incidents"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.alertProxy.ServeHTTP(w, r)
@@ -2120,6 +2411,41 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.auditProxy.ServeHTTP(w, r)
 		}))(w, r)
+	case path == "/api/password/policy":
+		g.rateLimiter.rateLimitMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		})(w, r)
+	case path == "/api/password/change":
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case path == "/api/refresh":
+		g.rateLimiter.rateLimitMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		})(w, r)
+	case strings.HasPrefix(path, "/api/mfa/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/sessions"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/api-keys"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		}))(w, r)
+	case strings.HasPrefix(path, "/api/sso/"):
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+			g.authProxy.ServeHTTP(w, r)
+		}))(w, r)
 	case strings.HasPrefix(path, "/api/pos/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.posProxy.ServeHTTP(w, r)
@@ -2136,6 +2462,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscoveryTestCredentials))(w, r)
 	case path == "/api/discovery/import" && r.Method == http.MethodPost:
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleDiscoveryImport))(w, r)
+	case strings.HasPrefix(path, "/api/discovery/scans") && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleDiscovery))(w, r)
 	case strings.HasPrefix(path, "/api/discovery/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleDiscovery))(w, r)
 	case strings.HasPrefix(path, "/api/federation/"):
@@ -2156,11 +2484,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			g.modelRegistryProxy.ServeHTTP(w, r)
 		}))(w, r)
-	case strings.HasPrefix(path, "/api/reports"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
-			g.reportingProxy.ServeHTTP(w, r)
-		}))(w, r)
+	case path == "/api/plugins" && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleListPlugins))(w, r)
+	case path == "/api/plugins" && r.Method == http.MethodPost:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleRegisterPlugin))(w, r)
+	case strings.HasPrefix(path, "/api/plugins/") && r.Method == http.MethodPut:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleUpdatePlugin))(w, r)
+	case strings.HasPrefix(path, "/api/plugins/") && r.Method == http.MethodDelete:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleDeletePlugin))(w, r)
 	default:
 		jsonError(w, "not found", http.StatusNotFound)
 	}
@@ -2214,6 +2545,7 @@ func (g *Gateway) handleRegisterPlugin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "database not configured", http.StatusInternalServerError)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Name        string   `json:"name"`
 		Version     string   `json:"version"`
@@ -2249,6 +2581,7 @@ func (g *Gateway) handleUpdatePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pluginID := extractParam(r.URL.Path, "/api/plugins/")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Status string `json:"status"`
 	}

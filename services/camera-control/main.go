@@ -65,7 +65,8 @@ func NewPTZService(config *PTZConfig, logger *slog.Logger) (*PTZService, error) 
 		return nil, fmt.Errorf("failed to configure gRPC credentials: %w", err)
 	}
 	cameraCC, err := grpc.NewClient(config.CameraSvcAddr,
-		grpc.WithTransportCredentials(creds))
+		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.CallContentSubtype("json")))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to camera service: %w", err)
 	}
@@ -184,6 +185,10 @@ func (s *PTZService) handleMove(w http.ResponseWriter, r *http.Request, camera *
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 
 	var req moveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -212,6 +217,10 @@ type zoomRequest struct {
 func (s *PTZService) handleZoom(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
 		return
 	}
 
@@ -290,6 +299,10 @@ func (s *PTZService) handleStop(w http.ResponseWriter, r *http.Request, camera *
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 
 	if err := s.sendPTZCommand(camera, "stop", "", 0); err != nil {
 		s.logger.Error("PTZ stop failed", "camera", camera.Id, "error", err)
@@ -315,6 +328,10 @@ type presetItem struct {
 }
 
 func (s *PTZService) handleListPresets(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	presets, err := s.listPTZPresets(camera)
 	if err != nil {
 		s.logger.Error("Failed to list presets", "camera", camera.Id, "error", err)
@@ -326,6 +343,11 @@ func (s *PTZService) handleListPresets(w http.ResponseWriter, r *http.Request, c
 }
 
 func (s *PTZService) handleSetPreset(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
+
 	var req setPresetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -348,6 +370,10 @@ type gotoPresetRequest struct {
 func (s *PTZService) handleGotoPreset(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
 		return
 	}
 
@@ -377,6 +403,10 @@ func (s *PTZService) handleGotoPreset(w http.ResponseWriter, r *http.Request, ca
 }
 
 func (s *PTZService) handleRemovePreset(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/cameras/"), "/")
 	if len(parts) < 5 {
 		jsonError(w, "preset token required", http.StatusBadRequest)
@@ -392,6 +422,10 @@ func (s *PTZService) handleRemovePreset(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *PTZService) handleGotoHome(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	if err := s.sendPTZCommand(camera, "goto_home", "", 0); err != nil {
 		s.logger.Error("Failed to goto home", "camera", camera.Id, "error", err)
 		jsonError(w, fmt.Sprintf("failed to goto home: %v", err), http.StatusInternalServerError)
@@ -401,6 +435,10 @@ func (s *PTZService) handleGotoHome(w http.ResponseWriter, r *http.Request, came
 }
 
 func (s *PTZService) handleSetHome(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	if err := s.sendPTZCommand(camera, "set_home", "", 0); err != nil {
 		s.logger.Error("Failed to set home", "camera", camera.Id, "error", err)
 		jsonError(w, fmt.Sprintf("failed to set home: %v", err), http.StatusInternalServerError)
@@ -417,6 +455,10 @@ type absoluteMoveRequest struct {
 }
 
 func (s *PTZService) handleAbsoluteMove(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	var req absoluteMoveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -424,8 +466,8 @@ func (s *PTZService) handleAbsoluteMove(w http.ResponseWriter, r *http.Request, 
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl)
-	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl, getONVIFPort(camera))
+	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 
 	position := &onvif.PTZPosition{
 		PanTilt: &onvif.Vector2D{X: req.Pan, Y: req.Tilt},
@@ -457,6 +499,10 @@ type relativeMoveRequest struct {
 }
 
 func (s *PTZService) handleRelativeMove(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	var req relativeMoveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -464,8 +510,8 @@ func (s *PTZService) handleRelativeMove(w http.ResponseWriter, r *http.Request, 
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl)
-	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl, getONVIFPort(camera))
+	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 
 	translation := &onvif.Vector2D{X: req.Pan, Y: req.Tilt}
 	var zoom *onvif.Vector1D
@@ -493,9 +539,13 @@ func (s *PTZService) handlePTZStatus(w http.ResponseWriter, r *http.Request, cam
 		jsonError(w, "PTZ status only supported for ONVIF", http.StatusBadRequest)
 		return
 	}
+	if getONVIFPort(camera) == 0 {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl)
-	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+	ptzURL := onvif.BuildPTZURL(camera.ConnectionUrl, getONVIFPort(camera))
+	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	status, err := onvif.GetPTZStatus(r.Context(), client, ptzURL, profileToken)
 	if err != nil {
 		s.logger.Error("GetPTZStatus failed", "camera", camera.Id, "error", err)
@@ -555,8 +605,32 @@ func (s *PTZService) getONVIFClient(baseURL string, camera *damv1.Camera) *onvif
 	return onvif.NewSOAPClient(s.config.RequestTimeout, creds)
 }
 
-func (s *PTZService) getONVIFProfileToken(ctx context.Context, client *onvif.SOAPClient, baseURL string) string {
-	mediaURL := onvif.BuildMediaURL(baseURL)
+func getONVIFPort(camera *damv1.Camera) int {
+	if camera.Config == "" {
+		return 0
+	}
+	var cfg struct {
+		OnvifPort int  `json:"onvif_port"`
+		IsOnvif   bool `json:"is_onvif"`
+	}
+	if err := json.Unmarshal([]byte(camera.Config), &cfg); err != nil {
+		return 0
+	}
+	if !cfg.IsOnvif {
+		return 0
+	}
+	if cfg.OnvifPort > 0 {
+		return cfg.OnvifPort
+	}
+	return 8000
+}
+
+func isONVIFDisabled(camera *damv1.Camera) bool {
+	return camera.PtzProtocol == "onvif" && getONVIFPort(camera) == 0
+}
+
+func (s *PTZService) getONVIFProfileToken(ctx context.Context, client *onvif.SOAPClient, baseURL string, onvifPort ...int) string {
+	mediaURL := onvif.BuildMediaURL(baseURL, onvifPort...)
 	profiles, err := onvif.GetProfiles(ctx, client, mediaURL)
 	if err != nil || len(profiles) == 0 {
 		return "profile_1"
@@ -570,8 +644,9 @@ func (s *PTZService) getONVIFProfileToken(ctx context.Context, client *onvif.SOA
 
 func (s *PTZService) onvifCommand(baseURL, command, param string, speed float64, camera *damv1.Camera) error {
 	client := s.getONVIFClient(baseURL, camera)
-	ptzURL := onvif.BuildPTZURL(baseURL)
-	profileToken := s.getONVIFProfileToken(context.Background(), client, baseURL)
+	onvifPort := getONVIFPort(camera)
+	ptzURL := onvif.BuildPTZURL(baseURL, onvifPort)
+	profileToken := s.getONVIFProfileToken(context.Background(), client, baseURL, onvifPort)
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.RequestTimeout-1*time.Second)
 	defer cancel()
@@ -628,8 +703,9 @@ func (s *PTZService) onvifCommand(baseURL, command, param string, speed float64,
 
 func (s *PTZService) onvifListPresets(baseURL string, camera *damv1.Camera) ([]presetItem, error) {
 	client := s.getONVIFClient(baseURL, camera)
-	ptzURL := onvif.BuildPTZURL(baseURL)
-	profileToken := s.getONVIFProfileToken(context.Background(), client, baseURL)
+	onvifPort := getONVIFPort(camera)
+	ptzURL := onvif.BuildPTZURL(baseURL, onvifPort)
+	profileToken := s.getONVIFProfileToken(context.Background(), client, baseURL, onvifPort)
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.RequestTimeout-1*time.Second)
 	defer cancel()
@@ -977,7 +1053,7 @@ func (s *PTZService) handleGetProfiles(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl)
+	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl, getONVIFPort(camera))
 	profiles, err := onvif.GetProfiles(r.Context(), client, mediaURL)
 	if err != nil {
 		s.logger.Error("GetProfiles failed", "camera", camera.Id, "error", err)
@@ -993,10 +1069,10 @@ func (s *PTZService) handleGetSnapshotURI(w http.ResponseWriter, r *http.Request
 		return
 	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl)
+	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl, getONVIFPort(camera))
 	profileToken := r.URL.Query().Get("profile")
 	if profileToken == "" {
-		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 	uri, err := onvif.GetSnapshotURI(r.Context(), client, mediaURL, profileToken)
 	if err != nil {
@@ -1013,10 +1089,10 @@ func (s *PTZService) handleGetStreamURI(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl)
+	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl, getONVIFPort(camera))
 	profileToken := r.URL.Query().Get("profile")
 	if profileToken == "" {
-		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 	protocol := r.URL.Query().Get("protocol")
 	uri, err := onvif.GetStreamURI(r.Context(), client, mediaURL, profileToken, protocol)
@@ -1034,7 +1110,7 @@ func (s *PTZService) handleGetVideoSources(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl)
+	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl, getONVIFPort(camera))
 	sources, err := onvif.GetVideoSources(r.Context(), client, mediaURL)
 	if err != nil {
 		s.logger.Error("GetVideoSources failed", "camera", camera.Id, "error", err)
@@ -1050,7 +1126,7 @@ func (s *PTZService) handleGetAudioSources(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl)
+	mediaURL := onvif.BuildMediaURL(camera.ConnectionUrl, getONVIFPort(camera))
 	sources, err := onvif.GetAudioSources(r.Context(), client, mediaURL)
 	if err != nil {
 		s.logger.Error("GetAudioSources failed", "camera", camera.Id, "error", err)
@@ -1086,11 +1162,11 @@ func (s *PTZService) handleImagingRouter(w http.ResponseWriter, r *http.Request,
 
 func (s *PTZService) handleGetImagingSettings(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl)
+	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	videoSourceToken := r.URL.Query().Get("profile")
 	if videoSourceToken == "" {
-		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl)
+		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 
 	settings, err := onvif.GetImagingSettings(r.Context(), client, imagingURL, videoSourceToken)
@@ -1115,11 +1191,11 @@ func (s *PTZService) handleSetImagingSettings(w http.ResponseWriter, r *http.Req
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl)
+	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	videoSourceToken := req.ProfileToken
 	if videoSourceToken == "" {
-		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl)
+		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 
 	var settings onvif.ImagingSettings
@@ -1152,6 +1228,10 @@ func (s *PTZService) handleMoveFocus(w http.ResponseWriter, r *http.Request, cam
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 
 	var req struct {
 		Speed float64 `json:"speed"`
@@ -1162,8 +1242,8 @@ func (s *PTZService) handleMoveFocus(w http.ResponseWriter, r *http.Request, cam
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl)
-	videoSourceToken := s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl)
+	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl, getONVIFPort(camera))
+	videoSourceToken := s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 
 	if err := onvif.MoveFocus(r.Context(), client, imagingURL, videoSourceToken, req.Speed); err != nil {
 		s.logger.Error("MoveFocus failed", "camera", camera.Id, "error", err)
@@ -1178,10 +1258,14 @@ func (s *PTZService) handleStopFocus(w http.ResponseWriter, r *http.Request, cam
 		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if isONVIFDisabled(camera) {
+		jsonError(w, "ONVIF disabled for this camera", http.StatusBadRequest)
+		return
+	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl)
-	videoSourceToken := s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl)
+	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl, getONVIFPort(camera))
+	videoSourceToken := s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 
 	if err := onvif.StopFocus(r.Context(), client, imagingURL, videoSourceToken); err != nil {
 		s.logger.Error("StopFocus failed", "camera", camera.Id, "error", err)
@@ -1193,11 +1277,11 @@ func (s *PTZService) handleStopFocus(w http.ResponseWriter, r *http.Request, cam
 
 func (s *PTZService) handleGetImagingStatus(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl)
+	imagingURL := onvif.BuildImagingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	videoSourceToken := r.URL.Query().Get("profile")
 	if videoSourceToken == "" {
-		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl)
+		videoSourceToken = s.getVideoSourceToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 
 	status, err := onvif.GetImagingStatus(r.Context(), client, imagingURL, videoSourceToken)
@@ -1431,7 +1515,7 @@ func (s *PTZService) handleRecordingRouter(w http.ResponseWriter, r *http.Reques
 
 func (s *PTZService) handleListRecordings(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl)
+	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl, getONVIFPort(camera))
 	recordings, err := onvif.GetRecordings(r.Context(), client, recordingURL)
 	if err != nil {
 		s.logger.Error("GetRecordings failed", "camera", camera.Id, "error", err)
@@ -1452,7 +1536,7 @@ func (s *PTZService) handleCreateRecording(w http.ResponseWriter, r *http.Reques
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl)
+	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	config := &onvif.RecordingConfiguration{
 		Source:  req.Source,
@@ -1478,7 +1562,7 @@ func (s *PTZService) handleDeleteRecording(w http.ResponseWriter, r *http.Reques
 	recordingToken := parts[3]
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl)
+	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	if err := onvif.DeleteRecording(r.Context(), client, recordingURL, recordingToken); err != nil {
 		s.logger.Error("DeleteRecording failed", "camera", camera.Id, "error", err)
@@ -1498,7 +1582,7 @@ func (s *PTZService) handleGetRecordingTracks(w http.ResponseWriter, r *http.Req
 	recordingToken := parts[3]
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl)
+	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	tracks, err := onvif.GetRecordingTracks(r.Context(), client, recordingURL, recordingToken)
 	if err != nil {
@@ -1517,8 +1601,8 @@ func (s *PTZService) handleGetReplayURI(w http.ResponseWriter, r *http.Request, 
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	replayURL := onvif.BuildReplayURL(camera.ConnectionUrl)
-	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+	replayURL := onvif.BuildReplayURL(camera.ConnectionUrl, getONVIFPort(camera))
+	profileToken := s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 
 	uri, err := onvif.GetReplayURI(r.Context(), client, replayURL, recordingToken, profileToken)
 	if err != nil {
@@ -1540,11 +1624,11 @@ func (s *PTZService) handleCreateRecordingJob(w http.ResponseWriter, r *http.Req
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl)
+	recordingURL := onvif.BuildRecordingURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	profileToken := req.ProfileToken
 	if profileToken == "" {
-		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl)
+		profileToken = s.getONVIFProfileToken(r.Context(), client, camera.ConnectionUrl, getONVIFPort(camera))
 	}
 
 	jobToken, err := onvif.CreateRecordingJob(r.Context(), client, recordingURL, req.RecordingToken, profileToken)
@@ -1587,7 +1671,7 @@ func (s *PTZService) handleAnalyticsRouter(w http.ResponseWriter, r *http.Reques
 
 func (s *PTZService) handleGetAnalyticsModules(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl)
+	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl, getONVIFPort(camera))
 	modules, err := onvif.GetAnalyticsModules(r.Context(), client, analyticsURL)
 	if err != nil {
 		s.logger.Error("GetAnalyticsModules failed", "camera", camera.Id, "error", err)
@@ -1599,7 +1683,7 @@ func (s *PTZService) handleGetAnalyticsModules(w http.ResponseWriter, r *http.Re
 
 func (s *PTZService) handleGetAnalyticsRules(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl)
+	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl, getONVIFPort(camera))
 	rules, err := onvif.GetSupportedAnalyticsRules(r.Context(), client, analyticsURL)
 	if err != nil {
 		s.logger.Error("GetSupportedAnalyticsRules failed", "camera", camera.Id, "error", err)
@@ -1621,7 +1705,7 @@ func (s *PTZService) handleCreateAnalyticsRule(w http.ResponseWriter, r *http.Re
 	}
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl)
+	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	if err := onvif.CreateAnalyticsRule(r.Context(), client, analyticsURL, req.RuleToken, req.RuleType, req.Parameters); err != nil {
 		s.logger.Error("CreateAnalyticsRule failed", "camera", camera.Id, "error", err)
@@ -1641,7 +1725,7 @@ func (s *PTZService) handleDeleteAnalyticsRule(w http.ResponseWriter, r *http.Re
 	ruleToken := parts[3]
 
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl)
+	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl, getONVIFPort(camera))
 
 	if err := onvif.DeleteAnalyticsRule(r.Context(), client, analyticsURL, ruleToken); err != nil {
 		s.logger.Error("DeleteAnalyticsRule failed", "camera", camera.Id, "error", err)
@@ -1653,7 +1737,7 @@ func (s *PTZService) handleDeleteAnalyticsRule(w http.ResponseWriter, r *http.Re
 
 func (s *PTZService) handleGetAnalyticsState(w http.ResponseWriter, r *http.Request, camera *damv1.Camera) {
 	client := s.getONVIFClient(camera.ConnectionUrl, camera)
-	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl)
+	analyticsURL := onvif.BuildAnalyticsURL(camera.ConnectionUrl, getONVIFPort(camera))
 	state, err := onvif.GetAnalyticsState(r.Context(), client, analyticsURL)
 	if err != nil {
 		s.logger.Error("GetAnalyticsState failed", "camera", camera.Id, "error", err)
@@ -1713,8 +1797,8 @@ func (s *PTZService) handleServiceDebug(w http.ResponseWriter, r *http.Request) 
 
 // ========== Helpers ==========
 
-func (s *PTZService) getVideoSourceToken(ctx context.Context, client *onvif.SOAPClient, baseURL string) string {
-	mediaURL := onvif.BuildMediaURL(baseURL)
+func (s *PTZService) getVideoSourceToken(ctx context.Context, client *onvif.SOAPClient, baseURL string, onvifPort ...int) string {
+	mediaURL := onvif.BuildMediaURL(baseURL, onvifPort...)
 	profiles, err := onvif.GetProfiles(ctx, client, mediaURL)
 	if err != nil || len(profiles) == 0 {
 		return ""
@@ -1730,7 +1814,7 @@ func (s *PTZService) getVideoSourceToken(ctx context.Context, client *onvif.SOAP
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := common.NewLogger("camera-control")
 	slog.SetDefault(logger)
 
 	common.CheckJWTSecret()

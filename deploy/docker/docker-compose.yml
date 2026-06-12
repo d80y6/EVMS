@@ -59,6 +59,7 @@ services:
     ports:
       - "3002:3000"
     volumes:
+      - ./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - ./grafana/evms-dashboard.json:/etc/grafana/provisioning/dashboards/evms-dashboard.json
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
@@ -119,6 +120,7 @@ services:
       - LDAP_FILTER=(uid=%s)
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
     volumes:
       - ../../migrations:/migrations
     depends_on:
@@ -132,6 +134,8 @@ services:
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - DISABLE_MIGRATIONS=true
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
     volumes:
       - ../../migrations:/migrations
     depends_on:
@@ -147,6 +151,7 @@ services:
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - NATS_URL=nats://nats:4222
+      - JWT_SECRET=${JWT_SECRET:-test-jwt-secret-for-dev-only}
     volumes:
       - recordings:/recordings
     depends_on:
@@ -162,7 +167,7 @@ services:
     environment:
       - DB_URL=postgres://${DB_USER:-dam_admin}:${DB_PASSWORD:?DB_PASSWORD must be set}@db:5432/${DB_NAME:-dam_vms}?sslmode=disable
       - NATS_URL=nats://nats:4222
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - JWT_SECRET=${JWT_SECRET:-test-jwt-secret-for-dev-only}
     volumes:
       - recordings:/recordings
     depends_on:
@@ -179,6 +184,7 @@ services:
       - CAMERA_ID=6f64a83b-8a8c-4ebe-9053-2830138bffa9
       - NATS_URL=nats://nats:4222
       - AI_SAMPLING_RATE=5
+      - YOLO_CONFIG_DIR=/tmp/Ultralytics
     depends_on:
       nats:
         condition: service_healthy
@@ -220,6 +226,7 @@ services:
       dockerfile: services/camera-control/Dockerfile
     environment:
       - CAMERA_SERVICE_ADDR=camera-mgmt:50051
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
     depends_on:
       camera-mgmt:
         condition: service_started
@@ -289,6 +296,8 @@ services:
       - NATS_URL=nats://nats:4222
       - ALERT_ADMIN_PORT=:8093
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+    volumes:
+      - ../../migrations:/migrations
     depends_on:
       db:
         condition: service_healthy
@@ -395,6 +404,14 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "4319:4319"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
 
   triton-inference:
     build:

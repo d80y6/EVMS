@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,60 +178,72 @@ func CheckSOAPFault(data []byte) error {
 	return nil
 }
 
-func toHTTPURL(rawURL string) string {
+func toHTTPURL(rawURL string, onvifPort ...int) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
+	port := 0
+	if len(onvifPort) > 0 {
+		port = onvifPort[0]
+	}
 	switch u.Scheme {
 	case "rtsp":
 		u.Scheme = "http"
-		if u.Port() == "554" {
-			u.Host = u.Hostname() + ":80"
+		if port > 0 {
+			u.Host = u.Hostname() + ":" + strconv.Itoa(port)
+		} else if u.Port() == "554" {
+			u.Host = u.Hostname() + ":8000"
 		}
+		u.Path = ""
+		u.RawPath = ""
 	case "rtsps":
 		u.Scheme = "https"
-		if u.Port() == "322" {
+		if port > 0 {
+			u.Host = u.Hostname() + ":" + strconv.Itoa(port)
+		} else if u.Port() == "322" {
 			u.Host = u.Hostname() + ":443"
 		}
+		u.Path = ""
+		u.RawPath = ""
 	}
 	return u.String()
 }
 
-func BuildMediaURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/media_service"
+func BuildMediaURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/media_service"
 }
 
-func BuildPTZURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/ptz_service"
+func BuildPTZURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/ptz_service"
 }
 
-func BuildDeviceURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/device_service"
+func BuildDeviceURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/device_service"
 }
 
-func BuildEventURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/event_service"
+func BuildEventURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/event_service"
 }
 
-func BuildImagingURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/imaging_service"
+func BuildImagingURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/imaging_service"
 }
 
-func BuildRecordingURL(baseURL string) string {
-	return strings.TrimRight(toHTTPURL(baseURL), "/") + "/onvif/recording_service"
+func BuildRecordingURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/recording_service"
 }
 
-func BuildReplayURL(baseURL string) string {
-	return strings.TrimRight(baseURL, "/") + "/onvif/replay_service"
+func BuildReplayURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/replay_service"
 }
 
-func BuildAnalyticsURL(baseURL string) string {
-	return strings.TrimRight(baseURL, "/") + "/onvif/analytics_service"
+func BuildAnalyticsURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/analytics_service"
 }
 
-func BuildDeviceIOURL(baseURL string) string {
-	return strings.TrimRight(baseURL, "/") + "/onvif/deviceio_service"
+func BuildDeviceIOURL(baseURL string, onvifPort ...int) string {
+	return strings.TrimRight(toHTTPURL(baseURL, onvifPort...), "/") + "/onvif/deviceio_service"
 }
 
 func ExtractXMLString(data []byte, tag string) (string, error) {
