@@ -249,11 +249,7 @@ func (s *CameraService) Start(ctx context.Context) error {
 				s.logger.Info("Camera cleanup stopped")
 				return
 			case <-ticker.C:
-				_, err := s.db.Exec("DELETE FROM recordings WHERE camera_id IN (SELECT id FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days')")
-				if err != nil {
-					s.logger.Error("Failed to cleanup orphaned recordings", "error", err)
-				}
-				_, err = s.db.Exec("DELETE FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days'")
+				_, err := s.db.ExecContext(ctx, "DELETE FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days'")
 				if err != nil {
 					s.logger.Error("Failed to cleanup soft-deleted cameras", "error", err)
 				}
@@ -484,6 +480,9 @@ func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCamer
 		if recordingCount > 1000 && !req.Force {
 			return nil, status.Errorf(codes.FailedPrecondition, "camera has %d recordings; use force=true to delete", recordingCount)
 		}
+		if recordingCount > 0 {
+			s.logger.Warn("Hard-deleting camera with recordings", "id", req.Id, "recording_count", recordingCount, "force", req.Force)
+		}
 		_, err = s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1", req.Id)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to hard delete camera: %v", err)
@@ -647,7 +646,7 @@ func (s *CameraService) SmartSearch(ctx context.Context, req *damv1.SmartSearchR
 	          FROM ai_events e
 	          JOIN cameras c ON e.camera_id = c.id
 	          JOIN sites s ON c.site_id = s.id
-	          WHERE 1=1`
+	          WHERE c.deleted_at IS NULL`
 	args := []interface{}{}
 	argIdx := 1
 
