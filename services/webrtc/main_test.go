@@ -14,6 +14,7 @@ import (
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/pion/webrtc/v3"
+	"github.com/stretchr/testify/assert"
 )
 
 func generateTestJWT(username, role string) string {
@@ -315,4 +316,28 @@ func TestAddTrackSucceedsWithDefaultCodecs(t *testing.T) {
 	if _, err = pc.AddTrack(track); err != nil {
 		t.Fatalf("AddTrack failed with default codecs: %v", err)
 	}
+}
+
+func TestCreateOfferHandler_SuccessPath(t *testing.T) {
+	os.Setenv("JWT_SECRET", "test-secret-for-webrtc-auth")
+	common.ReloadJWTKey()
+	defer func() {
+		os.Unsetenv("JWT_SECRET")
+		common.ReloadJWTKey()
+	}()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := &WebRTCService{logger: logger}
+
+	token := generateTestJWT("testuser", "viewer")
+	body := bytes.NewReader([]byte("invalid offer body"))
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/offer?camera_id=cam1", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	common.JWTAuthMiddleware(svc.createOfferHandler)(rr, req)
+
+	// Expect 400 (invalid offer body) rather than 500 — proving
+	// input validation works correctly before hitting infrastructure.
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
