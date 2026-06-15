@@ -224,6 +224,7 @@ func (s *AuthService) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	username := r.Context().Value(common.UserKey).(string)
 
 	var req mfaVerifyRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -319,6 +320,7 @@ func (s *AuthService) handleMFARecovery(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req mfaRecoveryRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return

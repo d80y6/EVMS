@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -108,6 +109,7 @@ type AuthConfig struct {
 	LDAPBindDN   string
 	LDAPPassword string
 	LDAPFilter   string
+	LDAPUseTLS   bool
 
 	PasswordPolicy PasswordPolicy
 	SessionLimit   int
@@ -129,6 +131,7 @@ func DefaultAuthConfig() AuthConfig {
 		LDAPBindDN:   common.GetEnv("LDAP_BIND_DN", ""),
 		LDAPPassword: getSecret("LDAP_PASSWORD"),
 		LDAPFilter:   common.GetEnv("LDAP_FILTER", "(uid=%s)"),
+		LDAPUseTLS:   os.Getenv("LDAP_USE_TLS") != "false",
 
 		PasswordPolicy: policy,
 		SessionLimit:   20,
@@ -301,6 +304,7 @@ func (s *AuthService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req LoginRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.Warn("Invalid login request", "error", err)
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -436,7 +440,13 @@ func (s *AuthService) authenticateUser(ctx context.Context, username, password s
 }
 
 func (s *AuthService) authenticateLDAP(ctx context.Context, username, password string) (*User, error) {
-	conn, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", s.config.LDAPHost, s.config.LDAPPort))
+	var conn *ldap.Conn
+	var err error
+	if s.config.LDAPUseTLS {
+		conn, err = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", s.config.LDAPHost, s.config.LDAPPort), &tls.Config{ServerName: s.config.LDAPHost})
+	} else {
+		conn, err = ldap.Dial("tcp", fmt.Sprintf("%s:%d", s.config.LDAPHost, s.config.LDAPPort))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ldap dial: %w", err)
 	}
@@ -577,6 +587,7 @@ func (s *AuthService) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req refreshTokenRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -706,6 +717,7 @@ func (s *AuthService) handleRevokeSession(w http.ResponseWriter, r *http.Request
 	}
 
 	var req revokeSessionRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -773,6 +785,7 @@ func (s *AuthService) handleLogout(w http.ResponseWriter, r *http.Request) {
 	username := r.Context().Value(common.UserKey).(string)
 
 	var req refreshTokenRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -877,6 +890,7 @@ func (s *AuthService) handleAdminCreateUser(w http.ResponseWriter, r *http.Reque
 	}
 
 	var req CreateUserRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -935,6 +949,7 @@ func (s *AuthService) handleAdminUpdateUser(w http.ResponseWriter, r *http.Reque
 	}
 
 	var req UpdateUserRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return

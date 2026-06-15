@@ -75,6 +75,16 @@ export default function ExportPage() {
             <p><span className="text-slate-500">Size:</span> {(result.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
             <p><span className="text-slate-500">SHA256:</span> <span className="font-mono text-green-400">{result.sha256}</span></p>
           </div>
+          <div className="flex gap-2 pt-2">
+            <button onClick={() => { const a = document.createElement('a'); a.href = result.file_path; a.download = result.file_path.split('/').pop() || 'export.mp4'; a.click(); }}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors">
+              Download
+            </button>
+            <button onClick={() => { navigator.clipboard.writeText(result.sha256); }}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium rounded-lg transition-colors">
+              Copy SHA256
+            </button>
+          </div>
         </div>
       )}
     </div>

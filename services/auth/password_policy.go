@@ -295,6 +295,7 @@ func (s *AuthService) handleChangePassword(w http.ResponseWriter, r *http.Reques
 	username := r.Context().Value(common.UserKey).(string)
 
 	var req passwordChangeRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return

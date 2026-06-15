@@ -352,8 +352,14 @@ export default function CamerasPage() {
         }
       />
 
-      {viewMode ===
-      'table' ? (
+      {filteredCameras.length === 0 ? (
+        <div className="h-64 flex items-center justify-center text-slate-500">
+          <div className="text-center space-y-2">
+            <p className="text-lg">No cameras configured</p>
+            <p className="text-sm">Add a camera using the button above or run discovery to find cameras on your network.</p>
+          </div>
+        </div>
+      ) : viewMode === 'table' ? (
         <CameraGrid
           cameras={
             filteredCameras

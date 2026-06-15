@@ -20,22 +20,33 @@ export default function WebhooksPage() {
   const [eventTypes, setEventTypes] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
-  const load = () => {
+  const load = async () => {
     setLoading(true);
     setError(null);
-    api.listWebhooks().then(d => setWebhooks(d.webhooks || [])).catch(err => setError(err instanceof Error ? err.message : 'Failed to load webhooks')).finally(() => setLoading(false));
+    try {
+      const d = await api.listWebhooks();
+      setWebhooks(d.webhooks || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load webhooks');
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
 
   const handleSave = async () => {
     try {
+      setError(null);
       const data = { name, url, event_types: eventTypes.split(',').map(s => s.trim()).filter(Boolean) };
       if (editing) {
         await api.updateWebhook(editing.id, data);
+        setSuccess('Webhook updated');
       } else {
         await api.createWebhook(data);
+        setSuccess('Webhook created');
       }
       setShowForm(false);
       setEditing(null);
@@ -50,7 +61,9 @@ export default function WebhooksPage() {
 
   const handleDelete = async (id: string) => {
     try {
+      setError(null);
       await api.deleteWebhook(id);
+      setSuccess('Webhook deleted');
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete webhook');
@@ -98,6 +111,12 @@ export default function WebhooksPage() {
       {error && (
         <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">
           {error}
+        </div>
+      )}
+
+      {success && (
+        <div className="border border-green-800 bg-green-950/20 rounded-xl p-4 text-green-400">
+          {success}
         </div>
       )}
 

@@ -20,7 +20,7 @@ func TestNewPlaybackService(t *testing.T) {
 			RecordingsRoot: "/nonexistent/path/that/does/not/exist",
 			Port:           ":9999",
 		}
-		_, err := NewPlaybackService(config, nil)
+		_, err := NewPlaybackService(config, nil, nil)
 		if err == nil {
 			t.Error("expected error with non-existent recordings root")
 		}

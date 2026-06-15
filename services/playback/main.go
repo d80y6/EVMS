@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/dam-vms/dam/pkg/common"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
 type PlaybackConfig struct {
@@ -34,9 +36,10 @@ type PlaybackService struct {
 	recordings    string
 	server        *http.Server
 	healthHandler *common.HealthHandler
+	db            *sqlx.DB
 }
 
-func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackService, error) {
+func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger, db *sqlx.DB) (*PlaybackService, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -56,6 +59,7 @@ func NewPlaybackService(config *PlaybackConfig, logger *slog.Logger) (*PlaybackS
 		logger:        logger,
 		recordings:    absRoot,
 		healthHandler: common.NewHealthHandler(),
+		db:            db,
 	}, nil
 }
 
@@ -92,6 +96,28 @@ func (s *PlaybackService) handlePlaybackRequest(w http.ResponseWriter, r *http.R
 	if relPath == "" {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
+	}
+
+	// Authorize: verify camera belongs to user's tenant
+	if s.db != nil {
+		parts := strings.SplitN(relPath, "/", 2)
+		if len(parts) > 0 && parts[0] != "" {
+			tenantID := r.Header.Get("X-Tenant-ID")
+			if tenantID != "" {
+				var count int
+				err := s.db.Get(&count,
+					`SELECT COUNT(*) FROM cameras c
+					 JOIN sites s ON c.site_id = s.id
+					 WHERE c.id = $1 AND s.tenant_id = $2`,
+					parts[0], tenantID)
+				if err != nil || count == 0 {
+					s.logger.Warn("Blocked unauthorized playback access",
+						"camera", parts[0], "remote_addr", r.RemoteAddr)
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
 	}
 
 	// Audio playback support
@@ -243,7 +269,23 @@ func main() {
 	common.StartMetricsServer(common.GetEnv("METRICS_ADDR", ":2112"))
 	common.StartResourceMonitor(ctx)
 
-	service, err := NewPlaybackService(config, logger)
+	var db *sqlx.DB
+	if dbURL := os.Getenv("DB_URL"); dbURL != "" {
+		cb := common.NewDBCircuitBreaker("playback")
+		dbCtx, dbCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer dbCancel()
+		var err error
+		db, err = common.ConnectDBWithCircuitBreaker(dbCtx, "postgres", dbURL, cb)
+		if err != nil {
+			logger.Warn("Failed to connect to database, playback auth disabled", "error", err)
+		} else {
+			logger.Info("Connected to database")
+			healthHandler := common.NewHealthHandler()
+			healthHandler.AddDBChecker(db.DB, "postgres")
+		}
+	}
+
+	service, err := NewPlaybackService(config, logger, db)
 	if err != nil {
 		logger.Error("Failed to initialize playback service", "error", err)
 		os.Exit(1)

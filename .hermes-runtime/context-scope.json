@@ -1,0 +1,13 @@
+{
+  "interview": {
+    "mode": "competitor_gap_analysis",
+    "product": "EVMS artifact only",
+    "allowed_sources": ["/home/ubuntu/EVMS repo: files listed here", "/home/ubuntu/EVMS/runtime UI only after build/runtime"],
+    "rules": [
+      "Use ONLY project artifacts read by Hermes tool or contents explicitly shown by Hermes tools in this conversation (read_file, search_files, terminal).",
+      "No external reference products.",
+      "No inferred/unverified features.",
+      "Mark Unknown only if the product artifact itself does not describe the behavior or workflow."
+    ]
+  }
+}

@@ -123,12 +123,12 @@ export default function SettingsPage() {
     return <div className="p-6 text-slate-400">Loading settings...</div>;
   }
 
-  if (pageError) {
-    return <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">{pageError}</div>;
-  }
-
   return (
     <div className="max-w-2xl space-y-8">
+      {pageError && (
+        <div className="border border-red-800 bg-red-950/20 rounded-xl p-4 text-red-400">{pageError}</div>
+      )}
+
       <h2 className="text-lg font-semibold text-slate-200">Settings</h2>
 
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">

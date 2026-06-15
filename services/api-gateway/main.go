@@ -314,6 +314,19 @@ type upstreamHealth struct {
 	URL  string
 }
 
+type cameraResponse struct {
+	ID            string `json:"id"`
+	SiteID        string `json:"site_id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ConnectionURL string `json:"connection_url"`
+	SubstreamURL  string `json:"substream_url"`
+	Status        string `json:"status"`
+	PtzProtocol   string `json:"ptz_protocol"`
+	RetentionDays int32  `json:"retention_days"`
+	Config        string `json:"config"`
+}
+
 type Gateway struct {
 	config             GatewayConfig
 	logger             *slog.Logger
@@ -972,7 +985,7 @@ func (g *Gateway) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		pathParts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/playback/"), "/", 2)
 		if len(pathParts) > 0 && pathParts[0] != "" {
 			var count int
-			err := g.db.GetContext(r.Context(),
+			err := g.db.GetContext(r.Context(), &count,
 				"SELECT COUNT(*) FROM cameras c JOIN sites s ON c.site_id = s.id WHERE c.id = $1 AND s.tenant_id = $2",
 				pathParts[0], tenantID)
 			if err != nil || count == 0 {
@@ -1042,21 +1055,8 @@ func (g *Gateway) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type getCameraJSON struct {
-		ID            string `json:"id"`
-		SiteID        string `json:"site_id"`
-		Name          string `json:"name"`
-		Description   string `json:"description"`
-		ConnectionURL string `json:"connection_url"`
-		SubstreamURL  string `json:"substream_url"`
-		Status        string `json:"status"`
-		PtzProtocol   string `json:"ptz_protocol"`
-		RetentionDays int32  `json:"retention_days"`
-		Config        string `json:"config"`
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(getCameraJSON{
+	json.NewEncoder(w).Encode(cameraResponse{
 		ID:            camera.Id,
 		SiteID:        camera.SiteId,
 		Name:          camera.Name,
@@ -1117,7 +1117,18 @@ func (g *Gateway) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(camera)
+	json.NewEncoder(w).Encode(cameraResponse{
+		ID:            camera.Id,
+		SiteID:        camera.SiteId,
+		Name:          camera.Name,
+		Description:   camera.Description,
+		ConnectionURL: camera.ConnectionUrl,
+		SubstreamURL:  camera.SubstreamUrl,
+		Status:        camera.Status,
+		PtzProtocol:   camera.PtzProtocol,
+		RetentionDays: camera.RetentionDays,
+		Config:        camera.Config,
+	})
 }
 
 func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
@@ -1167,7 +1178,38 @@ func (g *Gateway) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(camera)
+	json.NewEncoder(w).Encode(cameraResponse{
+		ID:            camera.Id,
+		SiteID:        camera.SiteId,
+		Name:          camera.Name,
+		Description:   camera.Description,
+		ConnectionURL: camera.ConnectionUrl,
+		SubstreamURL:  camera.SubstreamUrl,
+		Status:        camera.Status,
+		PtzProtocol:   camera.PtzProtocol,
+		RetentionDays: camera.RetentionDays,
+		Config:        camera.Config,
+	})
+}
+
+func (g *Gateway) handleCameraCredentials(w http.ResponseWriter, r *http.Request) {
+	cameraID := extractParam(r.URL.Path, "/api/cameras/")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	camera, err := g.cameraSvc.GetCamera(ctx, &damv1.GetCameraRequest{Id: cameraID})
+	if err != nil {
+		g.logger.Error("Failed to get camera", "error", err)
+		jsonError(w, "camera not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"onvif_username": camera.OnvifUsername,
+		"onvif_password": camera.OnvifPassword,
+	})
 }
 
 func (g *Gateway) handleDeleteCamera(w http.ResponseWriter, r *http.Request) {
@@ -2242,6 +2284,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleCameraControl))(w, r)
 	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/config") && r.Method == http.MethodPut:
 		g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(g.handleUpdateCameraConfig))(w, r)
+	case strings.HasPrefix(path, "/api/cameras/") && strings.HasSuffix(path, "/credentials") && r.Method == http.MethodGet:
+		g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(g.handleCameraCredentials))(w, r)
 	case strings.HasPrefix(path, "/api/stream/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(g.handleStreamURL))(w, r)
 	case strings.HasPrefix(path, "/api/thumbnails/"):
@@ -2343,10 +2387,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.notificationProxy.ServeHTTP(w, r)
 		}))(w, r)
 	case strings.HasPrefix(path, "/api/reports"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
-			g.reportingProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+				g.reportingProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+				g.reportingProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/evidence"):
 		if r.Method == http.MethodDelete || r.Method == http.MethodPost || r.Method == http.MethodPut {
 			g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
@@ -2360,21 +2411,49 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}))(w, r)
 		}
 	case strings.HasPrefix(path, "/api/incidents"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			g.alertProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodDelete {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/alerts"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			g.alertProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodDelete || r.Method == http.MethodPost || r.Method == http.MethodPut {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/rules"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			g.alertProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodDelete || r.Method == http.MethodPost || r.Method == http.MethodPut {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/tours"):
-		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			g.alertProxy.ServeHTTP(w, r)
-		}))(w, r)
+		if r.Method == http.MethodDelete || r.Method == http.MethodPost || r.Method == http.MethodPut {
+			g.rateLimiter.rateLimitMiddleware(g.requireRole("operator")(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		} else {
+			g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+				g.alertProxy.ServeHTTP(w, r)
+			}))(w, r)
+		}
 	case strings.HasPrefix(path, "/api/analytics/"):
 		g.rateLimiter.rateLimitMiddleware(g.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			g.alertProxy.ServeHTTP(w, r)

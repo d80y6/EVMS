@@ -115,6 +115,7 @@ func (s *AuthService) handleSSOAuthorize(w http.ResponseWriter, r *http.Request)
 	if redirectURI == "" {
 		if r.Method == http.MethodPost {
 			var req ssoAuthorizeRequest
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
 				redirectURI = req.RedirectURI
 			}
@@ -276,6 +277,7 @@ func (s *AuthService) handleAdminSSOProviders(w http.ResponseWriter, r *http.Req
 			EntityID    string `json:"entity_id"`
 			Certificate string `json:"certificate"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, "invalid request body", http.StatusBadRequest)
 			return

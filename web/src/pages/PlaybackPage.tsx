@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Download,
-  Play,
   RefreshCw,
   Search,
 } from 'lucide-react';
@@ -78,28 +77,18 @@ export default function PlaybackPage() {
         setSearching(true);
 
         const result =
-          await api.getRecordings();
+          await api.getRecordings({
+            start_time: startDate || undefined,
+            end_time: endDate || undefined,
+            camera_id: selectedCamera || undefined,
+          });
 
         const items =
           result.recordings ||
           [];
 
-        const filtered =
-          items.filter(
-            (
-              recording
-            ) => {
-              const cameraMatch =
-                !selectedCamera ||
-                recording.camera_id ===
-                  selectedCamera;
-
-              return cameraMatch;
-            }
-          );
-
         setRecordings(
-          filtered
+          items
         );
 
         setError(null);
@@ -402,13 +391,21 @@ selectedRecording?.camera_id ===
               </div>
             ) : (
               <>
-                <div className="aspect-video bg-black rounded-lg flex items-center justify-center text-slate-500">
-
-                  <Play
-                    size={40}
-                  />
-
-                </div>
+                {selectedRecording.file_path ? (
+                  <video
+                    controls
+                    className="w-full aspect-video bg-black rounded-lg"
+                  >
+                    <source
+                      src={api.getPlaybackUrl(selectedRecording.file_path)}
+                      type="video/mp4"
+                    />
+                  </video>
+                ) : (
+                  <div className="aspect-video bg-black rounded-lg flex items-center justify-center text-slate-500">
+                    Video not available
+                  </div>
+                )}
 
                 <div className="mt-6 space-y-3">
 

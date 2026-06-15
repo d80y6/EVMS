@@ -52,7 +52,7 @@ export default function MfaPage() {
     if (!window.confirm('Disable MFA? This will remove all configured authenticator apps.')) return;
     try {
       setError(null);
-      await api.verifyMFA('');
+      await api.disableMFA();
       setEnabled(false);
       setShowEnroll(false);
       setEnrolled(false);

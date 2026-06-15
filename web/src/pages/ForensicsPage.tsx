@@ -15,6 +15,18 @@ export default function ForensicsPage() {
   const [selectedResult, setSelectedResult] = useState<any>(null);
   const [exportFormat, setExportFormat] = useState<'csv' | 'json'>('csv');
 
+  const [showEvidenceForm, setShowEvidenceForm] = useState(false);
+  const [evidenceName, setEvidenceName] = useState('');
+  const [evidenceDescription, setEvidenceDescription] = useState('');
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceFeedback, setEvidenceFeedback] = useState<string | null>(null);
+
+  const [showIncidentForm, setShowIncidentForm] = useState(false);
+  const [incidentTitle, setIncidentTitle] = useState('');
+  const [incidentSeverity, setIncidentSeverity] = useState('medium');
+  const [incidentLoading, setIncidentLoading] = useState(false);
+  const [incidentFeedback, setIncidentFeedback] = useState<string | null>(null);
+
   // Filters
   const [selectedCameras, setSelectedCameras] = useState<string[]>([]);
   const [startTime, setStartTime] = useState('');
@@ -72,7 +84,7 @@ export default function ForensicsPage() {
 
   const handleExport = async () => {
     try {
-      const data = await api.exportForensics({
+      const body = {
         camera_ids: selectedCameras.length > 0 ? selectedCameras : undefined,
         start_time: startTime ? new Date(startTime).toISOString() : undefined,
         end_time: endTime ? new Date(endTime).toISOString() : undefined,
@@ -80,13 +92,75 @@ export default function ForensicsPage() {
         colors: colors.length > 0 ? colors : undefined,
         direction: direction || undefined,
         min_confidence: minConfidence,
-      }, exportFormat);
+        format: exportFormat,
+      };
+      const token = localStorage.getItem('auth_token');
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch('/api/forensics/export', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = data.file_path || '';
+      a.href = url;
       a.download = `forensics-export.${exportFormat}`;
       a.click();
+      URL.revokeObjectURL(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Export failed');
+    }
+  };
+
+  const handleCreateEvidence = async () => {
+    if (!selectedResult) return;
+    setEvidenceLoading(true);
+    setEvidenceFeedback(null);
+    try {
+      const caseRes = await api.createEvidenceCase({
+        name: evidenceName || 'Forensics Evidence',
+        case_number: `EV-${Date.now()}`,
+        description: evidenceDescription || undefined,
+      });
+      await api.addEvidenceItem(caseRes.id, {
+        name: `Detection ${selectedResult.track_id || selectedResult.event_id}`,
+        camera_id: selectedResult.camera_id,
+        timestamp: selectedResult.event_time || selectedResult.timestamp,
+      });
+      setEvidenceFeedback('Evidence created successfully');
+      setShowEvidenceForm(false);
+      setEvidenceName('');
+      setEvidenceDescription('');
+    } catch (err) {
+      setEvidenceFeedback(err instanceof Error ? err.message : 'Failed to create evidence');
+    } finally {
+      setEvidenceLoading(false);
+    }
+  };
+
+  const handleCreateIncident = async () => {
+    if (!selectedResult) return;
+    setIncidentLoading(true);
+    setIncidentFeedback(null);
+    try {
+      await api.createIncident({
+        title: incidentTitle,
+        severity: incidentSeverity,
+        description: `Detection from ${selectedResult.camera_id} at ${selectedResult.event_time || selectedResult.timestamp}`,
+        camera_ids: [selectedResult.camera_id],
+      });
+      setIncidentFeedback('Incident created successfully');
+      setShowIncidentForm(false);
+      setIncidentTitle('');
+      setIncidentSeverity('medium');
+    } catch (err) {
+      setIncidentFeedback(err instanceof Error ? err.message : 'Failed to create incident');
+    } finally {
+      setIncidentLoading(false);
     }
   };
 
@@ -253,6 +327,71 @@ export default function ForensicsPage() {
                 )}
                 {selectedResult.direction && (
                   <p><span className="text-slate-500">Direction:</span> {selectedResult.direction}</p>
+                )}
+              </div>
+
+              {/* Evidence Creation */}
+              <div className="border-t border-slate-800 pt-3">
+                {!showEvidenceForm ? (
+                  <button onClick={() => setShowEvidenceForm(true)}
+                    className="w-full px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium rounded transition-colors">
+                    Create Evidence Case
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <input type="text" value={evidenceName} onChange={(e) => setEvidenceName(e.target.value)}
+                      placeholder="Evidence name" className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white" />
+                    <input type="text" value={evidenceDescription} onChange={(e) => setEvidenceDescription(e.target.value)}
+                      placeholder="Description (optional)" className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white" />
+                    <div className="flex gap-2">
+                      <button onClick={handleCreateEvidence} disabled={evidenceLoading}
+                        className="flex-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-800 text-white text-xs font-medium rounded transition-colors">
+                        {evidenceLoading ? 'Creating...' : 'Create'}
+                      </button>
+                      <button onClick={() => { setShowEvidenceForm(false); setEvidenceFeedback(null); }}
+                        className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium rounded transition-colors">
+                        Cancel
+                      </button>
+                    </div>
+                    {evidenceFeedback && (
+                      <p className="text-xs text-amber-400">{evidenceFeedback}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Incident Creation */}
+              <div className="border-t border-slate-800 pt-3">
+                {!showIncidentForm ? (
+                  <button onClick={() => setShowIncidentForm(true)}
+                    className="w-full px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-medium rounded transition-colors">
+                    Create Incident
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <input type="text" value={incidentTitle} onChange={(e) => setIncidentTitle(e.target.value)}
+                      placeholder="Incident title" className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white" />
+                    <select value={incidentSeverity} onChange={(e) => setIncidentSeverity(e.target.value)}
+                      className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                    <div className="flex gap-2">
+                      <button onClick={handleCreateIncident} disabled={incidentLoading}
+                        className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:bg-red-800 text-white text-xs font-medium rounded transition-colors">
+                        {incidentLoading ? 'Creating...' : 'Create'}
+                      </button>
+                      <button onClick={() => { setShowIncidentForm(false); setIncidentFeedback(null); }}
+                        className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium rounded transition-colors">
+                        Cancel
+                      </button>
+                    </div>
+                    {incidentFeedback && (
+                      <p className="text-xs text-red-400">{incidentFeedback}</p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

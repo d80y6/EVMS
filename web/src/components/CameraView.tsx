@@ -4,6 +4,7 @@ import { api, getCSRFToken, getAuthToken } from '../api/client';
 interface CameraViewProps {
   cameraId: string;
   streamType?: string;
+  cameraName?: string;
 }
 
 const RECONNECT_DELAY = 5000;

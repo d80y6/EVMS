@@ -281,14 +281,14 @@ func (s *ThumbnailService) findRecording(cameraID string, ts time.Time) string {
 		base := filepath.Base(match)
 		base = strings.TrimSuffix(base, ".mp4")
 		parts := strings.Split(base, "_")
-		if len(parts) < 2 {
+		if len(parts) < 4 {
 			continue
 		}
-		start, err := time.Parse("20060102_150405", parts[0])
+		start, err := time.Parse("20060102_150405", parts[0]+"_"+parts[1])
 		if err != nil {
 			continue
 		}
-		end, err := time.Parse("20060102_150405", parts[len(parts)-1])
+		end, err := time.Parse("20060102_150405", parts[len(parts)-2]+"_"+parts[len(parts)-1])
 		if err != nil {
 			end = start.Add(time.Hour)
 		}

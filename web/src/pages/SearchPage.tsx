@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Search,
   RefreshCw,
@@ -86,11 +86,6 @@ export default function SearchPage() {
         setLoading(false);
       }
     };
-
-  useEffect(() => {
-    void executeSearch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const stats =
     useMemo(() => {

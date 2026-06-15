@@ -23,7 +23,8 @@ export default function DiscoveryPage() {
   const [resultPage, setResultPage] = useState(1);
   const [resultQuery, setResultQuery] = useState('');
   const [selectedResults, setSelectedResults] = useState<Set<string>>(new Set());
-  const [credentials] = useState<Record<string, { username: string; password: string }>>({});
+  const [importUsername, setImportUsername] = useState('');
+  const [importPassword, setImportPassword] = useState('');
   const [importing, setImporting] = useState(false);
   const [importResults, setImportResults] = useState<{ result_id: string; status: string; error?: string }[]>([]);
 
@@ -102,12 +103,12 @@ export default function DiscoveryPage() {
     setImporting(true);
     setImportResults([]);
     try {
-      const credsList = Array.from(selectedResults)
-        .filter(id => credentials[id])
-        .map(id => ({ result_id: id, ...credentials[id] }));
+      const credsList = importUsername && importPassword
+        ? Array.from(selectedResults).map(id => ({ result_id: id, username: importUsername, password: importPassword }))
+        : undefined;
       const res = await api.importDiscoveryResults(currentScanId, {
         result_ids: Array.from(selectedResults),
-        credentials: credsList.length > 0 ? credsList : undefined,
+        credentials: credsList,
       });
       setImportResults([
         ...Array.from({ length: res.imported }, () => ({ result_id: '', status: 'imported' as const })),
@@ -281,6 +282,14 @@ export default function DiscoveryPage() {
                 <input type="checkbox" checked={selectedResults.size === results.length} onChange={toggleAllResults} className="rounded" />
                 Select All ({results.length} found)
               </label>
+              <div className="flex items-center gap-2 ml-2 border-l border-slate-700 pl-3">
+                <input type="text" value={importUsername} onChange={e => setImportUsername(e.target.value)}
+                  placeholder="ONVIF Username"
+                  className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 w-36" />
+                <input type="password" value={importPassword} onChange={e => setImportPassword(e.target.value)}
+                  placeholder="ONVIF Password"
+                  className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 w-36" />
+              </div>
               <button onClick={handleImport} disabled={selectedResults.size === 0 || importing}
                 className="text-xs px-3 py-1 bg-green-600 hover:bg-green-500 disabled:bg-green-800 text-white rounded transition-colors">
                 {importing ? 'Importing...' : `Import Selected (${selectedResults.size})`}

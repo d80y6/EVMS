@@ -65,8 +65,7 @@ export default function CameraDialog({
         camera.ptz_protocol || 'none',
       retention_days:
         camera.retention_days || 30,
-      onvif_username:
-        camera.onvif_username || '',
+      onvif_username: '',
       onvif_password: '',
     });
 

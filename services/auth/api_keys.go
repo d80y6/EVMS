@@ -155,6 +155,7 @@ func (s *AuthService) handleCreateAPIKey(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req createAPIKeyRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return

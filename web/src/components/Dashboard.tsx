@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { VirtuosoGrid } from 'react-virtuoso';
 import { api, Camera } from '../api/client';
 import CameraCard from './CameraCard';
+import CameraView from './CameraView';
 
 type LayoutMode = '1x1' | '2x2' | '3x3';
 
@@ -28,8 +29,10 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [heatmapEnabled, setHeatmapEnabled] = useState(false);
   const [heatmapData, setHeatmapData] = useState<Record<string, HeatmapCell[]>>({});
+  const [selectedCamera, setSelectedCamera] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const selectedSite = searchParams.get('site') || '';
+  const modalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.getCameras()
@@ -83,6 +86,16 @@ export default function Dashboard() {
       setHeatmapData({});
     }
   }, [heatmapEnabled, filteredCameras, fetchHeatmaps]);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedCamera(null);
+    };
+    if (selectedCamera) {
+      document.addEventListener('keydown', handleKey);
+      return () => document.removeEventListener('keydown', handleKey);
+    }
+  }, [selectedCamera]);
 
   return (
     <>
@@ -155,6 +168,7 @@ export default function Dashboard() {
                       name={cam.name}
                       status={cam.status}
                       ptzProtocol={cam.ptz_protocol}
+                      onClick={() => setSelectedCamera(cam.id)}
                     />
                     {heatmapEnabled && cells && cells.length > 0 && (
                       <div className="absolute inset-0 z-20 pointer-events-none">
@@ -179,6 +193,25 @@ export default function Dashboard() {
             }}
             listClassName={`grid ${LAYOUT_COLS[layout]} gap-0`}
           />
+        </div>
+      )}
+
+      {selectedCamera && (
+        <div
+          ref={modalRef}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === modalRef.current) setSelectedCamera(null); }}
+        >
+          <div className="relative w-[95vw] h-[90vh]">
+            <button
+              onClick={() => setSelectedCamera(null)}
+              className="absolute -top-10 right-0 z-10 text-white/70 hover:text-white text-2xl leading-none"
+              aria-label="Close fullscreen view"
+            >
+              ✕
+            </button>
+            <CameraView cameraId={selectedCamera} />
+          </div>
         </div>
       )}
     </>

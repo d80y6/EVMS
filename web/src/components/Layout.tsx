@@ -34,7 +34,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCamerasSub, setShowCamerasSub] = useState(false);
   const [showMonitoringSub, setShowMonitoringSub] = useState(false);
-  const [showMapsSub, setShowMapsSub] = useState(false);
   const selectedSite = searchParams.get('site') || '';
 
   useEffect(() => {
@@ -148,19 +147,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </div>
             )}
           </div>
-
-          <button onClick={() => setShowMapsSub(!showMapsSub)}
-            className="flex items-center gap-3 px-4 py-2 rounded-md text-sm font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-900 transition-colors">
-            <span className="w-5 text-center text-xs">{showMapsSub ? '▾' : '▸'}</span>
-            Maps & GIS
-          </button>
-          {showMapsSub && (
-            <div className="flex flex-col gap-0.5 ml-4">
-              <NavLink to="/map" className={({ isActive }) => `px-4 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-3 ${isActive ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900'}`}>
-                <span className="w-4 text-center">🗺</span>Map
-              </NavLink>
-            </div>
-          )}
 
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-1">
             <h3 className="text-[10px] uppercase tracking-widest text-slate-600 px-2 pb-2 font-medium">Sites</h3>

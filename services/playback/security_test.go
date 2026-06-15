@@ -16,7 +16,7 @@ func newTestService(t *testing.T, root string) *PlaybackService {
 		RecordingsRoot: root,
 		Port:           ":0",
 	}
-	s, err := NewPlaybackService(config, nil)
+	s, err := NewPlaybackService(config, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

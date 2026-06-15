@@ -8,6 +8,7 @@ interface CameraCardProps {
   name: string;
   status: string;
   ptzProtocol: string;
+  onClick?: (cameraId: string) => void;
 }
 
 export default function CameraCard({
@@ -15,17 +16,19 @@ export default function CameraCard({
   name,
   status,
   ptzProtocol,
+  onClick,
 }: CameraCardProps) {
   const [ptzVisible, setPtzVisible] = useState(false);
   const { activeType, setActiveType } = useStreamSelector(cameraId);
 
   return (
     <div className="space-y-3">
-      <div
-        className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group"
-        onMouseEnter={() => setPtzVisible(true)}
-      >
-        <CameraView cameraId={cameraId} streamType={activeType} />
+        <div
+          className="relative aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-700 group cursor-pointer"
+          onMouseEnter={() => setPtzVisible(true)}
+          onClick={() => onClick?.(cameraId)}
+        >
+          <CameraView cameraId={cameraId} streamType={activeType} cameraName={name} />
 
         {ptzProtocol !== 'none' && (
           <PtzOverlay

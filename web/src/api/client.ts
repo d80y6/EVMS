@@ -101,7 +101,6 @@ export interface Camera {
   status: string;
   ptz_protocol: string;
   retention_days: number;
-  onvif_username: string;
   config?: string;
 }
 
@@ -395,8 +394,14 @@ export const api = {
       body: JSON.stringify({ config }),
     }),
 
-  getRecordings: () =>
-    request<{ recordings: Recording[] }>('/recordings'),
+  getRecordings: (params?: { start_time?: string; end_time?: string; camera_id?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.start_time) q.set('start_time', params.start_time);
+    if (params?.end_time) q.set('end_time', params.end_time);
+    if (params?.camera_id) q.set('camera_id', params.camera_id);
+    const qs = q.toString();
+    return request<{ recordings: Recording[] }>('/recordings' + (qs ? '?' + qs : ''));
+  },
 
   getEvents: () =>
     request<{ events: AIEvent[] }>('/events'),
@@ -876,6 +881,11 @@ export const api = {
     request<{status: string; mfa_token?: string; message?: string}>('/mfa/recovery', {
       method: 'POST',
       body: JSON.stringify({ code }),
+    }),
+
+  disableMFA: () =>
+    request<{status: string; message?: string}>('/mfa/disable', {
+      method: 'POST',
     }),
 
   // Sessions
