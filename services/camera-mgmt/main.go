@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -80,6 +82,81 @@ type AiEvent struct {
 	BoundingBox string  `db:"bounding_box"`
 	TrackID     string  `db:"track_id"`
 	Thumbnail   string  `db:"thumbnail"`
+}
+
+type validationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+type validationErrors []validationError
+
+func (v validationErrors) Error() string {
+	var b strings.Builder
+	for i, e := range v {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(e.Field)
+		b.WriteString(": ")
+		b.WriteString(e.Message)
+	}
+	return b.String()
+}
+
+var validPTZProtocols = map[string]bool{
+	"NONE": true, "onvif": true, "vapix": true, "hikvision": true,
+}
+
+func validateCamera(req *damv1.CreateCameraRequest, existing ...*Camera) error {
+	var errs validationErrors
+
+	if strings.TrimSpace(req.Name) == "" {
+		errs = append(errs, validationError{"name", "name is required"})
+	} else if len(req.Name) > 255 {
+		errs = append(errs, validationError{"name", "name must be 255 characters or fewer"})
+	}
+
+	if strings.TrimSpace(req.SiteId) == "" {
+		errs = append(errs, validationError{"site_id", "site_id is required"})
+	}
+
+	if strings.TrimSpace(req.ConnectionUrl) == "" {
+		errs = append(errs, validationError{"connection_url", "connection_url is required"})
+	} else {
+		u, err := url.Parse(req.ConnectionUrl)
+		if err != nil || (u.Scheme != "rtsp" && u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, validationError{"connection_url", "must be a valid rtsp://, http://, or https:// URL"})
+		}
+	}
+
+	if req.SubstreamUrl != "" {
+		u, err := url.Parse(req.SubstreamUrl)
+		if err != nil || (u.Scheme != "rtsp" && u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, validationError{"substream_url", "must be a valid rtsp://, http://, or https:// URL"})
+		}
+	}
+
+	if req.PtzProtocol != "" && !validPTZProtocols[req.PtzProtocol] {
+		errs = append(errs, validationError{"ptz_protocol", "must be one of: NONE, onvif, vapix, hikvision"})
+	}
+
+	if req.RetentionDays < 0 || req.RetentionDays > 3650 {
+		errs = append(errs, validationError{"retention_days", "must be between 0 and 3650"})
+	}
+
+	if req.PrerecordSeconds < 0 || req.PrerecordSeconds > 30 {
+		errs = append(errs, validationError{"prerecord_seconds", "must be between 0 and 30"})
+	}
+
+	if (req.OnvifUsername != "") != (req.OnvifPassword != "") {
+		errs = append(errs, validationError{"onvif_credentials", "both username and password are required when using ONVIF authentication"})
+	}
+
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
 }
 
 // CameraService handles camera management operations
@@ -250,6 +327,14 @@ func (s *CameraService) GetCamera(ctx context.Context, req *damv1.GetCameraReque
 
 // CreateCamera creates a new camera record
 func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCameraRequest) (*damv1.Camera, error) {
+	if err := validateCamera(req); err != nil {
+		s.logger.Warn("Camera validation failed", "error", err)
+		st, _ := status.New(codes.InvalidArgument, "validation failed").WithDetails(
+			&errdetails.BadRequest_FieldViolation{Field: "camera", Description: err.Error()},
+		)
+		return nil, st.Err()
+	}
+
 	tenantID := common.TenantFromContext(ctx)
 	if tenantID != "" {
 		var siteTenantID string
@@ -302,6 +387,26 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 			return nil, status.Errorf(codes.NotFound, "camera not found")
 		}
 		_ = existing
+	}
+
+	createReq := &damv1.CreateCameraRequest{
+		SiteId:           req.SiteId,
+		Name:             req.Name,
+		Description:      req.Description,
+		ConnectionUrl:    req.ConnectionUrl,
+		SubstreamUrl:     req.SubstreamUrl,
+		PtzProtocol:      req.PtzProtocol,
+		RetentionDays:    req.RetentionDays,
+		PrerecordSeconds: req.PrerecordSeconds,
+		OnvifUsername:    req.OnvifUsername,
+		OnvifPassword:    req.OnvifPassword,
+	}
+	if err := validateCamera(createReq); err != nil {
+		s.logger.Warn("Camera validation failed", "error", err)
+		st, _ := status.New(codes.InvalidArgument, "validation failed").WithDetails(
+			&errdetails.BadRequest_FieldViolation{Field: "camera", Description: err.Error()},
+		)
+		return nil, st.Err()
 	}
 
 	prerecordSeconds := req.PrerecordSeconds
