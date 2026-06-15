@@ -13,12 +13,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dam-vms/dam/api/v1"
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/dam-vms/dam/pkg/onvif"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 )
 
@@ -30,6 +32,12 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 
 func jsonOK(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeJSON(w http.ResponseWriter, code int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(data)
 }
 
@@ -49,6 +57,104 @@ func DefaultPTZConfig() *PTZConfig {
 	}
 }
 
+type ptzRateLimiter struct {
+	mu         sync.Mutex
+	limiters   map[string]*rate.Limiter
+	lastCmd    map[string]time.Time
+	semaphores map[string]chan struct{}
+	config     *PTZRateLimitConfig
+}
+
+type PTZRateLimitConfig struct {
+	Rate        rate.Limit
+	Burst       int
+	Cooldown    time.Duration
+	Concurrency int
+}
+
+func getEnvInt(key string, defaultVal int) int {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return defaultVal
+	}
+	return n
+}
+
+func defaultPTZRateLimitConfig() *PTZRateLimitConfig {
+	ratePerSec := getEnvInt("PTZ_RATE_LIMIT", 5)
+	cooldownMs := getEnvInt("PTZ_COOLDOWN_MS", 200)
+	concurrency := getEnvInt("PTZ_CONCURRENCY", 2)
+	return &PTZRateLimitConfig{
+		Rate:        rate.Limit(ratePerSec),
+		Burst:       ratePerSec,
+		Cooldown:    time.Duration(cooldownMs) * time.Millisecond,
+		Concurrency: concurrency,
+	}
+}
+
+func newPTZRateLimiter(cfg *PTZRateLimitConfig) *ptzRateLimiter {
+	return &ptzRateLimiter{
+		limiters:   make(map[string]*rate.Limiter),
+		lastCmd:    make(map[string]time.Time),
+		semaphores: make(map[string]chan struct{}),
+		config:     cfg,
+	}
+}
+
+func (rl *ptzRateLimiter) acquire(cameraID string) error {
+	rl.mu.Lock()
+	lim, ok := rl.limiters[cameraID]
+	if !ok {
+		lim = rate.NewLimiter(rl.config.Rate, rl.config.Burst)
+		rl.limiters[cameraID] = lim
+	}
+	lastTime, lastOk := rl.lastCmd[cameraID]
+	sem, semOk := rl.semaphores[cameraID]
+	if !semOk {
+		sem = make(chan struct{}, rl.config.Concurrency)
+		rl.semaphores[cameraID] = sem
+	}
+	rl.mu.Unlock()
+
+	if lastOk && len(sem) == 0 {
+		elapsed := time.Since(lastTime)
+		if elapsed < rl.config.Cooldown {
+			return fmt.Errorf("rate limit: cooldown %v remaining", rl.config.Cooldown-elapsed)
+		}
+	}
+
+	if !lim.Allow() {
+		return fmt.Errorf("rate limit: too many PTZ requests")
+	}
+
+	select {
+	case sem <- struct{}{}:
+	default:
+		return fmt.Errorf("rate limit: max concurrent PTZ commands (%d) reached", rl.config.Concurrency)
+	}
+
+	rl.mu.Lock()
+	rl.lastCmd[cameraID] = time.Now()
+	rl.mu.Unlock()
+	return nil
+}
+
+func (rl *ptzRateLimiter) release(cameraID string) {
+	rl.mu.Lock()
+	sem, ok := rl.semaphores[cameraID]
+	rl.mu.Unlock()
+	if ok {
+		<-sem
+	}
+	rl.mu.Lock()
+	delete(rl.lastCmd, cameraID)
+	rl.mu.Unlock()
+}
+
 type PTZService struct {
 	config        *PTZConfig
 	logger        *slog.Logger
@@ -57,6 +163,7 @@ type PTZService struct {
 	httpCli       *http.Client
 	server        *http.Server
 	healthHandler *common.HealthHandler
+	ptzLimiter    *ptzRateLimiter
 }
 
 func NewPTZService(config *PTZConfig, logger *slog.Logger) (*PTZService, error) {
@@ -73,11 +180,12 @@ func NewPTZService(config *PTZConfig, logger *slog.Logger) (*PTZService, error) 
 	cameraSvc := damv1.NewCameraServiceClient(cameraCC)
 
 	return &PTZService{
-		config:    config,
-		logger:    logger,
-		cameraCC:  cameraCC,
-		cameraSvc: cameraSvc,
-		httpCli:   &http.Client{Timeout: config.RequestTimeout},
+		config:     config,
+		logger:     logger,
+		cameraCC:   cameraCC,
+		cameraSvc:  cameraSvc,
+		httpCli:    &http.Client{Timeout: config.RequestTimeout},
+		ptzLimiter: newPTZRateLimiter(defaultPTZRateLimitConfig()),
 	}, nil
 }
 
@@ -138,6 +246,14 @@ func (s *PTZService) handlePTZRouter(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "camera not found", http.StatusNotFound)
 		return
 	}
+
+	if err := s.ptzLimiter.acquire(cameraID); err != nil {
+		s.logger.Warn("PTZ rate limit exceeded", "camera_id", cameraID, "error", err)
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": fmt.Sprintf("rate limit exceeded: %v", err)})
+		return
+	}
+	defer s.ptzLimiter.release(cameraID)
 
 	switch {
 	case action == "move":
@@ -408,7 +524,7 @@ func (s *PTZService) handleRemovePreset(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/cameras/"), "/")
-	if len(parts) < 5 {
+	if len(parts) < 4 {
 		jsonError(w, "preset token required", http.StatusBadRequest)
 		return
 	}
