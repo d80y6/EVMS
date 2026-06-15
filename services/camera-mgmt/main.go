@@ -212,7 +212,7 @@ func NewCameraService(config *CameraConfig, logger *slog.Logger) (*CameraService
 }
 
 // Start initializes and starts the gRPC server
-func (s *CameraService) Start() error {
+func (s *CameraService) Start(ctx context.Context) error {
 	lis, err := net.Listen("tcp", s.config.GRPCPort)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.config.GRPCPort, err)
@@ -245,6 +245,9 @@ func (s *CameraService) Start() error {
 		defer ticker.Stop()
 		for {
 			select {
+			case <-ctx.Done():
+				s.logger.Info("Camera cleanup stopped")
+				return
 			case <-ticker.C:
 				_, err := s.db.Exec("DELETE FROM recordings WHERE camera_id IN (SELECT id FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days')")
 				if err != nil {
@@ -481,7 +484,7 @@ func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCamer
 		if recordingCount > 1000 && !req.Force {
 			return nil, status.Errorf(codes.FailedPrecondition, "camera has %d recordings; use force=true to delete", recordingCount)
 		}
-		_, err = s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1 AND deleted_at IS NOT NULL", req.Id)
+		_, err = s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1", req.Id)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to hard delete camera: %v", err)
 		}
@@ -503,10 +506,10 @@ func (s *CameraService) StreamStatus(ctx context.Context, req *damv1.StreamStatu
 	var err error
 	if tenantID != "" {
 		err = s.db.GetContext(ctx, &statusStr,
-			"SELECT c.status FROM cameras c JOIN sites s ON c.site_id = s.id WHERE c.id = $1 AND s.tenant_id = $2",
+			"SELECT c.status FROM cameras c JOIN sites s ON c.site_id = s.id WHERE c.id = $1 AND s.tenant_id = $2 AND c.deleted_at IS NULL",
 			req.CameraId, tenantID)
 	} else {
-		err = s.db.GetContext(ctx, &statusStr, "SELECT status FROM cameras WHERE id = $1", req.CameraId)
+		err = s.db.GetContext(ctx, &statusStr, "SELECT status FROM cameras WHERE id = $1 AND deleted_at IS NULL", req.CameraId)
 	}
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "camera not found")
@@ -819,7 +822,7 @@ func (s *CameraService) startHealthCheck(ctx context.Context) {
 
 func (s *CameraService) runHealthCheck() {
 	var cameras []Camera
-	err := s.db.Select(&cameras, "SELECT "+camerasSelectCols+" FROM cameras c")
+	err := s.db.Select(&cameras, "SELECT "+camerasSelectCols+" FROM cameras c WHERE c.deleted_at IS NULL")
 	if err != nil {
 		s.logger.Error("Health check: failed to query cameras", "error", err)
 		return
@@ -895,7 +898,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := service.Start(); err != nil {
+	if err := service.Start(ctx); err != nil {
 		logger.Error("Failed to start camera service", "error", err)
 		os.Exit(1)
 	}
