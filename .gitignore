@@ -40,3 +40,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .build-check/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
