@@ -47,6 +47,9 @@ var (
 	GoRoutinesActive      = newGauge("vms_goroutines_active", "Number of active goroutines")
 	MemoryUsageBytes      = newGauge("vms_memory_usage_bytes", "Process memory usage in bytes")
 
+	// Recording integrity metrics
+	RecordingGaps = newCounterVec("vms_recording_gaps_total", "Total number of recording gaps detected", []string{"camera_id"})
+
 	// Operation metrics
 	LeaderElected         = newGaugeVec("vms_leader_elected", "Leader election status (1=leader, 0=follower)", []string{"service", "shard"})
 	HealthCheckStatus     = newGaugeVec("vms_health_check_status", "Health check status (1=healthy, 0=unhealthy)", []string{"service", "check"})

@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS recording_gaps;
+ALTER TABLE recordings DROP COLUMN IF EXISTS last_verified;
+ALTER TABLE recordings DROP COLUMN IF EXISTS sha256;

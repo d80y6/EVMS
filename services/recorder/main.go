@@ -66,6 +66,7 @@ type RecordingSegment struct {
 	EndTime   time.Time `db:"end_time"`
 	FilePath  string    `db:"file_path"`
 	FileSize  int64     `db:"file_size"`
+	SHA256    string    `db:"sha256"`
 }
 
 // RecordingEvent represents a NATS event for a new recording
@@ -222,8 +223,8 @@ func (r *Recorder) Close() error {
 // IndexSegment stores a recording segment in the database
 func (r *Recorder) IndexSegment(ctx context.Context, seg RecordingSegment) error {
 	start := time.Now()
-	query := `INSERT INTO recordings (camera_id, start_time, end_time, file_path, file_size)
-              VALUES (:camera_id, :start_time, :end_time, :file_path, :file_size)`
+	query := `INSERT INTO recordings (camera_id, start_time, end_time, file_path, file_size, sha256)
+              VALUES (:camera_id, :start_time, :end_time, :file_path, :file_size, :sha256)`
 	_, err := r.db.NamedExecContext(ctx, query, seg)
 	duration := time.Since(start).Seconds()
 	if err != nil {
@@ -390,6 +391,11 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 	// Relocate moov atom to front for fast streaming start
 	fixupMoovAtom(event.Path, r.logger)
 
+	sha256Str, shaErr := computeSHA256(event.Path)
+	if shaErr != nil {
+		r.logger.Warn("Failed to compute recording checksum", "path", event.Path, "error", shaErr)
+	}
+
 	filename := filepath.Base(event.Path)
 	timeStr := strings.TrimSuffix(filename, ".mp4")
 
@@ -418,6 +424,7 @@ func (r *Recorder) processRecordingEvent(ctx context.Context, event RecordingEve
 		EndTime:   endTime,
 		FilePath:  event.Path,
 		FileSize:  info.Size(),
+		SHA256:    sha256Str,
 	}, nil
 }
 
@@ -615,6 +622,13 @@ func (s *RecorderService) Start(ctx context.Context) error {
 
 	// Start background retention worker
 	go recorder.StartRetentionWorker(ctx)
+
+	// Start gap detector and integrity verifier
+	gd := NewGapDetector(recorder.db, s.logger)
+	go gd.Run(ctx)
+
+	iv := NewIntegrityVerifier(recorder.db, s.logger)
+	go iv.Run(ctx)
 
 	// Start archive tiering manager
 	tierConfig := TierConfig{
