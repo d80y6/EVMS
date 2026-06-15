@@ -1,16 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -20,8 +16,11 @@ import (
 
 	"github.com/dam-vms/dam/pkg/common"
 	"github.com/jmoiron/sqlx"
+	"github.com/nats-io/nats.go"
 	_ "github.com/lib/pq"
 )
+
+var exportProducer *ExportJobProducer
 
 type ExportRequest struct {
 	CameraID    string `json:"camera_id"`
@@ -92,61 +91,93 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	segments, err := findSegments(req.CameraID, req.StartTime, req.EndTime)
-	if err != nil {
-		jsonError(w, "failed to find segments", http.StatusInternalServerError)
-		return
-	}
-	if len(segments) == 0 {
-		jsonError(w, "no recordings found", http.StatusNotFound)
+	if exportProducer == nil {
+		jsonError(w, "export queue not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	req.CameraID = sanitizeCameraID(req.CameraID)
-	outputPath := filepath.Join("/exports", fmt.Sprintf("export_%s_%s.mp4", req.CameraID, time.Now().Format("20060102150405")))
-	args := []string{"-y"}
-	for _, seg := range segments {
-		if err := common.ValidateRecordingPath(seg); err != nil {
-			jsonError(w, fmt.Sprintf("invalid segment path: %s", seg), http.StatusBadRequest)
+	ctx := r.Context()
+	job, err := exportProducer.CreateJob(ctx, req)
+	if err != nil {
+		slog.Error("Failed to create export job", "error", err)
+		jsonError(w, "failed to create export job", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+type jobStatusResponse struct {
+	ID          string     `json:"id"`
+	Status      string     `json:"status"`
+	FilePath    *string    `json:"file_path,omitempty"`
+	SHA256      *string    `json:"sha256,omitempty"`
+	SizeBytes   *int64     `json:"size_bytes,omitempty"`
+	Error       *string    `json:"error,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+func handleExportStatus(db *sqlx.DB, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			jsonError(w, "database not configured", http.StatusInternalServerError)
 			return
 		}
-		if err := common.ValidateFilePath(seg, "/recordings"); err != nil {
-			jsonError(w, fmt.Sprintf("segment path outside allowed root: %s", seg), http.StatusBadRequest)
+		jobID := strings.TrimPrefix(r.URL.Path, "/export/status/")
+		if jobID == "" {
+			jsonError(w, "job id required", http.StatusBadRequest)
 			return
 		}
-		args = append(args, "-i", seg)
-	}
-	filter := fmt.Sprintf("concat=%d", len(segments))
-	if req.Watermark {
-		safeCameraID := strings.NewReplacer("'", "\\'", ":", "\\:", "]", "\\]", "(", "\\(", ")", "\\)").Replace(req.CameraID)
-		filter += ",drawtext=text='%{localtime} | Camera: " + safeCameraID + "':fontsize=24:fontcolor=white:x=10:y=10"
-	}
-	args = append(args, "-filter_complex", filter, "-c:v", "libx264", "-preset", "fast", outputPath)
 
-	cmd := exec.CommandContext(r.Context(), "ffmpeg", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		slog.Error("ffmpeg export failed", "error", err, "stderr", stderr.String())
-		jsonError(w, "export failed", http.StatusInternalServerError)
-		return
-	}
+		var job jobStatusResponse
+		err := db.GetContext(r.Context(), &job,
+			"SELECT id, status, file_path, sha256, size_bytes, error, created_at, completed_at FROM export_jobs WHERE id = $1",
+			jobID)
+		if err != nil {
+			jsonError(w, "job not found", http.StatusNotFound)
+			return
+		}
 
-	f, err := os.Open(outputPath)
-	if err != nil {
-		jsonError(w, "failed to read export", http.StatusInternalServerError)
-		return
+		writeJSON(w, http.StatusOK, job)
 	}
-	defer f.Close()
-	h := sha256.New()
-	size, _ := io.Copy(h, f)
-	checksum := fmt.Sprintf("%x", h.Sum(nil))
+}
 
-	json.NewEncoder(w).Encode(ExportResult{
-		FilePath: outputPath,
-		Checksum: checksum,
-		Size:     size,
-	})
+func handleExportDownload(db *sqlx.DB, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if db == nil {
+			jsonError(w, "database not configured", http.StatusInternalServerError)
+			return
+		}
+		jobID := strings.TrimPrefix(r.URL.Path, "/export/download/")
+		if jobID == "" {
+			jsonError(w, "job id required", http.StatusBadRequest)
+			return
+		}
+
+		var job struct {
+			Status   string  `db:"status"`
+			FilePath *string `db:"file_path"`
+		}
+		err := db.GetContext(r.Context(), &job,
+			"SELECT status, file_path FROM export_jobs WHERE id = $1", jobID)
+		if err != nil {
+			jsonError(w, "job not found", http.StatusNotFound)
+			return
+		}
+
+		if job.Status != "completed" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "export not yet completed", "status": job.Status})
+			return
+		}
+
+		if job.FilePath == nil {
+			jsonError(w, "file path not available", http.StatusInternalServerError)
+			return
+		}
+
+		http.ServeFile(w, r, *job.FilePath)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -193,14 +224,56 @@ func main() {
 		}
 	}
 
+	natsURL := os.Getenv("NATS_URL")
+	var nc *nats.Conn
+	if natsURL != "" && db != nil {
+		natsCB := common.NewNATSCircuitBreaker("export")
+		var err error
+		nc, err = common.ConnectNATSWithCircuitBreaker(natsURL, natsCB)
+		if err != nil {
+			logger.Error("Failed to connect to NATS", "error", err)
+		} else {
+			logger.Info("Connected to NATS")
+			exportProducer = NewExportJobProducer(db, nc, logger)
+			consumer := NewExportJobConsumer(db, logger)
+
+			// Recover jobs stuck in processing or queued from prior crashes
+			consumer.RecoverStuckJobs(context.Background())
+
+			sub, err := nc.QueueSubscribe("export.jobs", "export", func(msg *nats.Msg) {
+				var job ExportJob
+				if err := json.Unmarshal(msg.Data, &job); err != nil {
+					logger.Error("Failed to unmarshal export job", "error", err)
+					return
+				}
+				go consumer.ProcessJob(context.Background(), &job)
+			})
+			if err != nil {
+				logger.Error("Failed to subscribe to export.jobs", "error", err)
+				sub = nil
+			} else {
+				logger.Info("Export worker subscribed to export.jobs")
+			}
+
+		if sub != nil {
+			defer sub.Unsubscribe()
+		}
+		}
+	}
+
 	mux := http.NewServeMux()
 	healthHandler := common.NewHealthHandler()
 	if db != nil {
 		healthHandler.AddDBChecker(db.DB, "postgres")
 	}
+	if nc != nil {
+		healthHandler.AddNATSChecker(nc, "nats")
+	}
 	mux.HandleFunc("/health", healthHandler.Liveness)
 	mux.HandleFunc("/ready", healthHandler.Readiness)
 	mux.Handle("/export", common.JWTAuthMiddleware(handleExport))
+	mux.Handle("/export/status/", common.JWTAuthMiddleware(handleExportStatus(db, logger)))
+	mux.Handle("/export/download/", common.JWTAuthMiddleware(handleExportDownload(db, logger)))
 
 	if db != nil {
 		mux.Handle("/api/evidence/cases", common.JWTAuthMiddleware(handleEvidenceCases(db, logger)))
@@ -228,6 +301,9 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	if nc != nil {
+		nc.Drain()
+	}
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	server.Shutdown(shutdownCtx)
