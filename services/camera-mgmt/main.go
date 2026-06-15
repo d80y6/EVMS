@@ -347,6 +347,13 @@ func (s *CameraService) CreateCamera(ctx context.Context, req *damv1.CreateCamer
 			s.logger.Warn("cross-tenant camera creation attempt", "tenant", tenantID, "site_tenant", siteTenantID)
 			return nil, status.Errorf(codes.PermissionDenied, "cannot create camera in another tenant's site")
 		}
+
+		var dupCount int
+		if err := s.db.GetContext(ctx, &dupCount,
+			"SELECT COUNT(*) FROM cameras c JOIN sites s ON c.site_id = s.id WHERE s.tenant_id = $1 AND c.connection_url = $2 AND c.deleted_at IS NULL",
+			tenantID, req.ConnectionUrl); err == nil && dupCount > 0 {
+			return nil, status.Errorf(codes.AlreadyExists, "a camera with this connection URL already exists in this tenant")
+		}
 	}
 
 	ptzProtocol := req.PtzProtocol
