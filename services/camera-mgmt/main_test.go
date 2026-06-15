@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -125,32 +126,32 @@ func TestCheckCameraReachable_Listener(t *testing.T) {
 	}()
 
 	addr := ln.Addr().String()
-	reachable := svc.checkCameraReachable("rtsp://" + addr)
-	assert.True(t, reachable)
+	result := svc.checkCameraReachable("rtsp://" + addr)
+	assert.Equal(t, probeDegraded, result)
 }
 
 func TestCheckCameraReachable_Unreachable(t *testing.T) {
 	svc := &CameraService{}
-	reachable := svc.checkCameraReachable("rtsp://127.0.0.1:1")
-	assert.False(t, reachable)
+	result := svc.checkCameraReachable("rtsp://127.0.0.1:1")
+	assert.Equal(t, probeOffline, result)
 }
 
 func TestCheckCameraReachable_NonRTSP(t *testing.T) {
 	svc := &CameraService{}
-	reachable := svc.checkCameraReachable("192.0.2.1")
-	assert.False(t, reachable)
+	result := svc.checkCameraReachable("192.0.2.1")
+	assert.Equal(t, probeOffline, result)
 }
 
 func TestCheckCameraReachable_WithCredentials(t *testing.T) {
 	svc := &CameraService{}
-	reachable := svc.checkCameraReachable("rtsp://admin:pass@127.0.0.1:1")
-	assert.False(t, reachable)
+	result := svc.checkCameraReachable("rtsp://admin:pass@127.0.0.1:1")
+	assert.Equal(t, probeOffline, result)
 }
 
 func TestCheckCameraReachable_CustomPort(t *testing.T) {
 	svc := &CameraService{}
-	reachable := svc.checkCameraReachable("rtsp://127.0.0.1:9999")
-	assert.False(t, reachable)
+	result := svc.checkCameraReachable("rtsp://127.0.0.1:9999")
+	assert.Equal(t, probeOffline, result)
 }
 
 func TestDefaultCameraConfig(t *testing.T) {
@@ -233,6 +234,35 @@ func TestNewCameraService_NoDBURL(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	_, err := NewCameraService(&CameraConfig{DBURL: ""}, logger)
 	assert.ErrorContains(t, err, "database URL is required")
+}
+
+func TestProbeTCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+	assert.True(t, probeTCP(ln.Addr().String(), time.Second))
+	assert.False(t, probeTCP("127.0.0.1:19999", 100*time.Millisecond))
+}
+
+func TestProbeRTSP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			conn.Write([]byte("RTSP/1.0 200 OK\r\n"))
+			conn.Close()
+		}
+	}()
+	url := fmt.Sprintf("rtsp://%s/stream", ln.Addr().String())
+	assert.True(t, probeRTSP(url, time.Second))
 }
 
 func TestValidateCamera(t *testing.T) {

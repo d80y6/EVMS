@@ -62,6 +62,8 @@ type Camera struct {
 	Config           string    `db:"config"`
 	CreatedAt        time.Time  `db:"created_at"`
 	DeletedAt        *time.Time `db:"deleted_at"`
+	LastSeenOnline   *time.Time `db:"last_seen_online"`
+	LastStatusChange *time.Time `db:"last_status_change"`
 }
 
 // Site represents a site entity in the database
@@ -260,7 +262,7 @@ func (s *CameraService) Start(ctx context.Context) error {
 	return nil
 }
 
-const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '{}'::jsonb) AS onvif_data, c.onvif_username, c.onvif_password, COALESCE(c.config, '{}'::jsonb) AS config, c.created_at, c.deleted_at"
+const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '{}'::jsonb) AS onvif_data, c.onvif_username, c.onvif_password, COALESCE(c.config, '{}'::jsonb) AS config, c.last_seen_online, c.last_status_change, c.created_at, c.deleted_at"
 
 func (s *CameraService) tenantFilter(ctx context.Context) (string, string) {
 	tenantID := common.TenantFromContext(ctx)
@@ -774,40 +776,40 @@ func (s *CameraService) mapCameraToProto(c Camera) *damv1.Camera {
 	}
 }
 
-func (s *CameraService) checkCameraReachable(connURL string) bool {
-	host := strings.TrimSpace(connURL)
-	port := "554"
-	if strings.HasPrefix(host, "rtsp://") {
-		host = strings.TrimPrefix(host, "rtsp://")
-		if idx := strings.Index(host, "@"); idx != -1 {
-			host = host[idx+1:]
-		}
-		if idx := strings.Index(host, ":"); idx != -1 {
-			port = host[idx+1:]
-			host = host[:idx]
-		}
+func (s *CameraService) checkCameraReachable(connectionURL string) healthProbeResult {
+	if connectionURL == "" {
+		return probeOffline
 	}
-	if net.ParseIP(host) == nil {
-		host = connURL
-	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	u, err := url.Parse(connectionURL)
 	if err != nil {
-		conn, err = net.DialTimeout("tcp", net.JoinHostPort(host, "80"), 3*time.Second)
-		if err != nil {
-			return false
-		}
-		conn.Close()
-		return true
+		return probeOffline
 	}
-	conn.Close()
-	return true
+	host := u.Host
+	if host == "" {
+		return probeOffline
+	}
+
+	cfg := defaultHealthConfig()
+	tcpOK := probeTCP(host, cfg.tcpTimeout)
+	if !tcpOK {
+		return probeOffline
+	}
+
+	rtspOK := probeRTSP(connectionURL, cfg.rtspTimeout)
+	onvifOK := probeONVIF(host, 8000, cfg.onvifTimeout)
+
+	if rtspOK || onvifOK {
+		return probeOnline
+	}
+	return probeDegraded
 }
 
 func (s *CameraService) startHealthCheck(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := getEnvDuration("HEALTH_CHECK_INTERVAL", 30*time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	s.logger.Info("Starting camera health check loop (every 30s)")
+	s.logger.Info("Starting camera health check loop", "interval", interval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -827,19 +829,31 @@ func (s *CameraService) runHealthCheck() {
 		return
 	}
 
+	now := time.Now()
 	for _, c := range cameras {
-		online := s.checkCameraReachable(c.ConnectionURL)
-		newStatus := "online"
-		if !online {
+		result := s.checkCameraReachable(c.ConnectionURL)
+		var newStatus string
+		switch result {
+		case probeOnline:
+			newStatus = "online"
+		case probeDegraded:
+			newStatus = "degraded"
+		default:
 			newStatus = "offline"
 		}
+
 		if c.Status != newStatus {
-			_, err := s.db.Exec("UPDATE cameras SET status = $1, updated_at = NOW() WHERE id = $2", newStatus, c.ID)
+			_, err := s.db.Exec(
+				"UPDATE cameras SET status = $1, last_status_change = $2, last_seen_online = CASE WHEN $1 = 'online' THEN $2 ELSE last_seen_online END, updated_at = NOW() WHERE id = $3",
+				newStatus, now, c.ID)
 			if err != nil {
 				s.logger.Error("Health check: failed to update camera status", "id", c.ID, "status", newStatus, "error", err)
 			} else {
-				s.logger.Info("Health check: camera status changed", "id", c.ID, "name", c.Name, "from", c.Status, "to", newStatus)
+				s.logger.Info("Health check: camera status changed",
+					"id", c.ID, "name", c.Name, "from", c.Status, "to", newStatus)
 			}
+		} else if result == probeOnline && c.LastSeenOnline == nil {
+			s.db.Exec("UPDATE cameras SET last_seen_online = $1 WHERE id = $2", now, c.ID)
 		}
 	}
 }
