@@ -415,24 +415,32 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 		_ = existing
 	}
 
-	createReq := &damv1.CreateCameraRequest{
-		SiteId:           req.SiteId,
-		Name:             req.Name,
-		Description:      req.Description,
-		ConnectionUrl:    req.ConnectionUrl,
-		SubstreamUrl:     req.SubstreamUrl,
-		PtzProtocol:      req.PtzProtocol,
-		RetentionDays:    req.RetentionDays,
-		PrerecordSeconds: req.PrerecordSeconds,
-		OnvifUsername:    req.OnvifUsername,
-		OnvifPassword:    req.OnvifPassword,
+	if req.Name != "" && len(req.Name) > 255 {
+		return nil, status.Errorf(codes.InvalidArgument, "name must be 255 characters or fewer")
 	}
-	if err := validateCamera(createReq); err != nil {
-		s.logger.Warn("Camera validation failed", "error", err)
-		st, _ := status.New(codes.InvalidArgument, "validation failed").WithDetails(
-			&errdetails.BadRequest_FieldViolation{Field: "camera", Description: err.Error()},
-		)
-		return nil, st.Err()
+	if req.ConnectionUrl != "" {
+		u, err := url.Parse(req.ConnectionUrl)
+		if err != nil || (u.Scheme != "rtsp" && u.Scheme != "http" && u.Scheme != "https") {
+			return nil, status.Errorf(codes.InvalidArgument, "connection_url must be a valid rtsp://, http://, or https:// URL")
+		}
+	}
+	if req.SubstreamUrl != "" {
+		u, err := url.Parse(req.SubstreamUrl)
+		if err != nil || (u.Scheme != "rtsp" && u.Scheme != "http" && u.Scheme != "https") {
+			return nil, status.Errorf(codes.InvalidArgument, "substream_url must be a valid rtsp://, http://, or https:// URL")
+		}
+	}
+	if req.PtzProtocol != "" && !validPTZProtocols[req.PtzProtocol] {
+		return nil, status.Errorf(codes.InvalidArgument, "ptz_protocol must be one of: NONE, onvif, vapix, hikvision")
+	}
+	if req.RetentionDays < 0 || req.RetentionDays > 3650 {
+		return nil, status.Errorf(codes.InvalidArgument, "retention_days must be between 0 and 3650")
+	}
+	if req.PrerecordSeconds < 0 || req.PrerecordSeconds > 30 {
+		return nil, status.Errorf(codes.InvalidArgument, "prerecord_seconds must be between 0 and 30")
+	}
+	if (req.OnvifUsername != "") != (req.OnvifPassword != "") {
+		return nil, status.Errorf(codes.InvalidArgument, "both username and password are required when using ONVIF authentication")
 	}
 
 	prerecordSeconds := req.PrerecordSeconds
