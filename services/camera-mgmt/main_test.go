@@ -214,13 +214,13 @@ func TestTenantServerInterceptor(t *testing.T) {
 func TestShutdown_NilServer(t *testing.T) {
 	svc := &CameraService{}
 	err := svc.Shutdown(context.Background())
-	assert.Error(t, err) // db.Close fails when db is nil
+	assert.NoError(t, err)
 }
 
 func TestShutdown_NilMembers(t *testing.T) {
 	svc := &CameraService{}
 	err := svc.Shutdown(context.Background())
-	assert.Error(t, err)
+	assert.NoError(t, err)
 }
 
 func TestStart_NilConfig(t *testing.T) {

@@ -80,6 +80,8 @@ message UpdateCameraRequest {
 
 message DeleteCameraRequest {
   string id = 1;
+  bool hard = 2;
+  bool force = 3;
 }
 
 message DeleteCameraResponse {

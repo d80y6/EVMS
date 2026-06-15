@@ -73,7 +73,9 @@ type UpdateCameraRequest struct {
 }
 
 type DeleteCameraRequest struct {
-	Id string
+	Id    string
+	Hard  bool
+	Force bool
 }
 
 type DeleteCameraResponse struct {

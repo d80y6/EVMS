@@ -60,7 +60,8 @@ type Camera struct {
 	OnvifUsername    *string   `db:"onvif_username"`
 	OnvifPassword    *string   `db:"onvif_password"`
 	Config           string    `db:"config"`
-	CreatedAt        time.Time `db:"created_at"`
+	CreatedAt        time.Time  `db:"created_at"`
+	DeletedAt        *time.Time `db:"deleted_at"`
 }
 
 // Site represents a site entity in the database
@@ -239,10 +240,28 @@ func (s *CameraService) Start() error {
 		}
 	}()
 
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, err := s.db.Exec("DELETE FROM recordings WHERE camera_id IN (SELECT id FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days')")
+				if err != nil {
+					s.logger.Error("Failed to cleanup orphaned recordings", "error", err)
+				}
+				_, err = s.db.Exec("DELETE FROM cameras WHERE deleted_at < NOW() - INTERVAL '30 days'")
+				if err != nil {
+					s.logger.Error("Failed to cleanup soft-deleted cameras", "error", err)
+				}
+			}
+		}
+	}()
+
 	return nil
 }
 
-const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '{}'::jsonb) AS onvif_data, c.onvif_username, c.onvif_password, COALESCE(c.config, '{}'::jsonb) AS config, c.created_at"
+const camerasSelectCols = "c.id, c.site_id, c.name, c.description, c.connection_url, c.substream_url, c.status, c.ptz_protocol, c.retention_days, COALESCE(c.prerecord_seconds, 0) AS prerecord_seconds, COALESCE(c.onvif_data, '{}'::jsonb) AS onvif_data, c.onvif_username, c.onvif_password, COALESCE(c.config, '{}'::jsonb) AS config, c.created_at, c.deleted_at"
 
 func (s *CameraService) tenantFilter(ctx context.Context) (string, string) {
 	tenantID := common.TenantFromContext(ctx)
@@ -257,11 +276,11 @@ func (s *CameraService) cameraByIDWithTenant(ctx context.Context, id, tenantID s
 	var err error
 	if tenantID != "" {
 		err = s.db.GetContext(ctx, &c,
-			"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.id = $1",
+			"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.id = $1 AND c.deleted_at IS NULL",
 			id, tenantID)
 	} else {
 		err = s.db.GetContext(ctx, &c,
-			"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.id = $1",
+			"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.id = $1 AND c.deleted_at IS NULL",
 			id)
 	}
 	if err != nil {
@@ -280,21 +299,21 @@ func (s *CameraService) ListCameras(ctx context.Context, req *damv1.ListCamerasR
 	if req.SiteId != "" {
 		if tenantID != "" {
 			err = s.db.SelectContext(ctx, &cameras,
-				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.site_id = $1",
+				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $2 WHERE c.site_id = $1 AND c.deleted_at IS NULL",
 				req.SiteId, tenantID)
 		} else {
 			err = s.db.SelectContext(ctx, &cameras,
-				"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.site_id = $1",
+				"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.site_id = $1 AND c.deleted_at IS NULL",
 				req.SiteId)
 		}
 	} else {
 		if tenantID != "" {
 			err = s.db.SelectContext(ctx, &cameras,
-				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $1",
+				"SELECT "+camerasSelectCols+" FROM cameras c JOIN sites s ON c.site_id = s.id AND s.tenant_id = $1 WHERE c.deleted_at IS NULL",
 				tenantID)
 		} else {
 			err = s.db.SelectContext(ctx, &cameras,
-				"SELECT "+camerasSelectCols+" FROM cameras c")
+				"SELECT "+camerasSelectCols+" FROM cameras c WHERE c.deleted_at IS NULL")
 		}
 	}
 
@@ -434,7 +453,6 @@ func (s *CameraService) UpdateCamera(ctx context.Context, req *damv1.UpdateCamer
 	return s.GetCamera(ctx, &damv1.GetCameraRequest{Id: req.Id})
 }
 
-// DeleteCamera removes a camera record
 func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCameraRequest) (*damv1.DeleteCameraResponse, error) {
 	tenantID := common.TenantFromContext(ctx)
 	if tenantID != "" {
@@ -445,11 +463,27 @@ func (s *CameraService) DeleteCamera(ctx context.Context, req *damv1.DeleteCamer
 		}
 		_ = existing
 	}
-	_, err := s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1", req.Id)
-	if err != nil {
-		s.logger.Error("Failed to delete camera", "error", err, "id", req.Id)
-		return nil, status.Errorf(codes.Internal, "failed to delete camera: %v", err)
+
+	if req.Hard {
+		var recordingCount int
+		err := s.db.GetContext(ctx, &recordingCount, "SELECT COUNT(*) FROM recordings WHERE camera_id = $1", req.Id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to check recordings: %v", err)
+		}
+		if recordingCount > 1000 && !req.Force {
+			return nil, status.Errorf(codes.FailedPrecondition, "camera has %d recordings; use force=true to delete", recordingCount)
+		}
+		_, err = s.db.ExecContext(ctx, "DELETE FROM cameras WHERE id = $1 AND deleted_at IS NOT NULL", req.Id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to hard delete camera: %v", err)
+		}
+	} else {
+		_, err := s.db.ExecContext(ctx, "UPDATE cameras SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", req.Id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to delete camera: %v", err)
+		}
 	}
+
 	return &damv1.DeleteCameraResponse{Success: true}, nil
 }
 
@@ -571,6 +605,16 @@ func (s *CameraService) UpdateSite(ctx context.Context, req *damv1.UpdateSiteReq
 // DeleteSite removes a site record (tenant-scoped)
 func (s *CameraService) DeleteSite(ctx context.Context, req *damv1.DeleteSiteRequest) (*damv1.DeleteSiteResponse, error) {
 	tenantID := common.TenantFromContext(ctx)
+
+	var cameraCount int
+	if err := s.db.GetContext(ctx, &cameraCount,
+		"SELECT COUNT(*) FROM cameras WHERE site_id = $1 AND deleted_at IS NULL", req.Id); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to check cameras: %v", err)
+	}
+	if cameraCount > 0 {
+		return nil, status.Errorf(codes.FailedPrecondition, "site has %d camera(s); remove them first", cameraCount)
+	}
+
 	var err error
 	if tenantID != "" {
 		_, err = s.db.ExecContext(ctx, "DELETE FROM sites WHERE id = $1 AND tenant_id = $2", req.Id, tenantID)
@@ -722,23 +766,19 @@ func (s *CameraService) mapCameraToProto(c Camera) *damv1.Camera {
 
 func (s *CameraService) checkCameraReachable(connURL string) bool {
 	host := strings.TrimSpace(connURL)
+	port := "554"
 	if strings.HasPrefix(host, "rtsp://") {
 		host = strings.TrimPrefix(host, "rtsp://")
 		if idx := strings.Index(host, "@"); idx != -1 {
 			host = host[idx+1:]
 		}
 		if idx := strings.Index(host, ":"); idx != -1 {
+			port = host[idx+1:]
 			host = host[:idx]
 		}
 	}
 	if net.ParseIP(host) == nil {
 		host = connURL
-	}
-	port := "554"
-	if strings.Contains(host, ":") {
-		parts := strings.SplitN(host, ":", 2)
-		host = parts[0]
-		port = parts[1]
 	}
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
@@ -806,8 +846,10 @@ func (s *CameraService) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("failed to close database: %w", err)
+	if s.db != nil {
+		if err := s.db.Close(); err != nil {
+			return fmt.Errorf("failed to close database: %w", err)
+		}
 	}
 
 	return nil
